@@ -192,6 +192,25 @@ function applyBaseShape(node) {
         if (w.name === "source_image_file") w.label = "source image";
         expandPromptWidget(w);
     }
+    
+    // Hook instance computeSize to override any ComfyUI instance-level patching
+    if (!node.__eventHorizonInstanceComputePatched) {
+        const originalInstanceComputeSize = node.computeSize;
+        node.computeSize = function(out) {
+            let size = originalInstanceComputeSize ? originalInstanceComputeSize.apply(this, arguments) : 
+                       (Object.getPrototypeOf(this).computeSize ? Object.getPrototypeOf(this).computeSize.apply(this, arguments) : [UI.minWidth, UI.minHeight]);
+            
+            // Always reserve +180 for the filmstrip at the bottom
+            if (size && size[1] !== undefined && !this.__eventHorizonComputeSizeReentered) {
+                this.__eventHorizonComputeSizeReentered = true;
+                size[1] += 180;
+                this.__eventHorizonComputeSizeReentered = false;
+            }
+            return size;
+        };
+        node.__eventHorizonInstanceComputePatched = true;
+    }
+
     enforceLayoutStability(node);
 }
 
