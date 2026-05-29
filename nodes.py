@@ -1,3 +1,8 @@
+_EVENT_HORIZON_CASCADE_CACHE = {
+    "latent": None,
+    "frames": None,
+    "segment_index": -1
+}
 import copy
 import csv
 import json
@@ -2609,7 +2614,12 @@ class WanEventWorkflowCore:
                 "execution_mode": (["RUN"], {"default": "RUN"}),
                 "branch_mode": (["AUTO", "SINGLE", "DUAL_HIGH_LOW"], {"default": "AUTO"}),
 
-                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
+                                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
+                "pause_after_cascade_1": ("BOOLEAN", {"default": False}),
+                "pause_after_cascade_2": ("BOOLEAN", {"default": False}),
+                "pause_after_cascade_3": ("BOOLEAN", {"default": False}),
+                "pause_after_cascade_4": ("BOOLEAN", {"default": False}),
+                "resume_frame_index": ("INT", {"default": -1, "min": -1, "max": 4096}),
                 "cascade_mode": (["SOLO_1", "CASCADE_2", "CASCADE_3", "CASCADE_4", "CASCADE_5"], {"default": "SOLO_1"}),
                 "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096}),
 
@@ -2752,7 +2762,8 @@ class WanEventWorkflowCore:
             records.append({"stage": "source_image_upload", "status": "failed", "file": str(source_image_file), "error": str(e)})
             return None
 
-    def _make_ui_previews(self, source_preview, result_preview, save_prefix, records, include_result_preview=False):
+    def _make_ui_previews(self, source_preview, result_preview, save_prefix,
+        records, include_result_preview=False):
         """
         r15: no internal PreviewImage calls.
 
@@ -4304,7 +4315,6 @@ class WanEventWorkflowCore:
         strength_override=None,
         step_index=None,
         window_steps=None,
-        previous_latent=None,
     ):
         """
         Active math control used directly in the sampler transition path.
@@ -4345,21 +4355,12 @@ class WanEventWorkflowCore:
         try:
             if step_index is not None and window_steps is not None and int(window_steps) > 0:
                 progress = float((int(step_index) + 1) / max(1, int(window_steps)))
-                curves = getattr(self, "_event_math_curves", {}) or {}
-                
-                curve_value = 0.0
                 if "high" in branch_lower:
-                    curve_value = float(curves.get("high", 0.0))
+                    # High branch: slightly stronger earlier, softer toward window end.
+                    step_schedule_factor = 1.10 - (0.20 * progress)
                 elif "low" in branch_lower:
-                    curve_value = float(curves.get("low", 0.0))
-                else:
-                    curve_value = float(curves.get(str(branch_name), 0.0))
-                
-                # Curve = 0.0 -> Multiplier is 1.0 constantly
-                # Curve = 1.0 -> Multiplier goes from 0.0 to 2.0
-                # Curve = -1.0 -> Multiplier goes from 2.0 to 0.0
-                step_schedule_factor = 1.0 + curve_value * (progress - 0.5) * 2.0
-                
+                    # Low branch: slightly softer early, stronger toward detail refinement end.
+                    step_schedule_factor = 0.90 + (0.20 * progress)
                 scheduled_strength = scheduled_strength * step_schedule_factor
         except Exception:
             step_schedule_factor = 1.0
@@ -4413,59 +4414,7 @@ class WanEventWorkflowCore:
 
             before_f = before_t.detach().float()
             after_f = after_t.detach().float()
-            
-            step_vector = after_f - before_f
-            if previous_latent is not None:
-                prev_t = self._tensor_from_latent_like(previous_latent)
-                if prev_t is not None and prev_t.shape == before_t.shape:
-                    prev_f = prev_t.detach().float()
-                    prev_step_vector = before_f - prev_f
-                    
-                    # 1. EMA Momentum Logic (Unified Topology)
-                    if not hasattr(self, "_event_momentum_buffers"):
-                        self._event_momentum_buffers = {}
-                        
-                    inertia_mass = getattr(self, "_event_inertia_mass", 0.5)
-                        
-                    if branch_name not in self._event_momentum_buffers:
-                        momentum_t = step_vector
-                    else:
-                        old_momentum = self._event_momentum_buffers[branch_name]
-                        if old_momentum.shape != step_vector.shape:
-                            momentum_t = step_vector
-                        else:
-                            momentum_t = (old_momentum * inertia_mass) + (step_vector * (1.0 - inertia_mass))
-                    
-                    # Store current step for the NEXT iteration BEFORE modifying it
-                    self._event_momentum_buffers[branch_name] = momentum_t
-                    
-                    # SEMANTIC NORMALIZATION (Hardware Equality without Spatial Folding)
-                    # We only fold the Channel dimension (dim=1). The spatial dimensions (T, H, W) are preserved.
-                    # This ensures every individual pixel has its own independent target physics vector length.
-                    target_norm = torch.norm(step_vector, p=2, dim=1, keepdim=True)
-                    momentum_norm = torch.norm(momentum_t, p=2, dim=1, keepdim=True)
-                    momentum_matched = momentum_t * (target_norm / (momentum_norm + 1e-8))
-                    
-                    # Apply dynamic schedule to strength
-                    scheduled_strength = float(base_strength * coupling_multiplier * step_schedule_factor)
-                    strength_runtime = max(0.0, min(2.0, float(scheduled_strength)))
-                    
-                    # Omega = Current Physics Vector - Matched Historical Physics Vector
-                    omega = step_vector - momentum_matched
-                    
-                    # The control merges historical momentum with current omega
-                    controlled_step_vector = momentum_matched + omega * strength_runtime
-                    
-                    # Re-normalize to guarantee EXACT step physics magnitude per-pixel
-                    ctrl_norm = torch.norm(controlled_step_vector, p=2, dim=1, keepdim=True)
-                    controlled_step_vector = controlled_step_vector * (target_norm / (ctrl_norm + 1e-8))
-                    
-                    controlled = before_f + controlled_step_vector
-                else:
-                    controlled = before_f + step_vector
-            else:
-                controlled = before_f + step_vector
-
+            controlled = before_f + (after_f - before_f) * float(strength_runtime)
             controlled = controlled.to(dtype=after_t.dtype, device=after_t.device)
 
             if isinstance(latent_after, dict) and "samples" in latent_after:
@@ -4767,7 +4716,6 @@ class WanEventWorkflowCore:
             return EventSamplerResult(False, latent, None, window, event_records, error="empty sampler window")
 
         current = latent
-        previous_latent_state = None
         try:
             for local_index, step_index in enumerate(range(start, end)):
                 step_add_noise = str(window.add_noise) if local_index == 0 else "disable"
@@ -4810,7 +4758,6 @@ class WanEventWorkflowCore:
                     records,
                     step_index=local_index,
                     window_steps=window_steps,
-                    previous_latent=previous_latent_state,
                 )
                 self._finite_guard(
                     controlled_after,
@@ -4847,7 +4794,6 @@ class WanEventWorkflowCore:
                     },
                 )
 
-                previous_latent_state = current
                 current = controlled_after
 
             event_records.append({
@@ -6314,6 +6260,11 @@ class WanEventWorkflowCore:
         output_folder,
         custom_output_folder,
         report_detail,
+        pause_after_cascade_1=False,
+        pause_after_cascade_2=False,
+        pause_after_cascade_3=False,
+        pause_after_cascade_4=False,
+        resume_frame_index=-1,
         secondary_model=None,
         image=None,
         mask=None,
@@ -6371,10 +6322,9 @@ class WanEventWorkflowCore:
             "alias_count": len(runtime_aliases),
             "aliases": runtime_aliases,
             "compatibility": {
-                "EventHorizonCascade": bool("EventHorizonCascade" in runtime_aliases),
-                "EventHorizonR58InputIntegrityHardening": bool("EventHorizonR58InputIntegrityHardening" in runtime_aliases),
+                "EventHorizon": bool("EventHorizon" in runtime_aliases),
             },
-            "formula": "Multiple external workflow node aliases can resolve to one internal Event Core Body runtime implementation.",
+            "formula": "The public workflow node alias resolves to one internal Event Core Body runtime implementation.",
         })
         input_normalization = getattr(self, "_event_input_normalization", None)
         if isinstance(input_normalization, dict):
@@ -6948,16 +6898,49 @@ class WanEventWorkflowCore:
                 conflict_ids.extend(conf)
 
                 # Event Horizon extension.
-                segment_batches = [generated_frames]
-                current_cascade_image = self._last_frame_image(generated_frames, width, height)
-                if requested_cascade_count > 1:
+                self._pause_flag_triggered = False
+                if resume_frame_index != -1 and _EVENT_HORIZON_CASCADE_CACHE["latent"] is not None:
+                    # Resuming from a pause
+                    generated_latent = _EVENT_HORIZON_CASCADE_CACHE["latent"]
+                    generated_frames = _EVENT_HORIZON_CASCADE_CACHE["frames"]
+                    
+                    # Trim the latent tensor in the temporal dimension T.
+                    # For Wan2.1, T = (frames - 1) // 4 + 1
+                    target_t = max(1, (resume_frame_index - 1) // 4 + 1)
+                    if generated_latent['samples'].shape[2] > target_t:
+                        generated_latent['samples'] = generated_latent['samples'][:, :, :target_t, :, :]
+                    
+                    if generated_frames is not None and generated_frames.shape[0] > resume_frame_index:
+                        generated_frames = generated_frames[:resume_frame_index, :, :, :]
+                        
+                    segment_batches = [generated_frames]
+                    current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                    
+                    start_segment = _EVENT_HORIZON_CASCADE_CACHE["segment_index"] + 1
+                    execution_records.append({"stage": "EventHorizonCascadeResume", "status": "resumed", "resume_frame_index": resume_frame_index, "start_segment": start_segment})
+                else:
+                    segment_batches = [generated_frames]
+                    current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                    start_segment = 2
+
+                # Handle pause at cascade 1
+                if pause_after_cascade_1 and start_segment == 2 and resume_frame_index == -1:
+                    _EVENT_HORIZON_CASCADE_CACHE["latent"] = generated_latent
+                    _EVENT_HORIZON_CASCADE_CACHE["frames"] = generated_frames
+                    _EVENT_HORIZON_CASCADE_CACHE["segment_index"] = 1
+                    execution_records.append({"stage": "EventHorizonCascadePause_1", "status": "paused"})
+                    self._pause_flag_triggered = True
+                    # Skip the cascade loop
+                    requested_cascade_count = 1
+
+                if requested_cascade_count >= start_segment:
                     execution_records.append({
                         "stage": "EventHorizonCascadeBegin",
                         "status": "begin",
                         "cascade_count": requested_cascade_count,
                         "frames_per_cascade": frames,
                     })
-                    for segment_index in range(2, requested_cascade_count + 1):
+                    for segment_index in range(start_segment, requested_cascade_count + 1):
                         next_frames, current_cascade_image, generated_latent = self._run_event_horizon_segment_core(
                             segment_index=segment_index,
                             source_image=current_cascade_image,
@@ -7000,6 +6983,19 @@ class WanEventWorkflowCore:
                         next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
                         self._cascade_boundary_math(segment_batches[-1], next_frames, execution_records, segment_index)
                         segment_batches.append(next_frames)
+                        
+                        pause_flags = {
+                            2: pause_after_cascade_2,
+                            3: pause_after_cascade_3,
+                            4: pause_after_cascade_4
+                        }
+                        if pause_flags.get(segment_index, False):
+                            _EVENT_HORIZON_CASCADE_CACHE["latent"] = generated_latent
+                            _EVENT_HORIZON_CASCADE_CACHE["frames"] = self._concat_frame_batches(segment_batches, execution_records)
+                            _EVENT_HORIZON_CASCADE_CACHE["segment_index"] = segment_index
+                            execution_records.append({"stage": f"EventHorizonCascadePause_{segment_index}", "status": "paused"})
+                            self._pause_flag_triggered = True
+                            break
 
                     generated_frames = self._concat_frame_batches(segment_batches, execution_records)
                     self._frame_motion_math(generated_frames, execution_records, "EventMath_concatenated_frame_motion")
@@ -7043,6 +7039,9 @@ class WanEventWorkflowCore:
                             result_status = "FRAMES"
                 else:
                     result_status = "FRAMES" if generated_frames is not None else "NONE"
+
+                if getattr(self, "_pause_flag_triggered", False):
+                    result_status = "PAUSED"
 
                 video_ui_payload = self._extract_vhs_ui_payload_from_records(execution_records)
 
@@ -7273,7 +7272,12 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
                 "negative_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
                 "temporal_texture_lock": ("BOOLEAN", {"default": True}),
 
-                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
+                                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
+                "pause_after_cascade_1": ("BOOLEAN", {"default": False}),
+                "pause_after_cascade_2": ("BOOLEAN", {"default": False}),
+                "pause_after_cascade_3": ("BOOLEAN", {"default": False}),
+                "pause_after_cascade_4": ("BOOLEAN", {"default": False}),
+                "resume_frame_index": ("INT", {"default": -1, "min": -1, "max": 4096}),
                 "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096}),
                 "width": ("INT", {"default": 416, "min": 16, "max": 8192, "step": 8}),
                 "height": ("INT", {"default": 608, "min": 16, "max": 8192, "step": 8}),
@@ -7293,10 +7297,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
                 # Keep combo UX, but include lowercase legacy tokens so stale workflows do not hard-fail before normalization.
                 "math_control_mode": (["OBSERVE_ONLY", "LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "observe_only", "latent_delta_scale", "deep_step_delta_control"], {"default": "LATENT_DELTA_SCALE"}),
                 "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
-                "high_strength_curve": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05, "round": 0.01}),
                 "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
-                "low_strength_curve": ("FLOAT", {"default": 0.0, "min": -1.0, "max": 1.0, "step": 0.05, "round": 0.01}),
-                "inertia_mass": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05, "round": 0.01}),
 
                 "decode_tile_size": ("INT", {"default": 512, "min": 64, "max": 8192, "step": 8}),
                 # Allow wider transport range; runtime normalization will clamp to safe decode constraints.
@@ -7415,10 +7416,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
         secondary_end_step,
         math_control_mode,
         high_delta_strength,
-        high_strength_curve,
         low_delta_strength,
-        low_strength_curve,
-        inertia_mass,
         decode_tile_size,
         decode_overlap,
         decode_temporal_size,
@@ -7585,10 +7583,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
             casefold=True,
         )
         high_delta_strength_n = clamp_float("high_delta_strength", high_delta_strength, 1.0, 0.0, 2.0, digits=4)
-        high_strength_curve_n = clamp_float("high_strength_curve", high_strength_curve, 0.0, -1.0, 1.0, digits=2)
         low_delta_strength_n = clamp_float("low_delta_strength", low_delta_strength, 1.0, 0.0, 2.0, digits=4)
-        low_strength_curve_n = clamp_float("low_strength_curve", low_strength_curve, 0.0, -1.0, 1.0, digits=2)
-        inertia_mass_n = clamp_float("inertia_mass", inertia_mass, 0.5, 0.0, 1.0, digits=2)
 
         decode_tile_size_n = align_to_step(
             "decode_tile_size",
@@ -7674,10 +7669,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
             "secondary_end_step": secondary_end_n,
             "math_control_mode": math_control_mode_n,
             "high_delta_strength": high_delta_strength_n,
-            "high_strength_curve": high_strength_curve_n,
             "low_delta_strength": low_delta_strength_n,
-            "low_strength_curve": low_strength_curve_n,
-            "inertia_mass": inertia_mass_n,
             "decode_tile_size": decode_tile_size_n,
             "decode_overlap": decode_overlap_n,
             "decode_temporal_size": decode_temporal_size_n,
@@ -7736,10 +7728,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
         secondary_end_step,
         math_control_mode,
         high_delta_strength,
-        high_strength_curve,
         low_delta_strength,
-        low_strength_curve,
-        inertia_mass,
         decode_tile_size,
         decode_overlap,
         decode_temporal_size,
@@ -7753,6 +7742,11 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
         save_prefix,
         sampler_trace_mode,
         sampler_trace_max_steps,
+        pause_after_cascade_1=False,
+        pause_after_cascade_2=False,
+        pause_after_cascade_3=False,
+        pause_after_cascade_4=False,
+        resume_frame_index=-1,
         secondary_model=None,
         image=None,
         mask=None,
@@ -7777,10 +7771,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
             secondary_end_step=secondary_end_step,
             math_control_mode=math_control_mode,
             high_delta_strength=high_delta_strength,
-            high_strength_curve=high_strength_curve,
             low_delta_strength=low_delta_strength,
-            low_strength_curve=low_strength_curve,
-            inertia_mass=inertia_mass,
             decode_tile_size=decode_tile_size,
             decode_overlap=decode_overlap,
             decode_temporal_size=decode_temporal_size,
@@ -7813,10 +7804,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
         secondary_end_step = int(normalized.get("secondary_end_step", 4))
         math_control_mode = str(normalized.get("math_control_mode", "OBSERVE_ONLY"))
         high_delta_strength = float(normalized.get("high_delta_strength", 1.0))
-        high_strength_curve = float(normalized.get("high_strength_curve", 0.0))
         low_delta_strength = float(normalized.get("low_delta_strength", 1.0))
-        low_strength_curve = float(normalized.get("low_strength_curve", 0.0))
-        inertia_mass = float(normalized.get("inertia_mass", 0.5))
         decode_tile_size = int(normalized.get("decode_tile_size", 512))
         decode_overlap = int(normalized.get("decode_overlap", 64))
         decode_temporal_size = int(normalized.get("decode_temporal_size", 32))
@@ -7855,18 +7843,10 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
             "high": float(high_delta_strength),
             "low": float(low_delta_strength),
         }
-        self._event_math_curves = {
-            "high": float(high_strength_curve),
-            "low": float(low_strength_curve),
-        }
-        self._event_inertia_mass = float(inertia_mass)
         self._event_requested_math_controls = {
             "math_control_mode": str(math_control_mode or "OBSERVE_ONLY"),
             "high_delta_strength": float(high_delta_strength),
-            "high_strength_curve": float(high_strength_curve),
             "low_delta_strength": float(low_delta_strength),
-            "low_strength_curve": float(low_strength_curve),
-            "inertia_mass": float(inertia_mass),
             "active_math_sampler_path": "semantic_overlay_native_sampler_when_latent_delta_scale",
             "high_low_strategy_carrier_coupling": True,
             "precision_step": 0.0001,
@@ -7929,6 +7909,11 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
             output_target="COMFY_OUTPUT",
             save_output_image=False,
             save_prefix=save_prefix,
+            pause_after_cascade_1=pause_after_cascade_1,
+            pause_after_cascade_2=pause_after_cascade_2,
+            pause_after_cascade_3=pause_after_cascade_3,
+            pause_after_cascade_4=pause_after_cascade_4,
+            resume_frame_index=resume_frame_index,
             output_folder_mode="DEFAULT",
             output_folder="default",
             custom_output_folder="",
@@ -7940,73 +7925,11 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
 
 
 NODE_CLASS_MAPPINGS = {
-    "EventDebugPing": EventDebugPing,
-    "EventSaveReportToFile": EventSaveReportToFile,
-
-    # Current one-node Event Horizon body.
-    "EventHorizonR59StrategyMathNativeLoop": EventHorizonCascadeSimple,
-    "EventHorizonR58InputIntegrityHardening": EventHorizonCascadeSimple,
-    "EventHorizonR57MotionMathMetricsDiff": EventHorizonCascadeSimple,
-    "EventHorizonR56SamplerStepTraceShadow": EventHorizonCascadeSimple,
-    "EventHorizonR55PublicAlphaPromptLock": EventHorizonCascadeSimple,
-    "EventHorizonR54SmartBranchBarrierBody": EventHorizonCascadeSimple,
-    "EventHorizonR53RuntimeMonitorBody": EventHorizonCascadeSimple,
-    "EventHorizonR49LiveRuntimeBody": EventHorizonCascadeSimple,
-    "EventHorizonR49LiveRouteMemory": EventHorizonCascadeSimple,
-    "EventHorizonR48CoreGateOrderHotfix": EventHorizonCascadeSimple,
-    "EventHorizonR47WidgetStabilityHotfix": EventHorizonCascadeSimple,
-    "EventHorizonR46CoreBodyCompletionGate": EventHorizonCascadeSimple,
-    "EventHorizonR45InternalConsistencyAudit": EventHorizonCascadeSimple,
-    "EventHorizonR44OneNodeEventCoreBody": EventHorizonCascadeSimple,
+    # Public clean release: one visible ComfyUI node.
+    # Development/debug classes remain internal implementation details.
     "EventHorizon": EventHorizonCascadeSimple,
-
-    # Backward-compatible aliases for old workflows.
-    "EventHorizonR43SamplerWindowHotfix": EventHorizonCascadeSimple,
-    "EventHorizonR42WanSeedMathHotfix": EventHorizonCascadeSimple,
-    "EventHorizonR41FullPipelineMath": EventHorizonCascadeSimple,
-    "EventHorizonR40UniversalStageMath": EventHorizonCascadeSimple,
-    "EventHorizonR39FineDeltaRoundFix": EventHorizonCascadeSimple,
-    "EventHorizonR38FineDeltaControl": EventHorizonCascadeSimple,
-    "EventHorizonR37DeltaControl": EventHorizonCascadeSimple,
-    "EventHorizonR36ReportSafeMath": EventHorizonCascadeSimple,
-    "EventHorizonR35Math": EventHorizonCascadeSimple,
-    "EventHorizonCascade": EventHorizonCascadeSimple,
-    "EventHorizonAdvanced": WanEventWorkflowCore,
-    "EventHorizonCascadeAdvanced": WanEventWorkflowCore,
-    "WanEventWorkflowCore": WanEventWorkflowCore,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "EventDebugPing": "Event Debug Ping",
-    "EventSaveReportToFile": "Event Save Report To File",
-
-    "EventHorizonR59StrategyMathNativeLoop": "Event Horizon R59 Strategy Math Native Loop",
-    "EventHorizonR58InputIntegrityHardening": "Event Horizon R58 Input Integrity Hardening",
-    "EventHorizonR57MotionMathMetricsDiff": "Event Horizon R57 Motion Math Metrics Diff",
-    "EventHorizonR56SamplerStepTraceShadow": "Event Horizon R56 Sampler Step Trace Shadow",
-    "EventHorizonR55PublicAlphaPromptLock": "Event Horizon R55 Public Alpha Prompt Lock",
-    "EventHorizonR54SmartBranchBarrierBody": "Event Horizon Legacy R54",
-    "EventHorizonR53RuntimeMonitorBody": "Event Horizon Legacy R53",
-    "EventHorizonR49LiveRuntimeBody": "Event Horizon Legacy R49",
-    "EventHorizonR49LiveRouteMemory": "Event Horizon Legacy R49",
-    "EventHorizonR48CoreGateOrderHotfix": "Event Horizon Legacy R48",
-    "EventHorizonR47WidgetStabilityHotfix": "Event Horizon Legacy R47",
-    "EventHorizonR46CoreBodyCompletionGate": "Event Horizon Legacy R46",
-    "EventHorizonR45InternalConsistencyAudit": "Event Horizon Legacy R45",
-    "EventHorizonR44OneNodeEventCoreBody": "Event Horizon Legacy R44",
     "EventHorizon": "Event Horizon",
-
-    "EventHorizonR43SamplerWindowHotfix": "Event Horizon Legacy R43",
-    "EventHorizonR42WanSeedMathHotfix": "Event Horizon Legacy R42",
-    "EventHorizonR41FullPipelineMath": "Event Horizon Legacy R41",
-    "EventHorizonR40UniversalStageMath": "Event Horizon Legacy R40",
-    "EventHorizonR39FineDeltaRoundFix": "Event Horizon Legacy R39",
-    "EventHorizonR38FineDeltaControl": "Event Horizon Legacy R38",
-    "EventHorizonR37DeltaControl": "Event Horizon Legacy R37",
-    "EventHorizonR36ReportSafeMath": "Event Horizon Legacy R36",
-    "EventHorizonR35Math": "Event Horizon Legacy R35",
-    "EventHorizonCascade": "Event Horizon Legacy Alias",
-    "EventHorizonAdvanced": "Event Horizon Advanced / Legacy",
-    "EventHorizonCascadeAdvanced": "Event Horizon Advanced / Legacy",
-    "WanEventWorkflowCore": "Event Horizon Legacy",
 }

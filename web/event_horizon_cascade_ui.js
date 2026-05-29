@@ -39,7 +39,7 @@ const GROUPS = [
         id: "CASCADE",
         color: "#0891b2",
         bg: "rgba(8, 145, 178, 0.12)",
-        names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed"],
+        names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4", "resume_frame_index"],
     },
     {
         id: "SAMPLING",
