@@ -406,11 +406,60 @@ app.registerExtension({
                 let continueBtn = this.widgets?.find(w => w.name === "continue_cascade_btn");
                 if (!continueBtn) {
                     this.addWidget("button", "▶ Resume Cascade / Continue", "continue_cascade_btn", () => {
+                        const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
+                        if (resumeWidget && resumeWidget.value === -1) {
+                            alert("Please click one of the frames to select the resume point before continuing!");
+                            return;
+                        }
                         app.queuePrompt(0);
                     });
                 }
             }
             return r;
+        };
+
+        const originalOnMouseDown = nodeType.prototype.onMouseDown;
+        nodeType.prototype.onMouseDown = function(e, local_pos, canvas) {
+            if (this.imgs && this.imgs.length === 3) {
+                const nodeWidth = this.size[0];
+                const filmstripHeight = 160; 
+                const startY = Math.max(this.size[1] - filmstripHeight - 10, 10);
+                
+                if (local_pos[1] >= startY && local_pos[1] <= startY + filmstripHeight) {
+                    let x = 15;
+                    let clickedIndex = -1;
+                    for (let i = 0; i < this.imgs.length; i++) {
+                        let img = this.imgs[i];
+                        if (img.complete && img.naturalWidth) {
+                            const aspect = img.naturalWidth / img.naturalHeight;
+                            const drawWidth = (filmstripHeight - 10) * aspect;
+                            if (local_pos[0] >= x && local_pos[0] <= x + drawWidth) {
+                                clickedIndex = i;
+                                break;
+                            }
+                            x += drawWidth + 10;
+                        }
+                    }
+                    
+                    if (clickedIndex !== -1) {
+                        this.__eventHorizonSelectedImageIndex = clickedIndex;
+                        const framesWidget = this.widgets?.find(w => w.name === "frames_per_cascade");
+                        const totalFrames = framesWidget ? (framesWidget.value || 49) : 49;
+                        const frameIdx = totalFrames - 2 + clickedIndex;
+                        
+                        const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
+                        if (resumeWidget) {
+                            resumeWidget.value = frameIdx;
+                        }
+                        if (this.setDirtyCanvas) this.setDirtyCanvas(true, true);
+                        return true;
+                    }
+                }
+            }
+            if (originalOnMouseDown) {
+                return originalOnMouseDown.apply(this, arguments);
+            }
+            return false;
         };
 
         const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
@@ -435,11 +484,29 @@ app.registerExtension({
                 ctx.fillRect(10, y, nodeWidth - 20, filmstripHeight);
                 
                 let x = 15;
-                for (let img of this.imgs) {
+                for (let i = 0; i < this.imgs.length; i++) {
+                    let img = this.imgs[i];
                     if (img.complete && img.naturalWidth) {
                         const aspect = img.naturalWidth / img.naturalHeight;
                         const drawWidth = (filmstripHeight - 10) * aspect;
+                        
+                        if (this.imgs.length === 3 && this.__eventHorizonSelectedImageIndex === i) {
+                            ctx.strokeStyle = "#00ff00";
+                            ctx.lineWidth = 4;
+                            ctx.strokeRect(x - 2, y + 5 - 2, drawWidth + 4, filmstripHeight - 10 + 4);
+                        }
+                        
                         ctx.drawImage(img, x, y + 5, drawWidth, filmstripHeight - 10);
+                        
+                        if (this.imgs.length === 3) {
+                            const framesWidget = this.widgets?.find(w => w.name === "frames_per_cascade");
+                            const totalFrames = framesWidget ? (framesWidget.value || 49) : 49;
+                            const frameIdx = totalFrames - 2 + i;
+                            ctx.fillStyle = "#00ff00";
+                            ctx.font = "bold 14px Arial";
+                            ctx.fillText("Frame " + frameIdx, x + 5, y + 25);
+                        }
+
                         x += drawWidth + 10;
                         if (x > nodeWidth) break;
                     }
