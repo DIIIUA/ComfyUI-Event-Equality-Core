@@ -155,7 +155,13 @@ function enforceLayoutStability(node) {
         maxBottom = Math.max(maxBottom, y + h);
     }
 
-    const requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
+    let requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
+    
+    // Allocate space for the filmstrip if images exist
+    if (node.imgs && node.imgs.length > 0) {
+        requiredHeight += 180;
+    }
+
     if (!node.size) node.size = [UI.minWidth, requiredHeight];
     if (node.size[0] < UI.minWidth) node.size[0] = UI.minWidth;
     if (node.size[1] < requiredHeight) node.size[1] = requiredHeight;
@@ -368,7 +374,8 @@ app.registerExtension({
                 ctx.save();
                 const nodeWidth = this.size[0];
                 const filmstripHeight = 160; 
-                const y = this.size[1] - filmstripHeight - 10;
+                // Draw it at the very bottom of the allocated requiredHeight
+                const y = Math.max(this.size[1] - filmstripHeight - 10, 10);
                 
                 ctx.fillStyle = "#111";
                 ctx.fillRect(10, y, nodeWidth - 20, filmstripHeight);
