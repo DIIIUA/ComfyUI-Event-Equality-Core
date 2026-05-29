@@ -2780,6 +2780,40 @@ class WanEventWorkflowCore:
         })
         return []
 
+    def _save_pause_frames_to_temp(self, frames):
+        import folder_paths
+        import os
+        import random
+        from PIL import Image
+        import numpy as np
+
+        ui_images = []
+        try:
+            temp_dir = folder_paths.get_temp_directory()
+            
+            # Select up to 3 last frames
+            total_f = frames.shape[0]
+            start_f = max(0, total_f - 3)
+            ui_frames = frames[start_f:total_f]
+            
+            prefix = "event_horizon_pause_" + str(random.randint(10000, 99999))
+            
+            for i in range(ui_frames.shape[0]):
+                frame = ui_frames[i]
+                img = 255. * frame.cpu().numpy()
+                img = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
+                filename = f"{prefix}_{start_f + i + 1}.png"
+                img.save(os.path.join(temp_dir, filename), compress_level=4)
+                ui_images.append({
+                    "filename": filename,
+                    "subfolder": "",
+                    "type": "temp"
+                })
+        except Exception as e:
+            print("[EventHorizon] Error saving pause frames:", e)
+            
+        return ui_images
+
 
     def _import_comfy_nodes(self):
         return importlib.import_module("nodes")
@@ -7040,8 +7074,11 @@ class WanEventWorkflowCore:
                 else:
                     result_status = "FRAMES" if generated_frames is not None else "NONE"
 
+                ui_images = []
                 if getattr(self, "_pause_flag_triggered", False):
                     result_status = "PAUSED"
+                    if generated_frames is not None:
+                        ui_images = self._save_pause_frames_to_temp(generated_frames)
 
                 video_ui_payload = self._extract_vhs_ui_payload_from_records(execution_records)
 
@@ -7223,7 +7260,8 @@ class WanEventWorkflowCore:
         else:
             result_preview = self._placeholder_image(width, height)
 
-        ui_images = self._make_ui_previews(source_preview, result_preview, save_prefix, execution_records, include_result_preview=enable_continuation_outputs)
+        if not ui_images:
+            ui_images = self._make_ui_previews(source_preview, result_preview, save_prefix, execution_records, include_result_preview=enable_continuation_outputs)
         packet["metadata"]["ui_preview"] = {
             "source_preview": "source image or upload",
             "result_preview": "disabled; no PreviewImage calls in terminal node",
@@ -7251,6 +7289,11 @@ class WanEventWorkflowCore:
             report,
         )
 
+        if not video_ui_payload:
+            video_ui_payload = {}
+        if ui_images:
+            video_ui_payload["images"] = ui_images
+            
         if video_ui_payload:
             return {"ui": video_ui_payload, "result": result_tuple}
 

@@ -386,12 +386,20 @@ app.registerExtension({
 
         const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
         nodeType.prototype.onDrawBackground = function(ctx) {
+            // Temporarily hide this.imgs so ComfyUI doesn't draw the huge image
+            let imgsBackup = this.imgs;
+            this.imgs = null;
+
+            if (originalOnDrawBackground) {
+                originalOnDrawBackground.apply(this, arguments);
+            }
+
+            this.imgs = imgsBackup;
+
             if (this.imgs && this.imgs.length > 0) {
-                // Prevent infinite vertical expansion by drawing our own constrained filmstrip
                 ctx.save();
                 const nodeWidth = this.size[0];
                 const filmstripHeight = 160; 
-                // Draw it at the very bottom of the allocated requiredHeight
                 const y = Math.max(this.size[1] - filmstripHeight - 10, 10);
                 
                 ctx.fillStyle = "#111";
@@ -408,12 +416,6 @@ app.registerExtension({
                     }
                 }
                 ctx.restore();
-                
-                // Do not call original if we are drawing it ourselves to prevent huge node!
-                return;
-            }
-            if (originalOnDrawBackground) {
-                originalOnDrawBackground.apply(this, arguments);
             }
         };
 
