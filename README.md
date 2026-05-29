@@ -8,6 +8,11 @@ This release is experimental. It is meant for users and developers who want a co
 
 For changes since the previous public build, see `CHANGELOG.md`.
 
+## Scientific Foundation & Formalism
+
+The underlying mathematical logic of this node, specifically the `dim=1` Semantic Unfolding and inertia preservation, is based on the **Recursive Strategy Scale Formalism**.
+This logic is part of a published scientific work by DIIIUA. A copy of the formal paper ("recursive_strategy_scale_formalism_v0_3_en.pdf") is available on FigShare under a CC BY 4.0 license, which protects the academic and scientific priority of the architecture. Please see the `LICENSE` file for strict rules against commercializing this specific codebase.
+
 ## What Is Included
 
 - One visible ComfyUI node: `Event Horizon`
