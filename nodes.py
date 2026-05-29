@@ -1,8 +1,3 @@
-_EVENT_HORIZON_CASCADE_CACHE = {
-    "latent": None,
-    "frames": None,
-    "segment_index": -1
-}
 import copy
 import csv
 import json
@@ -2614,12 +2609,7 @@ class WanEventWorkflowCore:
                 "execution_mode": (["RUN"], {"default": "RUN"}),
                 "branch_mode": (["AUTO", "SINGLE", "DUAL_HIGH_LOW"], {"default": "AUTO"}),
 
-                                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
-                "pause_after_cascade_1": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_2": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_3": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_4": ("BOOLEAN", {"default": False}),
-                "resume_frame_index": ("INT", {"default": -1, "min": -1, "max": 4096}),
+                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
                 "cascade_mode": (["SOLO_1", "CASCADE_2", "CASCADE_3", "CASCADE_4", "CASCADE_5"], {"default": "SOLO_1"}),
                 "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096}),
 
@@ -2762,8 +2752,7 @@ class WanEventWorkflowCore:
             records.append({"stage": "source_image_upload", "status": "failed", "file": str(source_image_file), "error": str(e)})
             return None
 
-    def _make_ui_previews(self, source_preview, result_preview, save_prefix,
-        records, include_result_preview=False):
+    def _make_ui_previews(self, source_preview, result_preview, save_prefix, records, include_result_preview=False):
         """
         r15: no internal PreviewImage calls.
 
@@ -2779,40 +2768,6 @@ class WanEventWorkflowCore:
             "reason": "avoid PNG dumps and avoid making video workflow behave like image output",
         })
         return []
-
-    def _save_pause_frames_to_temp(self, frames):
-        import folder_paths
-        import os
-        import random
-        from PIL import Image
-        import numpy as np
-
-        ui_images = []
-        try:
-            temp_dir = folder_paths.get_temp_directory()
-            
-            # Select up to 3 last frames
-            total_f = frames.shape[0]
-            start_f = max(0, total_f - 3)
-            ui_frames = frames[start_f:total_f]
-            
-            prefix = "event_horizon_pause_" + str(random.randint(10000, 99999))
-            
-            for i in range(ui_frames.shape[0]):
-                frame = ui_frames[i]
-                img = 255. * frame.cpu().numpy()
-                img = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
-                filename = f"{prefix}_{start_f + i + 1}.png"
-                img.save(os.path.join(temp_dir, filename), compress_level=4)
-                ui_images.append({
-                    "filename": filename,
-                    "subfolder": "",
-                    "type": "temp"
-                })
-        except Exception as e:
-            print("[EventHorizon] Error saving pause frames:", e)
-            
-        return ui_images
 
 
     def _import_comfy_nodes(self):
@@ -6294,11 +6249,6 @@ class WanEventWorkflowCore:
         output_folder,
         custom_output_folder,
         report_detail,
-        pause_after_cascade_1=False,
-        pause_after_cascade_2=False,
-        pause_after_cascade_3=False,
-        pause_after_cascade_4=False,
-        resume_frame_index=-1,
         secondary_model=None,
         image=None,
         mask=None,
@@ -6932,49 +6882,16 @@ class WanEventWorkflowCore:
                 conflict_ids.extend(conf)
 
                 # Event Horizon extension.
-                self._pause_flag_triggered = False
-                if resume_frame_index != -1 and _EVENT_HORIZON_CASCADE_CACHE["latent"] is not None:
-                    # Resuming from a pause
-                    generated_latent = _EVENT_HORIZON_CASCADE_CACHE["latent"]
-                    generated_frames = _EVENT_HORIZON_CASCADE_CACHE["frames"]
-                    
-                    # Trim the latent tensor in the temporal dimension T.
-                    # For Wan2.1, T = (frames - 1) // 4 + 1
-                    target_t = max(1, (resume_frame_index - 1) // 4 + 1)
-                    if generated_latent['samples'].shape[2] > target_t:
-                        generated_latent['samples'] = generated_latent['samples'][:, :, :target_t, :, :]
-                    
-                    if generated_frames is not None and generated_frames.shape[0] > resume_frame_index:
-                        generated_frames = generated_frames[:resume_frame_index, :, :, :]
-                        
-                    segment_batches = [generated_frames]
-                    current_cascade_image = self._last_frame_image(generated_frames, width, height)
-                    
-                    start_segment = _EVENT_HORIZON_CASCADE_CACHE["segment_index"] + 1
-                    execution_records.append({"stage": "EventHorizonCascadeResume", "status": "resumed", "resume_frame_index": resume_frame_index, "start_segment": start_segment})
-                else:
-                    segment_batches = [generated_frames]
-                    current_cascade_image = self._last_frame_image(generated_frames, width, height)
-                    start_segment = 2
-
-                # Handle pause at cascade 1
-                if pause_after_cascade_1 and start_segment == 2 and resume_frame_index == -1:
-                    _EVENT_HORIZON_CASCADE_CACHE["latent"] = generated_latent
-                    _EVENT_HORIZON_CASCADE_CACHE["frames"] = generated_frames
-                    _EVENT_HORIZON_CASCADE_CACHE["segment_index"] = 1
-                    execution_records.append({"stage": "EventHorizonCascadePause_1", "status": "paused"})
-                    self._pause_flag_triggered = True
-                    # Skip the cascade loop
-                    requested_cascade_count = 1
-
-                if requested_cascade_count >= start_segment:
+                segment_batches = [generated_frames]
+                current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                if requested_cascade_count > 1:
                     execution_records.append({
                         "stage": "EventHorizonCascadeBegin",
                         "status": "begin",
                         "cascade_count": requested_cascade_count,
                         "frames_per_cascade": frames,
                     })
-                    for segment_index in range(start_segment, requested_cascade_count + 1):
+                    for segment_index in range(2, requested_cascade_count + 1):
                         next_frames, current_cascade_image, generated_latent = self._run_event_horizon_segment_core(
                             segment_index=segment_index,
                             source_image=current_cascade_image,
@@ -7017,19 +6934,6 @@ class WanEventWorkflowCore:
                         next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
                         self._cascade_boundary_math(segment_batches[-1], next_frames, execution_records, segment_index)
                         segment_batches.append(next_frames)
-                        
-                        pause_flags = {
-                            2: pause_after_cascade_2,
-                            3: pause_after_cascade_3,
-                            4: pause_after_cascade_4
-                        }
-                        if pause_flags.get(segment_index, False):
-                            _EVENT_HORIZON_CASCADE_CACHE["latent"] = generated_latent
-                            _EVENT_HORIZON_CASCADE_CACHE["frames"] = self._concat_frame_batches(segment_batches, execution_records)
-                            _EVENT_HORIZON_CASCADE_CACHE["segment_index"] = segment_index
-                            execution_records.append({"stage": f"EventHorizonCascadePause_{segment_index}", "status": "paused"})
-                            self._pause_flag_triggered = True
-                            break
 
                     generated_frames = self._concat_frame_batches(segment_batches, execution_records)
                     self._frame_motion_math(generated_frames, execution_records, "EventMath_concatenated_frame_motion")
@@ -7073,12 +6977,6 @@ class WanEventWorkflowCore:
                             result_status = "FRAMES"
                 else:
                     result_status = "FRAMES" if generated_frames is not None else "NONE"
-
-                ui_images = []
-                if getattr(self, "_pause_flag_triggered", False):
-                    result_status = "PAUSED"
-                    if generated_frames is not None:
-                        ui_images = self._save_pause_frames_to_temp(generated_frames)
 
                 video_ui_payload = self._extract_vhs_ui_payload_from_records(execution_records)
 
@@ -7260,8 +7158,7 @@ class WanEventWorkflowCore:
         else:
             result_preview = self._placeholder_image(width, height)
 
-        if not ui_images:
-            ui_images = self._make_ui_previews(source_preview, result_preview, save_prefix, execution_records, include_result_preview=enable_continuation_outputs)
+        ui_images = self._make_ui_previews(source_preview, result_preview, save_prefix, execution_records, include_result_preview=enable_continuation_outputs)
         packet["metadata"]["ui_preview"] = {
             "source_preview": "source image or upload",
             "result_preview": "disabled; no PreviewImage calls in terminal node",
@@ -7289,11 +7186,6 @@ class WanEventWorkflowCore:
             report,
         )
 
-        if not video_ui_payload:
-            video_ui_payload = {}
-        if ui_images:
-            video_ui_payload["images"] = ui_images
-            
         if video_ui_payload:
             return {"ui": video_ui_payload, "result": result_tuple}
 
@@ -7315,12 +7207,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
                 "negative_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
                 "temporal_texture_lock": ("BOOLEAN", {"default": True}),
 
-                                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
-                "pause_after_cascade_1": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_2": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_3": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_4": ("BOOLEAN", {"default": False}),
-                "resume_frame_index": ("INT", {"default": -1, "min": -1, "max": 4096}),
+                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
                 "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096}),
                 "width": ("INT", {"default": 416, "min": 16, "max": 8192, "step": 8}),
                 "height": ("INT", {"default": 608, "min": 16, "max": 8192, "step": 8}),
@@ -7785,11 +7672,6 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
         save_prefix,
         sampler_trace_mode,
         sampler_trace_max_steps,
-        pause_after_cascade_1=False,
-        pause_after_cascade_2=False,
-        pause_after_cascade_3=False,
-        pause_after_cascade_4=False,
-        resume_frame_index=-1,
         secondary_model=None,
         image=None,
         mask=None,
@@ -7952,11 +7834,6 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
             output_target="COMFY_OUTPUT",
             save_output_image=False,
             save_prefix=save_prefix,
-            pause_after_cascade_1=pause_after_cascade_1,
-            pause_after_cascade_2=pause_after_cascade_2,
-            pause_after_cascade_3=pause_after_cascade_3,
-            pause_after_cascade_4=pause_after_cascade_4,
-            resume_frame_index=resume_frame_index,
             output_folder_mode="DEFAULT",
             output_folder="default",
             custom_output_folder="",

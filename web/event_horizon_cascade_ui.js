@@ -39,7 +39,7 @@ const GROUPS = [
         id: "CASCADE",
         color: "#0891b2",
         bg: "rgba(8, 145, 178, 0.12)",
-        names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4", "resume_frame_index"],
+        names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed"],
     },
     {
         id: "SAMPLING",
@@ -155,18 +155,10 @@ function enforceLayoutStability(node) {
         maxBottom = Math.max(maxBottom, y + h);
     }
 
-    let requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
-    
-    // Allocate space for the filmstrip if images exist
-    if (node.imgs && node.imgs.length > 0) {
-        requiredHeight += 180;
-    }
-
+    const requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
     if (!node.size) node.size = [UI.minWidth, requiredHeight];
     if (node.size[0] < UI.minWidth) node.size[0] = UI.minWidth;
-    
-    // Always force the height to prevent ComfyUI from expanding it
-    node.size[1] = requiredHeight;
+    if (node.size[1] < requiredHeight) node.size[1] = requiredHeight;
     node.__eventHorizonRequiredHeight = requiredHeight;
 }
 
@@ -354,70 +346,5 @@ app.registerExtension({
             } catch (e) {}
             return r;
         };
-
-        const originalSetSize = nodeType.prototype.setSize;
-        nodeType.prototype.setSize = function(size) {
-            // ComfyUI tries to forcefully expand size[1] when images arrive.
-            // We intercept this to preserve the compact filmstrip layout.
-            if (this.imgs && this.imgs.length > 0 && this.__eventHorizonRequiredHeight) {
-                size[1] = this.__eventHorizonRequiredHeight;
-            }
-            if (size[0] < UI.minWidth) size[0] = UI.minWidth;
-            if (originalSetSize) {
-                originalSetSize.call(this, size);
-            } else {
-                this.size = size;
-            }
-        };
-
-        const originalOnExecuted = nodeType.prototype.onExecuted;
-        nodeType.prototype.onExecuted = function (message) {
-            const r = originalOnExecuted?.apply(this, arguments);
-            if (message && message.images) {
-                let continueBtn = this.widgets?.find(w => w.name === "continue_cascade_btn");
-                if (!continueBtn) {
-                    this.addWidget("button", "▶ Resume Cascade / Continue", "continue_cascade_btn", () => {
-                        app.queuePrompt(0);
-                    });
-                }
-            }
-            return r;
-        };
-
-        const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
-        nodeType.prototype.onDrawBackground = function(ctx) {
-            // Temporarily hide this.imgs so ComfyUI doesn't draw the huge image
-            let imgsBackup = this.imgs;
-            this.imgs = null;
-
-            if (originalOnDrawBackground) {
-                originalOnDrawBackground.apply(this, arguments);
-            }
-
-            this.imgs = imgsBackup;
-
-            if (this.imgs && this.imgs.length > 0) {
-                ctx.save();
-                const nodeWidth = this.size[0];
-                const filmstripHeight = 160; 
-                const y = Math.max(this.size[1] - filmstripHeight - 10, 10);
-                
-                ctx.fillStyle = "#111";
-                ctx.fillRect(10, y, nodeWidth - 20, filmstripHeight);
-                
-                let x = 15;
-                for (let img of this.imgs) {
-                    if (img.complete && img.naturalWidth) {
-                        const aspect = img.naturalWidth / img.naturalHeight;
-                        const drawWidth = (filmstripHeight - 10) * aspect;
-                        ctx.drawImage(img, x, y + 5, drawWidth, filmstripHeight - 10);
-                        x += drawWidth + 10;
-                        if (x > nodeWidth) break;
-                    }
-                }
-                ctx.restore();
-            }
-        };
-
     },
 });

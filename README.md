@@ -8,11 +8,6 @@ This release is experimental. It is meant for users and developers who want a co
 
 For changes since the previous public build, see `CHANGELOG.md`.
 
-## Scientific Foundation & Formalism
-
-The underlying mathematical logic of this node, specifically the `dim=1` Semantic Unfolding and inertia preservation, is based on the **Recursive Strategy Scale Formalism**.
-This logic is part of a published scientific work by DIIIUA. A copy of the formal paper ("recursive_strategy_scale_formalism_v0_3_en.pdf") is available on FigShare under a CC BY 4.0 license, which protects the academic and scientific priority of the architecture. Please see the `LICENSE` file for strict rules against commercializing this specific codebase.
-
 ## What Is Included
 
 - One visible ComfyUI node: `Event Horizon`
@@ -89,18 +84,14 @@ The public default. It treats the high/low latent delta as measured `ObservedBeh
 
 Experimental. This activates the native step-loop replacement path and can strongly affect output stability. Use only for research sweeps with fixed seeds and saved reports. If the result becomes noisy, lower `high_delta_strength` / `low_delta_strength` or return to `LATENT_DELTA_SCALE`.
 
-## Delta Strength & Inertia
+## Delta Strength
 
 - `high_delta_strength`: scales the observed high-stage latent movement.
 - `low_delta_strength`: scales the observed low-stage latent movement.
-- `inertia_mass`: applies a Deep EMA (Exponential Moving Average) Momentum buffer to the latent vector path, controlling physical boundary collision preservation. (Range: 0.0 to 1.0, Default: 0.5)
 
-`1.0` delta strength means neutral. Values below `1.0` reduce that stage movement; values above `1.0` amplify it.
+`1.0` means neutral. Values below `1.0` reduce that stage movement; values above `1.0` amplify it.
 
-### Semantic Normalization (Spatial Unfolding)
-`inertia_mass` uses `dim=1` (Channels) for `torch.norm`. This forces the momentum vector to remain unfolded spatially, meaning each individual pixel (like a subject's skin vs a rigid object) maintains its own precise local physics without blending into the whole scene. This prevents "clipping" and structural melting during object interactions.
-
-In Event Equality terms, delta strength and inertia are not just quality sliders. They change measured `ObservedBehavior`, which changes the next latent state and therefore the strategy carrier handed to the next stage.
+In Event Equality terms, delta strength is not just a quality slider. It changes measured `ObservedBehavior`, which changes the next latent state and therefore the strategy carrier handed to the next stage.
 
 ## Drift
 
