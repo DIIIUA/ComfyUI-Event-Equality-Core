@@ -164,7 +164,10 @@ function enforceLayoutStability(node) {
     if (node.size[0] < UI.minWidth) node.size[0] = UI.minWidth;
     
     // Always force the height to prevent ComfyUI from expanding it
-    node.size[1] = requiredHeight;
+    if (node.size[1] !== requiredHeight) {
+        node.size[1] = requiredHeight;
+        if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+    }
     node.__eventHorizonRequiredHeight = requiredHeight;
 }
 
