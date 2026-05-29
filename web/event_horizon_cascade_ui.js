@@ -346,5 +346,52 @@ app.registerExtension({
             } catch (e) {}
             return r;
         };
+
+        const originalOnExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function (message) {
+            const r = originalOnExecuted?.apply(this, arguments);
+            if (message && message.images) {
+                let continueBtn = this.widgets?.find(w => w.name === "continue_cascade_btn");
+                if (!continueBtn) {
+                    this.addWidget("button", "▶ Resume Cascade / Continue", "continue_cascade_btn", () => {
+                        app.queuePrompt(0);
+                    });
+                }
+            }
+            return r;
+        };
+
+        const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
+        nodeType.prototype.onDrawBackground = function(ctx) {
+            if (this.imgs && this.imgs.length > 0) {
+                // Prevent infinite vertical expansion by drawing our own constrained filmstrip
+                ctx.save();
+                const nodeWidth = this.size[0];
+                const filmstripHeight = 160; 
+                const y = this.size[1] - filmstripHeight - 10;
+                
+                ctx.fillStyle = "#111";
+                ctx.fillRect(10, y, nodeWidth - 20, filmstripHeight);
+                
+                let x = 15;
+                for (let img of this.imgs) {
+                    if (img.complete && img.naturalWidth) {
+                        const aspect = img.naturalWidth / img.naturalHeight;
+                        const drawWidth = (filmstripHeight - 10) * aspect;
+                        ctx.drawImage(img, x, y + 5, drawWidth, filmstripHeight - 10);
+                        x += drawWidth + 10;
+                        if (x > nodeWidth) break;
+                    }
+                }
+                ctx.restore();
+                
+                // Do not call original if we are drawing it ourselves to prevent huge node!
+                return;
+            }
+            if (originalOnDrawBackground) {
+                originalOnDrawBackground.apply(this, arguments);
+            }
+        };
+
     },
 });
