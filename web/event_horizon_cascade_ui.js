@@ -164,7 +164,9 @@ function enforceLayoutStability(node) {
 
     if (!node.size) node.size = [UI.minWidth, requiredHeight];
     if (node.size[0] < UI.minWidth) node.size[0] = UI.minWidth;
-    if (node.size[1] < requiredHeight) node.size[1] = requiredHeight;
+    
+    // Always force the height to prevent ComfyUI from expanding it
+    node.size[1] = requiredHeight;
     node.__eventHorizonRequiredHeight = requiredHeight;
 }
 
@@ -351,6 +353,21 @@ app.registerExtension({
                 drawDynamicBackground(ctx, this);
             } catch (e) {}
             return r;
+        };
+
+        const originalSetSize = nodeType.prototype.setSize;
+        nodeType.prototype.setSize = function(size) {
+            // ComfyUI tries to forcefully expand size[1] when images arrive.
+            // We intercept this to preserve the compact filmstrip layout.
+            if (this.imgs && this.imgs.length > 0 && this.__eventHorizonRequiredHeight) {
+                size[1] = this.__eventHorizonRequiredHeight;
+            }
+            if (size[0] < UI.minWidth) size[0] = UI.minWidth;
+            if (originalSetSize) {
+                originalSetSize.call(this, size);
+            } else {
+                this.size = size;
+            }
         };
 
         const originalOnExecuted = nodeType.prototype.onExecuted;
