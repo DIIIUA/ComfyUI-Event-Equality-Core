@@ -157,10 +157,8 @@ function enforceLayoutStability(node) {
 
     let requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
     
-    // Allocate space for the filmstrip if images exist
-    if (node.imgs && node.imgs.length > 0) {
-        requiredHeight += 180;
-    }
+    // Always reserve space for the filmstrip at the bottom
+    requiredHeight += 180;
 
     if (!node.size) node.size = [UI.minWidth, requiredHeight];
     if (node.size[0] < UI.minWidth) node.size[0] = UI.minWidth;
