@@ -353,14 +353,23 @@ app.registerExtension({
             return r;
         };
 
+        const originalComputeSize = nodeType.prototype.computeSize;
+        nodeType.prototype.computeSize = function(out) {
+            let size = originalComputeSize ? originalComputeSize.apply(this, arguments) : [UI.minWidth, UI.minHeight];
+            // Always reserve +180 for the filmstrip at the bottom
+            if (size[1]) {
+                size[1] += 180;
+            }
+            return size;
+        };
+
         const originalSetSize = nodeType.prototype.setSize;
         nodeType.prototype.setSize = function(size) {
-            // ComfyUI tries to forcefully expand size[1] when images arrive.
-            // We intercept this to preserve the compact filmstrip layout.
-            if (this.imgs && this.imgs.length > 0 && this.__eventHorizonRequiredHeight) {
+            if (size[0] < UI.minWidth) size[0] = UI.minWidth;
+            // Let the computed size (which now includes +180) take effect.
+            if (this.__eventHorizonRequiredHeight && size[1] < this.__eventHorizonRequiredHeight) {
                 size[1] = this.__eventHorizonRequiredHeight;
             }
-            if (size[0] < UI.minWidth) size[0] = UI.minWidth;
             if (originalSetSize) {
                 originalSetSize.call(this, size);
             } else {
