@@ -408,6 +408,11 @@ app.registerExtension({
                 for (let i = 0; i < message.pause_frames.length; i++) {
                     let img_info = message.pause_frames[i];
                     let img = new Image();
+                    img.onload = () => {
+                        if (app.graph && app.graph.setDirtyCanvas) {
+                            app.graph.setDirtyCanvas(true, true);
+                        }
+                    };
                     img.src = api.apiURL("/view?" + new URLSearchParams(img_info).toString());
                     this.imgs.push(img);
                 }
