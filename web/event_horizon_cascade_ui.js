@@ -420,7 +420,12 @@ app.registerExtension({
 
         const originalOnMouseDown = nodeType.prototype.onMouseDown;
         nodeType.prototype.onMouseDown = function(e, local_pos, canvas) {
-            if (this.imgs && this.imgs.length === 3) {
+            let isPauseFilmstrip = false;
+            if (this.imgs && this.imgs.length > 0 && this.imgs[0].src && this.imgs[0].src.includes("cascade_preview")) {
+                isPauseFilmstrip = true;
+            }
+
+            if (isPauseFilmstrip) {
                 const nodeWidth = this.size[0];
                 const filmstripHeight = 160; 
                 const startY = Math.max(this.size[1] - filmstripHeight - 10, 10);
@@ -464,7 +469,13 @@ app.registerExtension({
 
         const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
         nodeType.prototype.onDrawBackground = function(ctx) {
-            // Temporarily hide this.imgs so ComfyUI doesn't draw the huge image
+            let isPauseFilmstrip = false;
+            if (this.imgs && this.imgs.length > 0 && this.imgs[0].src && this.imgs[0].src.includes("cascade_preview")) {
+                isPauseFilmstrip = true;
+            }
+
+            // Always hide this.imgs from originalOnDrawBackground so the image_upload widget
+            // doesn't draw the image at the top behind all the other widgets.
             let imgsBackup = this.imgs;
             this.imgs = null;
 
@@ -490,7 +501,7 @@ app.registerExtension({
                         const aspect = img.naturalWidth / img.naturalHeight;
                         const drawWidth = (filmstripHeight - 10) * aspect;
                         
-                        if (this.imgs.length === 3 && this.__eventHorizonSelectedImageIndex === i) {
+                        if (isPauseFilmstrip && this.imgs.length === 3 && this.__eventHorizonSelectedImageIndex === i) {
                             ctx.strokeStyle = "#00ff00";
                             ctx.lineWidth = 4;
                             ctx.strokeRect(x - 2, y + 5 - 2, drawWidth + 4, filmstripHeight - 10 + 4);
@@ -498,7 +509,7 @@ app.registerExtension({
                         
                         ctx.drawImage(img, x, y + 5, drawWidth, filmstripHeight - 10);
                         
-                        if (this.imgs.length === 3) {
+                        if (isPauseFilmstrip && this.imgs.length === 3) {
                             const framesWidget = this.widgets?.find(w => w.name === "frames_per_cascade");
                             const totalFrames = framesWidget ? (framesWidget.value || 49) : 49;
                             const frameIdx = totalFrames - 2 + i;
