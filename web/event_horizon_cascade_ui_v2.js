@@ -1,3 +1,4 @@
+console.log("EVENT HORIZON UI V2 JS FILE LOADED!");
 // Event Horizon UI helper r59 public clean
 // WIDGET STABILITY HOTFIX.
 // Important: this file must NEVER sort or reorder node.widgets.
