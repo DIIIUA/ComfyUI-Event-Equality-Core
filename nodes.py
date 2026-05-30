@@ -5856,6 +5856,8 @@ class WanEventWorkflowCore:
                         payload = ast.literal_eval(raw)
                     except Exception:
                         payload = None
+                    if isinstance(payload, tuple) and len(payload) > 0:
+                        payload = payload[0]
                     if isinstance(payload, dict) and isinstance(payload.get("ui"), dict):
                         ui = payload.get("ui")
                         if "gifs" in ui:
@@ -6937,7 +6939,7 @@ class WanEventWorkflowCore:
                 packet, img_sig, img_proj, conf = _read_signal(
                     packet, TECH_IMAGE, SPACE_IMAGE, generated_frames,
                     "EventVAEDecodeTiled_frames", "VisibleOutcome",
-                    "wan_decoded_frames_route", "ImageOutcomeReader", route_position="decoded_frames"
+                "wan_decoded_frames_route", "ImageOutcomeReader", route_position="decoded_frames"
                 )
                 conflict_ids.extend(conf)
 
@@ -7024,7 +7026,8 @@ class WanEventWorkflowCore:
                             cleanup_records=cleanup_records,
                             barrier_records=branch_barrier_records,
                         )
-                        next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
+                        if segment_index > 1:
+                            next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
                         self._cascade_boundary_math(segment_batches[-1], next_frames, execution_records, segment_index)
                         segment_batches.append(next_frames)
                         
