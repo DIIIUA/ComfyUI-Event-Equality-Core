@@ -159,10 +159,12 @@ function enforceLayoutStability(node) {
         maxBottom = Math.max(maxBottom, fallbackY);
     }
 
+    // Dynamic height based on node width (3 square panels)
+    const panelWidth = (node.size[0] - 20 - 40) / 3;
     let requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
     
     // Reserve space for the 3-Panel Media UI
-    requiredHeight += 200;
+    requiredHeight += panelWidth + 50;
 
     // Reserve additional space for the Filmstrip if we are paused
     if (node.eventHorizonPauseImgs && node.eventHorizonPauseImgs.length > 0) {
@@ -204,7 +206,10 @@ function applyBaseShape(node) {
         }
         if (w.name === "resume_frame_index") {
             w.type = "hidden";
+            w.hidden = true;
+            w.disabled = true;
             w.computeSize = () => [0, 0];
+            w.draw = () => {};
         }
         expandPromptWidget(w);
     }
@@ -501,7 +506,29 @@ app.registerExtension({
                     img.__eventHorizonResumeIndex = message.pause_frames[i].resume_index;
                     this.eventHorizonPauseImgs.push(img);
                 }
-
+            }
+            if (message && message.gifs && message.gifs.length > 0) {
+                const videoData = message.gifs[0];
+                const videoUrl = api.apiURL("/view?filename=" + encodeURIComponent(videoData.filename) + "&type=" + videoData.type + "&subfolder=" + videoData.subfolder + "&format=" + videoData.format);
+                
+                if (!this._eventHorizonResultVideoCache || this._eventHorizonResultVideoCache.filename !== videoData.filename) {
+                    const vid = document.createElement("video");
+                    vid.src = videoUrl;
+                    vid.autoplay = true;
+                    vid.loop = true;
+                    vid.muted = true;
+                    vid.play();
+                    this._eventHorizonResultVideoCache = { filename: videoData.filename, video: vid };
+                    
+                    if (!this._eventHorizonVideoInterval) {
+                        this._eventHorizonVideoInterval = setInterval(() => { 
+                            if (this._eventHorizonResultVideoCache && this.setDirtyCanvas) {
+                                this.setDirtyCanvas(true, false);
+                            }
+                        }, 33);
+                    }
+                }
+            }
                 // PERMANENTLY hide the resume_frame_index widget so user doesn't see or type into it
                 const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
                 if (resumeWidget) {
@@ -607,7 +634,7 @@ app.registerExtension({
                 totalBottomSpace += filmstripHeight + 10;
             }
 
-            // Ensure the node is actually tall enough!
+            // Ensure the node is tall enough to fit everything!
             let absoluteRequiredHeight = widgetEnd + totalBottomSpace + 40;
             if (this.size[1] < absoluteRequiredHeight) {
                 this.size[1] = absoluteRequiredHeight;
@@ -619,14 +646,10 @@ app.registerExtension({
             const mediaStartY = startY;
 
             // --- 3-PANEL MEDIA DASHBOARD ---
-            const panelCount = 3;
-            const spacing = 10;
-            const panelWidth = (nodeWidth - 20 - (spacing * (panelCount + 1))) / panelCount;
-            // The user wants perfectly SQUARE panels to fit landscape & portrait
-            let mediaAreaHeight = panelWidth + 50; 
+            let mediaAreaHeightDraw = panelWidth + 50; 
             
             ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
-            ctx.fillRect(10, mediaStartY, nodeWidth - 20, mediaAreaHeight);
+            ctx.fillRect(10, mediaStartY, nodeWidth - 20, mediaAreaHeightDraw);
 
             const labels = ["Фото (Source)", "Шум (Latent)", "Видео (Result)"];
 
@@ -642,8 +665,8 @@ app.registerExtension({
                 sourceImage = this._eventHorizonSourceImgCache.img;
             }
 
-            for (let i = 0; i < panelCount; i++) {
-                let x = 10 + spacing + (i * (panelWidth + spacing));
+            for (let i = 0; i < 3; i++) {
+                let x = 10 + 10 + (i * (panelWidth + 10));
                 
                 ctx.fillStyle = "#888";
                 ctx.font = "bold 12px Arial";
@@ -656,20 +679,25 @@ app.registerExtension({
                 ctx.strokeRect(x, mediaStartY + 30, panelWidth, panelWidth);
 
                 let imgToDraw = null;
-                const privImgs = this._eventHorizonPrivateImgs;
+                const privImgs = this.eventHorizonPauseImgs; // <--- Changed to eventHorizonPauseImgs to show something!
                 
                 if (i === 0) {
                     imgToDraw = sourceImage; // Left panel: Always Source Photo
+                } else if (this._eventHorizonResultVideoCache && i === 2) {
+                    imgToDraw = this._eventHorizonResultVideoCache.video; // Right panel: Final Video
                 } else if (privImgs && privImgs.length > 0) {
-                    if (i === 1 && privImgs.length > 1) {
-                        imgToDraw = privImgs[1]; // Middle panel: Noise/Latent if available
+                    if (i === 1) {
+                        imgToDraw = privImgs[0]; // Middle panel: First frame of noise/pause
                     } else if (i === 2) {
-                        imgToDraw = privImgs[privImgs.length - 1]; // Right panel: Video/Result
+                        imgToDraw = privImgs[privImgs.length - 1]; // Right panel: Last frame of pause
                     }
                 }
 
-                if (imgToDraw && imgToDraw.complete && imgToDraw.naturalWidth) {
-                    const aspect = imgToDraw.naturalWidth / imgToDraw.naturalHeight;
+                if (imgToDraw && (imgToDraw.complete || imgToDraw.readyState >= 2)) {
+                    let naturalWidth = imgToDraw.naturalWidth || imgToDraw.videoWidth;
+                    let naturalHeight = imgToDraw.naturalHeight || imgToDraw.videoHeight;
+                    if (naturalWidth && naturalHeight) {
+                        const aspect = naturalWidth / naturalHeight;
                     const maxH = panelWidth - 4; // slight padding
                     const maxW = panelWidth - 4;
                     
@@ -693,7 +721,7 @@ app.registerExtension({
 
             // --- PAUSE FILMSTRIP ---
             if (this.eventHorizonPauseImgs && this.eventHorizonPauseImgs.length > 0) {
-                const filmstripStartY = mediaStartY + mediaAreaHeight + 10;
+                const filmstripStartY = mediaStartY + mediaAreaHeightDraw + 10;
                 
                 ctx.fillStyle = "rgba(10, 20, 50, 0.6)";
                 ctx.fillRect(10, filmstripStartY, nodeWidth - 20, filmstripHeight);
