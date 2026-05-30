@@ -28,7 +28,7 @@ const GROUPS = [
         id: "SOURCE",
         color: "#1d4ed8",
         bg: "rgba(30, 64, 175, 0.14)",
-        names: ["source_image_file"],
+        names: ["source_image_file", "event_horizon_upload_btn"],
     },
     {
         id: "PROMPT",
@@ -40,7 +40,7 @@ const GROUPS = [
         id: "CASCADE",
         color: "#0891b2",
         bg: "rgba(8, 145, 178, 0.12)",
-        names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4", "resume_frame_index"],
+        names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4"],
     },
     {
         id: "SAMPLING",
@@ -127,44 +127,52 @@ function expandPromptWidget(widget) {
 function enforceLayoutStability(node) {
     if (!node || !Array.isArray(node.widgets) || !node.widgets.length) return;
 
-    // Preserve native widget order. Do not sort.
-    // Only lock prompt widget geometry and ensure the node is tall enough for Comfy's own layout.
-    let fallbackY = 86;
-    let maxBottom = 0;
-    let previousPromptBottom = -1;
+    let fallbackY = 50;
+
+    // We no longer rely on ComfyUI's native image rendering to push widgets down,
+    // because we have a dedicated bottom panel for images. So we ignore this.imgs
+    // when calculating fallbackY.
+
+    let maxBottom = fallbackY;
 
     for (const w of node.widgets) {
+        if (w.type === "hidden" || w.name === "resume_frame_index") {
+            continue; // Skip layout for hidden widgets
+        }
+
         const isPrompt = PROMPT_WIDGET_NAMES.has(w?.name || "");
         if (isPrompt) {
             expandPromptWidget(w);
         }
 
-        let y = widgetY(w, fallbackY);
-        const h = isPrompt ? UI.promptHeight : widgetHeight(w, 22);
-
-        if (isPrompt) {
-            const minPromptY = Math.max(fallbackY, previousPromptBottom > -1 ? previousPromptBottom + 10 : fallbackY);
-            if (!Number.isFinite(y) || y < minPromptY) {
-                y = minPromptY;
-                w.last_y = y;
-                w.y = y;
-            }
-            previousPromptBottom = y + h;
+        let h = isPrompt ? UI.promptHeight : widgetHeight(w, 22);
+        if (w.computeSize) {
+            let ch = w.computeSize(node.size[0])[1];
+            if (ch && ch > h) h = ch;
         }
 
-        fallbackY = Math.max(fallbackY, y + h + 8);
-        maxBottom = Math.max(maxBottom, y + h);
+        // Force strict sequential layout to prevent overlap
+        w.y = fallbackY;
+        w.last_y = fallbackY;
+
+        fallbackY += h + 8;
+        maxBottom = Math.max(maxBottom, fallbackY);
     }
 
     let requiredHeight = Math.max(UI.minHeight, Math.ceil(maxBottom + 48));
     
-    // Always reserve space for the filmstrip at the bottom
-    requiredHeight += 180;
+    // Reserve space for the 3-Panel Media UI
+    requiredHeight += 200;
+
+    // Reserve additional space for the Filmstrip if we are paused
+    if (node.eventHorizonPauseImgs && node.eventHorizonPauseImgs.length > 0) {
+        requiredHeight += 180;
+    }
 
     if (!node.size) node.size = [UI.minWidth, requiredHeight];
     if (node.size[0] < UI.minWidth) node.size[0] = UI.minWidth;
     
-    // Always force the height to prevent ComfyUI from expanding it
+    // Always force the height to prevent ComfyUI from randomly collapsing or expanding it
     if (node.size[1] !== requiredHeight) {
         node.size[1] = requiredHeight;
         if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
@@ -190,7 +198,14 @@ function applyBaseShape(node) {
 
     // Safe label-only changes. Do not reorder widgets.
     for (const w of node.widgets || []) {
-        if (w.name === "source_image_file") w.label = "source image";
+        if (w.name === "source_image_file") {
+            w.label = "source image";
+            // No need to patch w.draw since it's a standard COMBO now, not an imageUpload widget!
+        }
+        if (w.name === "resume_frame_index") {
+            w.type = "hidden";
+            w.computeSize = () => [0, 0];
+        }
         expandPromptWidget(w);
     }
     
@@ -210,6 +225,69 @@ function applyBaseShape(node) {
             return size;
         };
         node.__eventHorizonInstanceComputePatched = true;
+    }
+
+    // --- Custom File Upload Button ---
+    if (!node.widgets.find(w => w.name === "event_horizon_upload_btn")) {
+        node.addWidget("button", "📤 Загрузить фото", "event_horizon_upload_btn", () => {
+            const input = document.createElement("input");
+            input.type = "file";
+            input.accept = "image/*";
+            input.onchange = async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const body = new FormData();
+                body.append("image", file);
+                body.append("subfolder", "");
+                body.append("type", "input");
+                try {
+                    const resp = await api.fetchApi("/upload/image", { method: "POST", body });
+                    if (resp.status === 200) {
+                        const data = await resp.json();
+                        const filename = data.name;
+                        const sourceWidget = node.widgets.find(w => w.name === "source_image_file");
+                        if (sourceWidget) {
+                            if (!sourceWidget.options.values.includes(filename)) {
+                                sourceWidget.options.values.push(filename);
+                            }
+                            sourceWidget.value = filename;
+                            if (sourceWidget.callback) sourceWidget.callback(filename);
+                            if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
+                        }
+                    }
+                } catch(err) {
+                    console.error("[EventHorizon] File upload failed", err);
+                }
+            };
+            input.click();
+        });
+    }
+
+    // Force upload button to be right after source_image_file visually (without breaking python positional args)
+    let uploadBtnIndex = node.widgets.findIndex(w => w.name === "event_horizon_upload_btn");
+    let sourceIndex = node.widgets.findIndex(w => w.name === "source_image_file");
+    if (uploadBtnIndex !== -1 && sourceIndex !== -1 && uploadBtnIndex !== sourceIndex + 1) {
+        const btn = node.widgets.splice(uploadBtnIndex, 1)[0];
+        node.widgets.splice(sourceIndex + 1, 0, btn);
+    }
+
+    // --- GROK FIX: Completely suppress ComfyUI's core image preview rendering ---
+    if (!node._imgsSuppressed) {
+        Object.defineProperty(node, 'imgs', {
+            get() {
+                return undefined; // Hide from core renderer
+            },
+            set(v) {
+                node._eventHorizonPrivateImgs = v; // Keep for our dashboard
+            },
+            configurable: true,
+            enumerable: true
+        });
+
+        node.imgs = undefined;
+        node.imageIndex = null;
+        node.videoContainer = undefined; // Suppress video preview just in case
+        node._imgsSuppressed = true;
     }
 
     enforceLayoutStability(node);
@@ -247,17 +325,21 @@ function computeDynamicRuns(node) {
     const widgets = node.widgets || [];
     const runs = [];
     let current = null;
-    let fallbackY = 86;
 
-    // Preserve native ComfyUI widget order exactly.
+    // Use actual widget y positions computed in enforceLayoutStability
     for (let i = 0; i < widgets.length; i++) {
         const w = widgets[i];
+        if (w.type === "hidden" || w.name === "resume_frame_index") continue;
+
         const g = groupForWidget(w);
         const id = g?.id || "OTHER";
 
-        const y = widgetY(w, fallbackY);
-        const h = widgetHeight(w, 22);
-        fallbackY = y + h + 2;
+        const y = w.y || 86;
+        let h = widgetHeight(w, 22);
+        if (w.computeSize) {
+            let ch = w.computeSize(node.size[0])[1];
+            if (ch && ch > h) h = ch;
+        }
 
         if (!g) {
             if (current) {
@@ -340,7 +422,7 @@ function injectPromptLockCSS() {
 
 
 app.registerExtension({
-    name: "event_horizon.ui.r58",
+    name: "event_horizon.ui.r62",
 
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         const isClean = CLEAN_NODE_NAMES.has(nodeData?.name);
@@ -368,7 +450,14 @@ app.registerExtension({
 
         const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
         nodeType.prototype.onDrawForeground = function (ctx) {
+            let isPauseFilmstrip = false;
+            if (this._eventHorizonPrivateImgs && this._eventHorizonPrivateImgs.length > 0 && this._eventHorizonPrivateImgs[0].src && this._eventHorizonPrivateImgs[0].src.includes("cascade_preview")) {
+                isPauseFilmstrip = true;
+            }
+
+            // We no longer need to backup this.imgs because it is permanently suppressed
             const r = originalOnDrawForeground?.apply(this, arguments);
+
             try {
                 enforceLayoutStability(this);
                 drawDynamicBackground(ctx, this);
@@ -400,29 +489,39 @@ app.registerExtension({
             }
         };
 
-        const originalOnExecuted = nodeType.prototype.onExecuted;
-        nodeType.prototype.onExecuted = function (message) {
-            const r = originalOnExecuted?.apply(this, arguments);
+        const onExecuted = nodeType.prototype.onExecuted;
+        nodeType.prototype.onExecuted = function(message) {
+            if (onExecuted) onExecuted.apply(this, arguments);
+
             if (message && message.pause_frames) {
-                this.imgs = [];
+                this.eventHorizonPauseImgs = [];
                 for (let i = 0; i < message.pause_frames.length; i++) {
-                    let img_info = message.pause_frames[i];
-                    let img = new Image();
-                    img.__eventHorizonResumeIndex = img_info.resume_index;
-                    img.onload = () => {
-                        if (app.graph && app.graph.setDirtyCanvas) {
-                            app.graph.setDirtyCanvas(true, true);
-                        }
-                    };
-                    img.src = api.apiURL("/view?" + new URLSearchParams(img_info).toString());
-                    this.imgs.push(img);
+                    const img = new Image();
+                    img.src = api.apiURL("/view?filename=" + encodeURIComponent(message.pause_frames[i].filename) + "&type=temp&subfolder=cascade_preview");
+                    img.__eventHorizonResumeIndex = message.pause_frames[i].resume_index;
+                    this.eventHorizonPauseImgs.push(img);
                 }
 
-                // Hide the resume_frame_index widget so user doesn't type into it
+                // PERMANENTLY hide the resume_frame_index widget so user doesn't see or type into it
                 const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
                 if (resumeWidget) {
-                    resumeWidget.computeSize = () => [0, -4];
+                    resumeWidget.type = "hidden";
+                    resumeWidget.computeSize = () => [0, 0];
                 }
+
+                if (this.widgets) {
+                    for (let w of this.widgets) {
+                        if (w.name === "videopreview" || w.name === "imagepreview" || w.type === "video" || w.type === "IMAGE") {
+                            if (w.element) {
+                                w.element.style.display = "none";
+                                w.element.hidden = true;
+                            }
+                            w.computeSize = () => [0, 0];
+                        }
+                    }
+                }
+                
+                this.setSize(this.computeSize());
 
                 let continueBtn = this.widgets?.find(w => w.name === "continue_cascade_btn");
                 if (!continueBtn) {
@@ -436,51 +535,23 @@ app.registerExtension({
                     });
                 }
             }
-            return r;
+            return;
         };
 
         const originalOnMouseDown = nodeType.prototype.onMouseDown;
         nodeType.prototype.onMouseDown = function(e, local_pos, canvas) {
-            let isPauseFilmstrip = false;
-            if (this.imgs && this.imgs.length > 0 && this.imgs[0].src && this.imgs[0].src.includes("cascade_preview")) {
-                isPauseFilmstrip = true;
-            }
-
-            if (isPauseFilmstrip) {
-                const nodeWidth = this.size[0];
-                const filmstripHeight = 160; 
-                const startY = Math.max(this.size[1] - filmstripHeight - 10, 10);
-                
-                if (local_pos[1] >= startY && local_pos[1] <= startY + filmstripHeight) {
-                    // Calculate optimal width to fit all images
-                    const totalSpacing = 10 * (this.imgs.length + 1);
-                    const availableWidth = nodeWidth - totalSpacing;
-                    let maxDrawWidth = availableWidth / this.imgs.length;
-
-                    let x = 15;
-                    let clickedIndex = -1;
-                    for (let i = 0; i < this.imgs.length; i++) {
-                        let img = this.imgs[i];
-                        if (img.complete && img.naturalWidth) {
-                            const aspect = img.naturalWidth / img.naturalHeight;
-                            let defaultWidth = (filmstripHeight - 10) * aspect;
-                            let drawWidth = Math.min(defaultWidth, maxDrawWidth);
-                            
-                            if (local_pos[0] >= x && local_pos[0] <= x + drawWidth) {
-                                clickedIndex = i;
-                                break;
-                            }
-                            x += drawWidth + 10;
-                        }
-                    }
+            if (this.filmstripGeometry) {
+                const {x, y, width, height} = this.filmstripGeometry;
+                if (local_pos[0] >= x && local_pos[0] <= x + width && local_pos[1] >= y && local_pos[1] <= y + height) {
+                    const imgCount = this.eventHorizonPauseImgs.length;
+                    const thumbW = width / imgCount;
+                    const clickedIndex = Math.floor((local_pos[0] - x) / thumbW);
                     
-                    if (clickedIndex !== -1) {
-                        this.__eventHorizonSelectedImageIndex = clickedIndex;
-                        const selectedImg = this.imgs[clickedIndex];
-                        
+                    if (clickedIndex >= 0 && clickedIndex < imgCount) {
+                        this.selectedPauseFrame = clickedIndex;
                         const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
-                        if (resumeWidget && selectedImg.__eventHorizonResumeIndex !== undefined) {
-                            resumeWidget.value = selectedImg.__eventHorizonResumeIndex;
+                        if (resumeWidget) {
+                            resumeWidget.value = this.eventHorizonPauseImgs[clickedIndex].__eventHorizonResumeIndex;
                         }
                         if (this.setDirtyCanvas) this.setDirtyCanvas(true, true);
                         return true;
@@ -495,66 +566,189 @@ app.registerExtension({
 
         const originalOnDrawBackground = nodeType.prototype.onDrawBackground;
         nodeType.prototype.onDrawBackground = function(ctx) {
-            let isPauseFilmstrip = false;
-            if (this.imgs && this.imgs.length > 0 && this.imgs[0].src && this.imgs[0].src.includes("cascade_preview")) {
-                isPauseFilmstrip = true;
+            // Clear pause frames if we are actively generating
+            if (app.runningNodeId === this.id) {
+                this.eventHorizonPauseImgs = null;
+                this.selectedPauseFrame = -1;
             }
 
-            // Always hide this.imgs from originalOnDrawBackground so the image_upload widget
-            // doesn't draw the image at the top behind all the other widgets.
-            let imgsBackup = this.imgs;
-            this.imgs = null;
-
+            // We no longer need to backup this.imgs because it is permanently suppressed
             if (originalOnDrawBackground) {
                 originalOnDrawBackground.apply(this, arguments);
             }
 
-            this.imgs = imgsBackup;
+            ctx.save();
+            const nodeWidth = this.size[0];
+            
+            // BULLETPROOF: Dynamically compute exactly where the widgets end!
+            let widgetEnd = 30; // LiteGraph default start
+            if (this.widgets) {
+                for (const w of this.widgets) {
+                    if (w.type === "hidden" || w.name === "resume_frame_index") continue;
+                    let h = 22;
+                    if (w.computeSize) {
+                        let ch = w.computeSize(nodeWidth)[1];
+                        if (ch && ch > h) h = ch;
+                    } else if (w.name === "positive_prompt" || w.name === "negative_prompt") {
+                        h = 180;
+                    }
+                    widgetEnd += h + 4; // LiteGraph widget spacing
+                }
+            }
+            
+            let filmstripHeight = 160;
+            
+            // Recompute mediaAreaHeight correctly since it depends on nodeWidth
+            const panelWidth = (nodeWidth - 20 - (10 * 4)) / 3;
+            let mediaAreaHeight = panelWidth + 50;
 
-            if (this.imgs && this.imgs.length > 0) {
-                ctx.save();
-                const nodeWidth = this.size[0];
-                const filmstripHeight = 160; 
-                const y = Math.max(this.size[1] - filmstripHeight - 10, 10);
+            let totalBottomSpace = mediaAreaHeight;
+            if (this.eventHorizonPauseImgs && this.eventHorizonPauseImgs.length > 0) {
+                totalBottomSpace += filmstripHeight + 10;
+            }
+
+            // Ensure the node is actually tall enough!
+            let absoluteRequiredHeight = widgetEnd + totalBottomSpace + 40;
+            if (this.size[1] < absoluteRequiredHeight) {
+                this.size[1] = absoluteRequiredHeight;
+            }
+            
+            // Start the media dashboard exactly after the widgets (plus some padding)
+            // But also respect the bottom of the node if it was dragged to be huge.
+            const startY = Math.max(this.size[1] - totalBottomSpace, widgetEnd + 20);
+            const mediaStartY = startY;
+
+            // --- 3-PANEL MEDIA DASHBOARD ---
+            const panelCount = 3;
+            const spacing = 10;
+            const panelWidth = (nodeWidth - 20 - (spacing * (panelCount + 1))) / panelCount;
+            // The user wants perfectly SQUARE panels to fit landscape & portrait
+            let mediaAreaHeight = panelWidth + 50; 
+            
+            ctx.fillStyle = "rgba(0, 0, 0, 0.4)";
+            ctx.fillRect(10, mediaStartY, nodeWidth - 20, mediaAreaHeight);
+
+            const labels = ["Фото (Source)", "Шум (Latent)", "Видео (Result)"];
+
+            // Load source image manually to bypass ComfyUI image renderer completely
+            let sourceImage = null;
+            const sourceWidget = this.widgets?.find(w => w.name === "source_image_file");
+            if (sourceWidget && sourceWidget.value) {
+                if (!this._eventHorizonSourceImgCache || this._eventHorizonSourceImgCache.filename !== sourceWidget.value) {
+                    const img = new Image();
+                    img.src = api.apiURL("/view?filename=" + encodeURIComponent(sourceWidget.value) + "&type=input&subfolder=");
+                    this._eventHorizonSourceImgCache = { filename: sourceWidget.value, img: img };
+                }
+                sourceImage = this._eventHorizonSourceImgCache.img;
+            }
+
+            for (let i = 0; i < panelCount; i++) {
+                let x = 10 + spacing + (i * (panelWidth + spacing));
                 
-                ctx.fillStyle = "#111";
-                ctx.fillRect(10, y, nodeWidth - 20, filmstripHeight);
+                ctx.fillStyle = "#888";
+                ctx.font = "bold 12px Arial";
+                ctx.textAlign = "center";
+                ctx.fillText(labels[i], x + panelWidth / 2, mediaStartY + 20);
+
+                ctx.strokeStyle = "rgba(255, 255, 255, 0.1)";
+                ctx.lineWidth = 1;
+                // Inner box is exactly panelWidth x panelWidth (SQUARE)
+                ctx.strokeRect(x, mediaStartY + 30, panelWidth, panelWidth);
+
+                let imgToDraw = null;
+                const privImgs = this._eventHorizonPrivateImgs;
                 
-                const totalSpacing = 10 * (this.imgs.length + 1);
-                const availableWidth = nodeWidth - totalSpacing;
-                let maxDrawWidth = availableWidth / this.imgs.length;
-
-                let x = 15;
-                for (let i = 0; i < this.imgs.length; i++) {
-                    let img = this.imgs[i];
-                    if (img.complete && img.naturalWidth) {
-                        const aspect = img.naturalWidth / img.naturalHeight;
-                        let defaultWidth = (filmstripHeight - 10) * aspect;
-                        let drawWidth = Math.min(defaultWidth, maxDrawWidth);
-                        let drawHeight = drawWidth / aspect;
-                        let offsetY = (filmstripHeight - 10 - drawHeight) / 2;
-                        
-                        if (isPauseFilmstrip && this.imgs.length > 0 && this.__eventHorizonSelectedImageIndex === i) {
-                            ctx.strokeStyle = "#00ff00";
-                            ctx.lineWidth = 4;
-                            ctx.strokeRect(x - 2, y + 5 + offsetY - 2, drawWidth + 4, drawHeight + 4);
-                        }
-                        
-                        ctx.drawImage(img, x, y + 5 + offsetY, drawWidth, drawHeight);
-                        
-                        if (isPauseFilmstrip && this.imgs.length > 0) {
-                            const frameIdx = img.__eventHorizonResumeIndex !== undefined ? img.__eventHorizonResumeIndex : "?";
-                            ctx.fillStyle = "#00ff00";
-                            ctx.font = "bold 14px Arial";
-                            ctx.fillText("Frame " + frameIdx, x + 5, y + 25);
-                        }
-
-                        x += drawWidth + 10;
-                        if (x > nodeWidth) break;
+                if (i === 0) {
+                    imgToDraw = sourceImage; // Left panel: Always Source Photo
+                } else if (privImgs && privImgs.length > 0) {
+                    if (i === 1 && privImgs.length > 1) {
+                        imgToDraw = privImgs[1]; // Middle panel: Noise/Latent if available
+                    } else if (i === 2) {
+                        imgToDraw = privImgs[privImgs.length - 1]; // Right panel: Video/Result
                     }
                 }
-                ctx.restore();
+
+                if (imgToDraw && imgToDraw.complete && imgToDraw.naturalWidth) {
+                    const aspect = imgToDraw.naturalWidth / imgToDraw.naturalHeight;
+                    const maxH = panelWidth - 4; // slight padding
+                    const maxW = panelWidth - 4;
+                    
+                    let drawW = maxW;
+                    let drawH = drawW / aspect;
+                    
+                    if (drawH > maxH) {
+                        drawH = maxH;
+                        drawW = drawH * aspect;
+                    }
+                    
+                    let offsetX = (panelWidth - drawW) / 2;
+                    let offsetY = 32 + (maxH - drawH) / 2;
+                    
+                    ctx.drawImage(imgToDraw, x + offsetX, mediaStartY + offsetY, drawW, drawH);
+                } else if (i === 1 || i === 2) {
+                    ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
+                    ctx.fillText("Ожидание...", x + panelWidth / 2, mediaStartY + 30 + panelWidth / 2 + 5);
+                }
             }
+
+            // --- PAUSE FILMSTRIP ---
+            if (this.eventHorizonPauseImgs && this.eventHorizonPauseImgs.length > 0) {
+                const filmstripStartY = mediaStartY + mediaAreaHeight + 10;
+                
+                ctx.fillStyle = "rgba(10, 20, 50, 0.6)";
+                ctx.fillRect(10, filmstripStartY, nodeWidth - 20, filmstripHeight);
+                ctx.strokeStyle = "#4466ff";
+                ctx.strokeRect(10, filmstripStartY, nodeWidth - 20, filmstripHeight);
+                
+                this.filmstripGeometry = {
+                    x: 10,
+                    y: filmstripStartY,
+                    width: nodeWidth - 20,
+                    height: filmstripHeight
+                };
+
+                const imgCount = this.eventHorizonPauseImgs.length;
+                const margin = 10;
+                const availableWidth = nodeWidth - 20 - (margin * 2);
+                let thumbW = availableWidth / imgCount;
+                let thumbH = filmstripHeight - (margin * 2);
+
+                for (let i = 0; i < imgCount; i++) {
+                    const img = this.eventHorizonPauseImgs[i];
+                    if (!img.complete) continue;
+
+                    const aspect = img.naturalWidth / img.naturalHeight;
+                    let drawW = thumbW - 10;
+                    let drawH = drawW / aspect;
+
+                    if (drawH > thumbH) {
+                        drawH = thumbH;
+                        drawW = drawH * aspect;
+                    }
+
+                    const x = 10 + margin + (i * thumbW) + (thumbW - drawW) / 2;
+                    const y = filmstripStartY + margin + (thumbH - drawH) / 2;
+
+                    ctx.drawImage(img, x, y, drawW, drawH);
+
+                    ctx.fillStyle = "rgba(0,0,0,0.7)";
+                    ctx.fillRect(x, y, 30, 24);
+                    ctx.fillStyle = "#FFF";
+                    ctx.font = "bold 16px sans-serif";
+                    ctx.textAlign = "center";
+                    ctx.fillText(String(i + 1), x + 15, y + 18);
+
+                    if (this.selectedPauseFrame === i) {
+                        ctx.strokeStyle = "#00FF00";
+                        ctx.lineWidth = 4;
+                        ctx.strokeRect(x, y, drawW, drawH);
+                    }
+                }
+            } else {
+                this.filmstripGeometry = null;
+            }
+
+            ctx.restore();
         };
 
     },

@@ -2602,7 +2602,7 @@ class WanEventWorkflowCore:
                 "primary_model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "source_image_file": (_event_core_list_input_images(), {"image_upload": True}),
+                "source_image_file": (_event_core_list_input_images(),),
 
                 "positive_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
                 "negative_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
@@ -7302,6 +7302,8 @@ class WanEventWorkflowCore:
         if not video_ui_payload:
             video_ui_payload = {}
         if ui_images:
+            if getattr(self, "_pause_flag_triggered", False):
+                video_ui_payload = {} # Wipe VHS video payload to prevent overlap
             video_ui_payload["pause_frames"] = ui_images
             
         if video_ui_payload:
@@ -7369,7 +7371,7 @@ class EventHorizonCascadeSimple(WanEventWorkflowCore):
                 "video_format": (["video/h264-mp4", "video/h265-mp4", "image/webp", "image/gif"], {"default": "video/h264-mp4"}),
                 "save_report": ("BOOLEAN", {"default": True}),
                 "save_prefix": ("STRING", {"default": "Event Horizon"}),
-                "sampler_trace_mode": (["OFF", "SHADOW_STEP_TRACE", "off", "shadow_step_trace"], {"default": "OFF"}),
+                "sampler_trace_mode": (["OFF", "SHADOW_STEP_TRACE"], {"default": "OFF"}),
                 "sampler_trace_max_steps": ("INT", {"default": 64, "min": 1, "max": 65535}),
             },
             "optional": {
