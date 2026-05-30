@@ -7292,7 +7292,7 @@ class WanEventWorkflowCore:
         if not video_ui_payload:
             video_ui_payload = {}
         if ui_images:
-            video_ui_payload["images"] = ui_images
+            video_ui_payload["pause_frames"] = ui_images
             
         if video_ui_payload:
             return {"ui": video_ui_payload, "result": result_tuple}

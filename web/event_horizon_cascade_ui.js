@@ -4,6 +4,7 @@
 // ComfyUI widget_values are positional, so sorting widgets can visually/semantically mix settings.
 
 import { app } from "/scripts/app.js";
+import { api } from "/scripts/api.js";
 
 const CLEAN_NODE_NAMES = new Set([
     "EventHorizon",
@@ -402,7 +403,15 @@ app.registerExtension({
         const originalOnExecuted = nodeType.prototype.onExecuted;
         nodeType.prototype.onExecuted = function (message) {
             const r = originalOnExecuted?.apply(this, arguments);
-            if (message && message.images) {
+            if (message && message.pause_frames) {
+                this.imgs = [];
+                for (let i = 0; i < message.pause_frames.length; i++) {
+                    let img_info = message.pause_frames[i];
+                    let img = new Image();
+                    img.src = api.apiURL("/view?" + new URLSearchParams(img_info).toString());
+                    this.imgs.push(img);
+                }
+
                 let continueBtn = this.widgets?.find(w => w.name === "continue_cascade_btn");
                 if (!continueBtn) {
                     this.addWidget("button", "▶ Resume Cascade / Continue", "continue_cascade_btn", () => {
