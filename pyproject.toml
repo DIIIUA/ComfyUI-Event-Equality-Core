@@ -2,7 +2,7 @@
 name = "comfyui-event-equality-core"
 description = "Event Horizon / Event Equality Core: experimental Wan I2V runtime audit node with Event Core Body, Runtime Monitor, and Smart Branch Barrier."
 version = "0.1.1-r59"
-license = { text = "MIT" }
+license = { text = "CC-BY-NC-4.0" }
 dependencies = []
 
 [tool.comfy]
