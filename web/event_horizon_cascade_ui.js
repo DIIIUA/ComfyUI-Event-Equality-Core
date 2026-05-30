@@ -713,6 +713,7 @@ app.registerExtension({
                     let offsetY = 32 + (maxH - drawH) / 2;
                     
                     ctx.drawImage(imgToDraw, x + offsetX, mediaStartY + offsetY, drawW, drawH);
+                    }
                 } else if (i === 1 || i === 2) {
                     ctx.fillStyle = "rgba(255, 255, 255, 0.05)";
                     ctx.fillText("Ожидание...", x + panelWidth / 2, mediaStartY + 30 + panelWidth / 2 + 5);
