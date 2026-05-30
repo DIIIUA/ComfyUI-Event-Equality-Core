@@ -452,13 +452,20 @@ app.registerExtension({
                 const startY = Math.max(this.size[1] - filmstripHeight - 10, 10);
                 
                 if (local_pos[1] >= startY && local_pos[1] <= startY + filmstripHeight) {
+                    // Calculate optimal width to fit all images
+                    const totalSpacing = 10 * (this.imgs.length + 1);
+                    const availableWidth = nodeWidth - totalSpacing;
+                    let maxDrawWidth = availableWidth / this.imgs.length;
+
                     let x = 15;
                     let clickedIndex = -1;
                     for (let i = 0; i < this.imgs.length; i++) {
                         let img = this.imgs[i];
                         if (img.complete && img.naturalWidth) {
                             const aspect = img.naturalWidth / img.naturalHeight;
-                            const drawWidth = (filmstripHeight - 10) * aspect;
+                            let defaultWidth = (filmstripHeight - 10) * aspect;
+                            let drawWidth = Math.min(defaultWidth, maxDrawWidth);
+                            
                             if (local_pos[0] >= x && local_pos[0] <= x + drawWidth) {
                                 clickedIndex = i;
                                 break;
@@ -513,20 +520,27 @@ app.registerExtension({
                 ctx.fillStyle = "#111";
                 ctx.fillRect(10, y, nodeWidth - 20, filmstripHeight);
                 
+                const totalSpacing = 10 * (this.imgs.length + 1);
+                const availableWidth = nodeWidth - totalSpacing;
+                let maxDrawWidth = availableWidth / this.imgs.length;
+
                 let x = 15;
                 for (let i = 0; i < this.imgs.length; i++) {
                     let img = this.imgs[i];
                     if (img.complete && img.naturalWidth) {
                         const aspect = img.naturalWidth / img.naturalHeight;
-                        const drawWidth = (filmstripHeight - 10) * aspect;
+                        let defaultWidth = (filmstripHeight - 10) * aspect;
+                        let drawWidth = Math.min(defaultWidth, maxDrawWidth);
+                        let drawHeight = drawWidth / aspect;
+                        let offsetY = (filmstripHeight - 10 - drawHeight) / 2;
                         
                         if (isPauseFilmstrip && this.imgs.length > 0 && this.__eventHorizonSelectedImageIndex === i) {
                             ctx.strokeStyle = "#00ff00";
                             ctx.lineWidth = 4;
-                            ctx.strokeRect(x - 2, y + 5 - 2, drawWidth + 4, filmstripHeight - 10 + 4);
+                            ctx.strokeRect(x - 2, y + 5 + offsetY - 2, drawWidth + 4, drawHeight + 4);
                         }
                         
-                        ctx.drawImage(img, x, y + 5, drawWidth, filmstripHeight - 10);
+                        ctx.drawImage(img, x, y + 5 + offsetY, drawWidth, drawHeight);
                         
                         if (isPauseFilmstrip && this.imgs.length > 0) {
                             const frameIdx = img.__eventHorizonResumeIndex !== undefined ? img.__eventHorizonResumeIndex : "?";
