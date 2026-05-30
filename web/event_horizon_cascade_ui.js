@@ -561,7 +561,6 @@ app.registerExtension({
                         app.queuePrompt(0);
                     });
                 }
-            }
             return;
         };
 
