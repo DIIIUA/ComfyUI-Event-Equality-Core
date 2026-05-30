@@ -408,6 +408,7 @@ app.registerExtension({
                 for (let i = 0; i < message.pause_frames.length; i++) {
                     let img_info = message.pause_frames[i];
                     let img = new Image();
+                    img.__eventHorizonResumeIndex = img_info.resume_index;
                     img.onload = () => {
                         if (app.graph && app.graph.setDirtyCanvas) {
                             app.graph.setDirtyCanvas(true, true);
@@ -415,6 +416,12 @@ app.registerExtension({
                     };
                     img.src = api.apiURL("/view?" + new URLSearchParams(img_info).toString());
                     this.imgs.push(img);
+                }
+
+                // Hide the resume_frame_index widget so user doesn't type into it
+                const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
+                if (resumeWidget) {
+                    resumeWidget.computeSize = () => [0, -4];
                 }
 
                 let continueBtn = this.widgets?.find(w => w.name === "continue_cascade_btn");
@@ -462,13 +469,11 @@ app.registerExtension({
                     
                     if (clickedIndex !== -1) {
                         this.__eventHorizonSelectedImageIndex = clickedIndex;
-                        const framesWidget = this.widgets?.find(w => w.name === "frames_per_cascade");
-                        const totalFrames = framesWidget ? (framesWidget.value || 49) : 49;
-                        const frameIdx = totalFrames - 2 + clickedIndex;
+                        const selectedImg = this.imgs[clickedIndex];
                         
                         const resumeWidget = this.widgets?.find(w => w.name === "resume_frame_index");
-                        if (resumeWidget) {
-                            resumeWidget.value = frameIdx;
+                        if (resumeWidget && selectedImg.__eventHorizonResumeIndex !== undefined) {
+                            resumeWidget.value = selectedImg.__eventHorizonResumeIndex;
                         }
                         if (this.setDirtyCanvas) this.setDirtyCanvas(true, true);
                         return true;
@@ -515,7 +520,7 @@ app.registerExtension({
                         const aspect = img.naturalWidth / img.naturalHeight;
                         const drawWidth = (filmstripHeight - 10) * aspect;
                         
-                        if (isPauseFilmstrip && this.imgs.length === 3 && this.__eventHorizonSelectedImageIndex === i) {
+                        if (isPauseFilmstrip && this.imgs.length > 0 && this.__eventHorizonSelectedImageIndex === i) {
                             ctx.strokeStyle = "#00ff00";
                             ctx.lineWidth = 4;
                             ctx.strokeRect(x - 2, y + 5 - 2, drawWidth + 4, filmstripHeight - 10 + 4);
@@ -523,10 +528,8 @@ app.registerExtension({
                         
                         ctx.drawImage(img, x, y + 5, drawWidth, filmstripHeight - 10);
                         
-                        if (isPauseFilmstrip && this.imgs.length === 3) {
-                            const framesWidget = this.widgets?.find(w => w.name === "frames_per_cascade");
-                            const totalFrames = framesWidget ? (framesWidget.value || 49) : 49;
-                            const frameIdx = totalFrames - 2 + i;
+                        if (isPauseFilmstrip && this.imgs.length > 0) {
+                            const frameIdx = img.__eventHorizonResumeIndex !== undefined ? img.__eventHorizonResumeIndex : "?";
                             ctx.fillStyle = "#00ff00";
                             ctx.font = "bold 14px Arial";
                             ctx.fillText("Frame " + frameIdx, x + 5, y + 25);

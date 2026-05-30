@@ -2791,27 +2791,37 @@ class WanEventWorkflowCore:
         try:
             temp_dir = folder_paths.get_temp_directory()
             
-            # Select up to 3 last frames
             total_f = frames.shape[0]
-            start_f = max(0, total_f - 3)
-            ui_frames = frames[start_f:total_f]
+            # Wan2.1 valid frames must be 4*k + 1. 
+            # We want up to 7 valid frames from the tail.
+            valid_indices = []
+            for i in range(total_f):
+                # i is 0-indexed. The frame count is i+1.
+                if (i + 1 - 1) % 4 == 0:
+                    valid_indices.append(i)
+                    
+            # Take the last 7 valid indices
+            selected_indices = valid_indices[-7:] if len(valid_indices) >= 7 else valid_indices
             
-            prefix = "event_horizon_pause_" + str(random.randint(10000, 99999))
+            prefix = "cascade_preview_" + str(random.randint(100000, 999999))
             
-            for i in range(ui_frames.shape[0]):
-                frame = ui_frames[i]
-                img = 255. * frame.cpu().numpy()
-                img = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8))
-                filename = f"{prefix}_{start_f + i + 1}.png"
-                img.save(os.path.join(temp_dir, filename), compress_level=4)
+            for idx, frame_idx in enumerate(selected_indices):
+                frame = frames[frame_idx]
+                img_array = (255. * frame.cpu().numpy()).clip(0, 255).astype(np.uint8)
+                img = Image.fromarray(img_array)
+                
+                filename = f"{prefix}_{idx}.png"
+                filepath = os.path.join(temp_dir, filename)
+                img.save(filepath)
+                
                 ui_images.append({
                     "filename": filename,
                     "subfolder": "",
-                    "type": "temp"
+                    "type": "temp",
+                    "resume_index": frame_idx + 1  # 1-indexed for the UI resume_frame_index
                 })
         except Exception as e:
-            print("[EventHorizon] Error saving pause frames:", e)
-            
+            print(f"Failed to save pause frames: {e}")
         return ui_images
 
 
