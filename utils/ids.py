@@ -1,4 +1,4 @@
-# Simple readable ID utilities for Event Equality Core.
+# Simple readable ID utilities for Singularity.
 
 _COUNTERS = {}
 
@@ -35,3 +35,4 @@ def new_sstate_id(position: str = "s") -> str:
 
 def new_conflict_id(kind: str = "conflict") -> str:
     return new_id(f"conflict_{kind}")
+

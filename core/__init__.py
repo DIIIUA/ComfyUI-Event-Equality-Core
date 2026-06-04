@@ -1,1 +1,2 @@
-# Event Equality Core - core package
+# Singularity - core package
+

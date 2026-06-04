@@ -1,197 +1,331 @@
-# Event Horizon / Event Equality Core
+# Singularity
 
-Public Alpha `0.1.1-r59`
+Singularity is an experimental ComfyUI custom node for Wan image-to-video cascade generation, manual continuation control, and runtime diagnostics.
 
-Event Horizon is a single ComfyUI node for Wan image-to-video workflows. It wraps generation, cascade extension, runtime reporting, motion diagnostics, and Event Equality math records into one visible node.
+Its main feature is simple but uncommon inside ComfyUI: pause a cascade chain, inspect the source frame and tail-frame candidates, choose the continuation frame, continue the same running workflow, and receive one final stitched video instead of a pile of separate clips.
 
-This release is experimental. It is meant for users and developers who want a compact Wan I2V node that also writes useful evidence about what happened during generation.
+This is a public alpha. It is built for testing, comparison, and long-video experimentation, not for guaranteed production stability.
 
-For changes since the previous public build, see `CHANGELOG.md`.
+## In Plain English
 
-## Scientific Foundation & Formalism
+Think of Singularity as a long-video helper.
 
-The underlying mathematical logic of this node, specifically the `dim=1` Semantic Unfolding and inertia preservation, is based on the **Recursive Strategy Scale Formalism**.
-This logic is part of a published scientific work by DIIIUA. A copy of the formal paper ("recursive_strategy_scale_formalism_v0_3_en.pdf") is available on FigShare under a CC BY 4.0 license, which protects the academic and scientific priority of the architecture. Please see the `LICENSE` file for strict rules against commercializing this specific codebase.
+Normally, if you want to extend a Wan video, you generate one clip, find a good last frame, load that frame again, run another clip, and then stitch everything later. Singularity tries to keep that loop inside one ComfyUI node.
 
-## What Is Included
-
-- One visible ComfyUI node: `Event Horizon`
-- Wan I2V single-video and cascade generation
-- Positive and negative prompt fields with locked readable height
-- Optional secondary model branch
-- Runtime report output
-- Motion math metrics
-- RouteMemory, S-Wire, SState, CompletionGate, and conflict records
-- Smart cleanup/barrier logging
-- Shadow sampler trace records
-- Input normalization and integrity reports
-
-The package intentionally does not include handoff archives, old reports, test videos, backups, private workflows, or development-only debug nodes.
-
-## Installation
-
-Copy this folder into:
+The basic flow is:
 
 ```text
-ComfyUI/custom_nodes/ComfyUI-Event-Equality-Core
+1. Generate the first segment.
+2. Pause.
+3. Show the source image and tail-frame candidates.
+4. Let you choose the best continuation frame.
+5. Continue the same run.
+6. Stitch the result into one final video.
 ```
 
-Restart ComfyUI completely after installing or replacing the node.
+The node also writes reports so you can compare runs instead of guessing only from the final video.
 
-In ComfyUI, add:
+## What It Does
+
+- Generates Wan I2V video from one external node.
+- Supports up to five cascade segments in the current public alpha.
+- Can pause at cascade boundaries.
+- Shows a detached Source / Tail 1 / Tail 2 / Tail 3 / Result panel under the node.
+- Lets the user pick the tail frame used to continue the next cascade.
+- Continues the same run after pressing `Resume Cascade / Continue`.
+- Produces one stitched final video at the end.
+- Writes a markdown report plus runtime monitor sidecars.
+- Records CascadePlan, segment begin/end records, motion metrics, delta diagnostics, and CompletionGate status.
+
+## Why This Exists
+
+Long Wan videos often require manually chaining clips, choosing a last frame, reloading it, running a new workflow, and stitching the pieces later. Singularity puts that decision point inside the workflow: the user can stop at a boundary, choose the frame that carries the best continuation strategy, and let the node continue.
+
+The project also studies generation as an event:
 
 ```text
-Event Equality / Event Horizon / Event Horizon
+Outcome(t-1) + ObservedBehavior(t-1)
+= Strategy(t)
+= ObservedBehavior(t+1) + Outcome(t+1)
 ```
 
-## Required Inputs
+In practical terms, the prompt, source image, model interpretation, high/low sampler route, latent evolution, and final visible video should describe the same event. The math layer is meant to observe and gently guide that relation. It should not blindly replace native sampler physics.
 
-- `primary_model`: the main Wan model branch.
-- `clip`: CLIP/Text encoder connection.
-- `vae`: VAE used for decode.
-- `source_image_file`: source image loaded from ComfyUI input images.
-- `positive_prompt`: what the video should follow.
-- `negative_prompt`: what the video should avoid.
+## Quick Start
 
-Optional:
-
-- `secondary_model`: second Wan model branch for low/secondary sampler stage.
-- `image`: direct IMAGE input if a workflow provides one.
-- `mask`: optional mask input.
-
-## Main Controls
-
-- `cascade_count`: number of video segments to generate and connect. `1` is a normal single clip. Higher values extend the clip.
-- `frames_per_cascade`: frames generated per segment.
-- `width`, `height`, `fps`: output dimensions and playback rate.
-- `seed`: fixed seed for repeatable comparisons.
-- `sampler_name`, `scheduler`, `global_steps`: sampler configuration passed into the Wan sampling path.
-- `primary_cfg`, `secondary_cfg`: CFG values for primary and secondary branches.
-- `primary_start_step`, `primary_end_step`: step window for the primary/high stage.
-- `secondary_start_step`, `secondary_end_step`: step window for the secondary/low stage.
-- `decode_tile_size`, `decode_overlap`, `decode_temporal_size`, `decode_temporal_overlap`: tiled decode controls.
-- `cleanup_timing`: when the node tries to release memory and record the cleanup boundary.
-- `save_video`: writes the generated video.
-- `save_report`: writes the markdown report.
-- `save_prefix`: file prefix for outputs.
-
-## Math Control Modes
-
-`OBSERVE_ONLY`
-
-Records the Event Equality math without intentionally changing the sampler result. Use this as a baseline when you want to compare behavior.
-
-`LATENT_DELTA_SCALE`
-
-The public default. It treats the high/low latent delta as measured `ObservedBehavior` and applies controlled scaling through the safe native-sampler overlay path. In practical terms, this lets you slightly reduce or amplify how strongly a stage pushes the latent route while still preserving the model sampler as the main generator.
-
-`DEEP_STEP_DELTA_CONTROL`
-
-Experimental. This activates the native step-loop replacement path and can strongly affect output stability. Use only for research sweeps with fixed seeds and saved reports. If the result becomes noisy, lower `high_delta_strength` / `low_delta_strength` or return to `LATENT_DELTA_SCALE`.
-
-## Delta Strength & Inertia
-
-- `high_delta_strength`: scales the observed high-stage latent movement.
-- `low_delta_strength`: scales the observed low-stage latent movement.
-- `inertia_mass`: applies a Deep EMA (Exponential Moving Average) Momentum buffer to the latent vector path, controlling physical boundary collision preservation. (Range: 0.0 to 1.0, Default: 0.5)
-
-`1.0` delta strength means neutral. Values below `1.0` reduce that stage movement; values above `1.0` amplify it.
-
-### Semantic Normalization (Spatial Unfolding)
-`inertia_mass` uses `dim=1` (Channels) for `torch.norm`. This forces the momentum vector to remain unfolded spatially, meaning each individual pixel (like a subject's skin vs a rigid object) maintains its own precise local physics without blending into the whole scene. This prevents "clipping" and structural melting during object interactions.
-
-In Event Equality terms, delta strength and inertia are not just quality sliders. They change measured `ObservedBehavior`, which changes the next latent state and therefore the strategy carrier handed to the next stage.
-
-## Drift
-
-In this node, drift means measurable separation between the intended route and the actual generated route.
-
-Common drift types:
-
-- Source drift: the video stops respecting the input image.
-- Prompt drift: the output moves away from the positive prompt or toward the negative prompt.
-- Identity drift: the main subject changes too much over time.
-- Motion drift: movement becomes unstable, reversed, spiky, or inconsistent.
-- Cascade drift: the next cascade segment does not continue the previous segment cleanly.
-- Route drift: the recorded stage order, input state, or expected boundary does not match the intended generation route.
-
-The report does not magically prevent drift. It makes drift visible so you can compare runs instead of guessing from the video alone.
-
-## Motion Metrics In The Report
-
-- `frame_delta_norm_mean`: average frame-to-frame movement.
-- `frame_delta_norm_std`: how uneven that movement is.
-- `frame_delta_spike_ratio`: whether a few frames move much more than the rest.
-- `frame_delta_cosine_mean`: whether consecutive movement directions are aligned.
-- `frame_delta_reversal_ratio`: how often motion direction reverses.
-- `frame_delta_jerk_ratio`: acceleration/jerk proxy.
-- `frame_motion_stability_score`: observer-only heuristic for comparing runs.
-- `frame_motion_profile`: simple label such as `stable`, `mixed`, or `volatile`.
-
-These are comparison tools, not final quality scores. Always look at the video too.
-
-## CompletionGate
-
-`EventCoreBodyCompletionGate = PASS` means the node completed the expected structural route and wrote the expected records. It does not mean the video is aesthetically good.
-
-A useful run should normally have:
-
-```text
-result_status = VIDEO
-EventCoreBodyCompletionGate = PASS
-saved_video_path is not empty
-saved_report_path is not empty
-```
-
-## Shadow Sampler Trace
-
-`sampler_trace_mode = SHADOW_STEP_TRACE` records limited step-level shadow information without trying to become a full sampler replacement. `sampler_trace_max_steps` caps how much trace data is written.
-
-This is diagnostic data. It is useful for development and comparison, but it can make reports larger.
-
-## Recommended First Test
-
-Use a fresh `Event Horizon` node after installing.
-
-Suggested conservative test:
+1. Add the `Singularity` node.
+2. Connect your Wan route:
+   - `primary_model`
+   - optional `secondary_model`
+   - `clip`
+   - `vae`
+3. Pick or upload a source image in `source_image_file`.
+4. Write your positive and negative prompts.
+5. For a first simple test, use:
 
 ```text
 cascade_count = 1
 frames_per_cascade = 49
-width = 416
-height = 608
-fps = 16
-math_control_mode = OBSERVE_ONLY
+math_control_mode = LATENT_DELTA_SCALE
 high_delta_strength = 1.0
 low_delta_strength = 1.0
 save_video = true
 save_report = true
 ```
 
-After that, compare with:
+6. For the frame-selection feature, use:
+
+```text
+cascade_count = 2
+pause_after_cascade_1 = true
+frames_per_cascade = 49
+```
+
+7. When the panel appears under the node, click the tail frame you want and press `Resume Cascade / Continue`.
+
+## Current Public Alpha Scope
+
+Recommended public use:
+
+```text
+cascade_count = 1..5
+frames_per_cascade = 49
+math_control_mode = LATENT_DELTA_SCALE or OBSERVE_ONLY
+high_delta_strength = 1.0
+low_delta_strength = 1.0
+sampler_trace_mode = OFF
+save_video = true
+save_report = true
+```
+
+Research example:
 
 ```text
 math_control_mode = LATENT_DELTA_SCALE
-high_delta_strength = 0.988 to 1.0
+high_delta_strength = 0.988
 low_delta_strength = 1.0
 ```
 
-Keep the same seed when comparing runs.
+Do not treat that value as universal. It is only a comparison candidate found during local testing.
+
+## What The Main Inputs Mean
+
+### Model Inputs
+
+`primary_model`
+
+The main Wan model input. In a high/low Wan setup, this is usually the high-noise or motion-structure model.
+
+`secondary_model`
+
+Optional second model input. In a high/low Wan setup, this is usually the low-noise or refinement model. If it is not connected, the node can fall back to the primary model for the low phase.
+
+`clip`
+
+The text encoder used for the prompts.
+
+`vae`
+
+The decoder used to turn latent frames into visible frames/video.
+
+### Image And Prompt
+
+`source_image_file`
+
+The starting image. Use the upload button if the image is not already in ComfyUI's input folder.
+
+`positive_prompt`
+
+What you want the video to show.
+
+`negative_prompt`
+
+What you want the video to avoid.
+
+### Cascade Controls
+
+`cascade_count`
+
+How many segments to generate.
+
+```text
+1 = one normal clip
+2 = first clip + one continuation
+5 = current public-alpha maximum
+```
+
+`pause_after_cascade_1..4`
+
+Where the node should pause and ask you to choose a continuation frame.
+
+Example:
+
+```text
+cascade_count = 2
+pause_after_cascade_1 = true
+```
+
+This means: generate segment 1, pause, let you choose a tail frame, then continue segment 2.
+
+`frames_per_cascade`
+
+How many frames each segment generates before trim/stitch logic.
+
+At `16 fps`:
+
+```text
+49 frames = about 3 seconds per segment
+121 frames = about 7.5 seconds per segment
+```
+
+### Tail Frame Controls
+
+`selected_tail_index`
+
+The selected tail candidate. The UI usually updates this for you when you click a tail image.
+
+```text
+0 = Tail 1
+1 = Tail 2
+2 = Tail 3
+```
+
+`use_formula_recommendation`
+
+Research option. When enabled, the formula recommendation may propose a tail frame. For public use, keep this off unless you are intentionally testing it.
+
+Important: the manual green selection is the user's real choice.
+
+### Math Controls
+
+`math_control_mode`
+
+Chooses how much the math layer is allowed to do.
+
+`high_delta_strength`
+
+Controls the high-stage delta strength. In simple terms: how strongly the first/high stage's movement is carried forward.
+
+`low_delta_strength`
+
+Controls the low-stage delta strength. In simple terms: how strongly the refinement stage is allowed to reshape the result.
+
+Start with:
+
+```text
+high_delta_strength = 1.0
+low_delta_strength = 1.0
+```
+
+Then change only one value at a time when comparing.
+
+### Save And Report
+
+`save_video`
+
+Saves the final output video.
+
+`save_report`
+
+Saves the markdown diagnostic report. Keep this on while testing.
+
+`save_prefix`
+
+The filename prefix for saved outputs.
+
+### Trace Controls
+
+`sampler_trace_mode`
+
+Extra diagnostics for sampler behavior.
+
+```text
+OFF = normal public use
+SHADOW_STEP_TRACE = diagnostic trace, more report data
+```
+
+`sampler_trace_max_steps`
+
+Limits trace size so reports do not grow without control.
+
+## Math Modes
+
+### OBSERVE_ONLY
+
+Records reports and diagnostics without intentionally changing the generation tensors. Use this as a clean baseline.
+
+### LATENT_DELTA_SCALE
+
+Public-safe default path. It preserves the native sampler window and applies controlled delta scaling only through the exposed strengths. Neutral values (`1.0`, `1.0`) are intended to behave as a neutral comparison baseline.
+
+### DEEP_STEP_DELTA_CONTROL
+
+Research mode. It touches the deeper step route and can produce noise or unstable output. Use only for controlled experiments.
+
+## What Drift Means
+
+Drift means the generated result starts separating from the intended route.
+
+Examples:
+
+- Source drift: the video stops respecting the source image.
+- Prompt drift: the output moves away from the prompt.
+- Identity drift: the subject changes too much over time.
+- Motion drift: movement becomes unstable, reversed, or too chaotic.
+- Cascade drift: the next segment does not continue the previous segment cleanly.
+- Math drift: experimental math starts overriding generation instead of guiding it.
+
+Singularity does not magically remove drift. It gives you evidence for where drift appears.
+
+## CompletionGate
+
+`CompletionGate = PASS` means the structural route completed:
+
+- the requested stages were recorded;
+- the cascade route reached a final output;
+- `result_status = VIDEO`;
+- a final video path exists.
+
+It does not mean the video is visually good. Always inspect the video itself.
+
+Cancelled or no-video runs should not report final PASS.
+
+## Installation
+
+Copy or clone this folder into:
+
+```text
+ComfyUI/custom_nodes/Singularity
+```
+
+Then restart ComfyUI.
+
+No extra Python requirements are currently needed beyond the ComfyUI runtime and the custom nodes your Wan workflow already uses.
 
 ## Known Limits
 
-- Public alpha: expect rough edges.
-- Built and tested around Wan I2V-style workflows.
-- Fixed-seed reproducibility can change across ComfyUI, model, scheduler, torch, and driver versions.
-- `CompletionGate PASS` is structural evidence, not a visual-quality guarantee.
-- Deep step control is research-grade and can produce unstable output.
-- Full formula coverage at every denoising step is still an active research direction.
+- Public alpha, not final stable release.
+- Wan I2V is the current test route.
+- The public cascade limit is 5.
+- Full N-cascade policy UI is planned later.
+- Model loading, LoRA loading, and Torch Compile are still external workflow responsibilities.
+- Deep math is research-only.
+- CompletionGate is structural, not aesthetic.
 
-## Outputs
+## Suggested Test
 
-The node returns:
+Start with:
 
-- `status`: compact run status.
-- `saved_video_path`: video file path when saving succeeds.
-- `saved_report_path`: markdown report path when report saving succeeds.
-- `report`: report text.
+```text
+cascade_count = 2
+pause_after_cascade_1 = true
+frames_per_cascade = 49
+seed = 123
+math_control_mode = LATENT_DELTA_SCALE
+high_delta_strength = 1.0
+low_delta_strength = 1.0
+save_video = true
+save_report = true
+```
+
+When the pause panel appears, choose one of the tail candidates and press `Resume Cascade / Continue`. The final output should be one stitched video.

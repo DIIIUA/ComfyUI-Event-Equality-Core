@@ -1,1 +1,2 @@
-# Event Equality Core adapters package
+# Singularity adapters package
+

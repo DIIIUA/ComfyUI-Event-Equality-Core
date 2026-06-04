@@ -75,6 +75,7 @@ class EventSamplerCore:
     ) -> EventSamplerResult:
         records = [{
             "stage": "event_sampler_begin",
+            "status": "begin",
             "branch_name": window.branch_name,
             "branch_role": window.branch_role,
             "start_at_step": window.start_at_step,

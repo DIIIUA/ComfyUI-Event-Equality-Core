@@ -1,1 +1,2 @@
-# Event Equality Core - resolvers package
+# Singularity - resolvers package
+

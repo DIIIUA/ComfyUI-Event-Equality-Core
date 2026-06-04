@@ -1,1 +1,2 @@
-# Event Equality Core - readers package
+# Singularity - readers package
+

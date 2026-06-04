@@ -51,101 +51,11 @@ def build_markdown_report(packet=None) -> str:
     summary = packet_summary(packet)
 
     lines = []
-    lines.append("# Event Equality Report")
+    lines.append("# Singularity Report")
 
-    event_core_body = packet.get("metadata", {}).get("event_core_body", {})
-    if event_core_body:
-        summary_top = event_core_body.get("summary", {}) if isinstance(event_core_body.get("summary", {}), dict) else {}
-        gate = event_core_body.get("completion_gate", {}) if isinstance(event_core_body.get("completion_gate", {}), dict) else {}
-        runtime_summary = event_core_body.get("runtime_monitor_summary", {}) if isinstance(event_core_body.get("runtime_monitor_summary", {}), dict) else {}
-        lines.append("")
-        lines.append("## Event Core Body Top Summary")
-        lines.append(f"- runtime_body_version: {event_core_body.get('body_version')}")
-        lines.append(f"- audit_gate: {summary_top.get('audit_gate', gate.get('status', 'UNKNOWN'))}")
-        lines.append(f"- one_node_ok: {summary_top.get('one_node_ok')}")
-        lines.append(f"- stage_order_ok: {summary_top.get('stage_order_ok')}")
-        lines.append(f"- missing_total: {summary_top.get('missing_total')}")
-        lines.append(f"- stage_math_count: {summary_top.get('stage_math_count')}")
-        lines.append(f"- boundary_math_count: {summary_top.get('boundary_math_count')}")
-        lines.append(f"- live_route_count: {summary_top.get('live_route_count')}")
-        lines.append(f"- runtime_monitor_count: {summary_top.get('runtime_monitor_count')}")
-        lines.append(f"- local_sstate_count: {summary_top.get('local_sstate_count')}")
-        lines.append(f"- event_conflict_count: {summary_top.get('event_conflict_count')}")
-        if runtime_summary:
-            lines.append(f"- runtime_observer_span_seconds: {runtime_summary.get('observed_stage_span_seconds')}")
-            lines.append(f"- runtime_observer_only: {runtime_summary.get('observer_only')}")
-
-        local_sstates = event_core_body.get("local_sstates", [])
-        if local_sstates:
-            lines.append("")
-            lines.append("## Local SState Formula Role Breakdown")
-            for item in local_sstates:
-                lines.append(
-                    f"- {item.get('name')}: role={item.get('formula_role')} "
-                    f"present={item.get('stage_present')} status={item.get('status')} "
-                    f"granularity={item.get('granularity')}"
-                )
-
-        live_timeline = event_core_body.get("live_route_timeline", [])
-        if live_timeline:
-            lines.append("")
-            lines.append("## Live Route Timeline")
-            for item in live_timeline[:60]:
-                memory = item.get("memory", {}) if isinstance(item.get("memory", {}), dict) else {}
-                mem_bits = []
-                if "process_rss_mb" in memory:
-                    mem_bits.append(f"rss_mb={memory.get('process_rss_mb')}")
-                if memory.get("torch_cuda_available"):
-                    mem_bits.append(f"cuda_alloc_mb={memory.get('cuda_allocated_mb')} cuda_reserved_mb={memory.get('cuda_reserved_mb')}")
-                mem_text = f" {' '.join(mem_bits)}" if mem_bits else ""
-                lines.append(
-                    f"- [{item.get('index')}] {item.get('stage')} type={item.get('record_type')} "
-                    f"status={item.get('status')} route={item.get('route_id')}{mem_text}"
-                )
-            if len(live_timeline) > 60:
-                lines.append(f"- ... {len(live_timeline) - 60} more live route records")
-
-        sidecars = packet.get("metadata", {}).get("runtime_monitor_sidecars")
-        if isinstance(sidecars, dict) and sidecars:
-            lines.append("")
-            lines.append("## Runtime Monitor Sidecars")
-            lines.append(f"- status: {sidecars.get('status')}")
-            lines.append(f"- json_path: {sidecars.get('json_path')}")
-            lines.append(f"- csv_path: {sidecars.get('csv_path')}")
-            lines.append(f"- diff_path: {sidecars.get('diff_path')}")
-            lines.append(f"- previous_json_path: {sidecars.get('previous_json_path')}")
-            lines.append(f"- settings_signature: {sidecars.get('settings_signature')}")
-            lines.append(f"- observer_only: {sidecars.get('observer_only')}")
-
-        barrier_summary = packet.get("metadata", {}).get("branch_barrier_summary")
-        if isinstance(barrier_summary, dict) and barrier_summary:
-            lines.append("")
-            lines.append("## Smart Branch Barrier Summary")
-            lines.append(f"- record_count: {barrier_summary.get('record_count')}")
-            lines.append(f"- strategy_state_checks: {barrier_summary.get('strategy_state_checks')}")
-            lines.append(f"- strategy_state_preserved_count: {barrier_summary.get('strategy_state_preserved_count')}")
-            lines.append(f"- observer_only: {barrier_summary.get('observer_only')}")
-            phase_counts = barrier_summary.get("phase_counts", {})
-            if isinstance(phase_counts, dict) and phase_counts:
-                for phase, count in phase_counts.items():
-                    lines.append(f"- phase_{phase}: {count}")
-
-        barrier_records = packet.get("metadata", {}).get("branch_barrier_records")
-        if isinstance(barrier_records, list) and barrier_records:
-            lines.append("")
-            lines.append("## Smart Branch Barrier Records")
-            for item in barrier_records[:24]:
-                phase = item.get("barrier_phase")
-                preserved = item.get("strategy_state_preserved")
-                released = item.get("released", {}).get("actions", [])
-                released_text = ", ".join([str(x) for x in released]) if released else "none"
-                rss_delta = item.get("memory_delta", {}).get("process_rss_mb", "")
-                lines.append(
-                    f"- phase={phase} preserved={preserved} released={released_text} rss_delta_mb={rss_delta}"
-                )
-            if len(barrier_records) > 24:
-                lines.append(f"- ... {len(barrier_records) - 24} more barrier records")
-
+    # Event Core Body rich rendering heavily removed (physical cut #20)
+    # The old comfort sections (Top Summary, Live Timeline, Barrier Records, etc.)
+    # depended on data that has been systematically gutted.
     lines.append("")
     lines.append("## Packet Summary")
     for key, value in summary.items():
@@ -232,13 +142,7 @@ def build_markdown_report(packet=None) -> str:
         for key, value in wan_topology.items():
             lines.append(f"- {key}: {value}")
 
-    cleanup_records = packet.get("metadata", {}).get("cleanup_records")
-    if cleanup_records:
-        lines.append("")
-        lines.append("## Memory Cleanup Records")
-        for record in cleanup_records:
-            lines.append(f"- {record}")
-
+    # cleanup_records rendering removed (physical cut #25): mechanism fully excised in previous cuts.
     execution_records = packet.get("metadata", {}).get("execution_records")
     if execution_records:
         lines.append("")
@@ -497,3 +401,4 @@ def build_markdown_report(packet=None) -> str:
         lines.append("- none")
 
     return "\n".join(lines)
+

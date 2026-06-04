@@ -1,11 +1,13 @@
 [project]
-name = "comfyui-event-equality-core"
-description = "Event Horizon / Event Equality Core: experimental Wan I2V runtime audit node with Event Core Body, Runtime Monitor, and Smart Branch Barrier."
+name = "comfyui-singularity"
+description = "Singularity: Wan I2V cascade frame selection, same-run continuation, stitched video output, and runtime diagnostics for ComfyUI."
 version = "0.1.1-r59"
-license = { text = "CC-BY-NC-4.0" }
+license = { text = "MIT" }
 dependencies = []
 
 [tool.comfy]
-PublisherId = "event-horizon-local-alpha"
-DisplayName = "Event Horizon / Event Equality Core"
+PublisherId = "diiiua"
+DisplayName = "Singularity"
 Icon = ""
+
+

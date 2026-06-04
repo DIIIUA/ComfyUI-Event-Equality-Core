@@ -1,0 +1,3023 @@
+import copy
+import csv
+import json
+import math
+import os
+import re
+import inspect
+import importlib
+import time
+import hashlib
+from pathlib import Path
+from datetime import datetime
+from .enums import (
+    DEBUG_MODES,
+    DEBUG_BASIC,
+    TECH_TEXT,
+    TECH_LATENT,
+    TECH_IMAGE,
+    TECH_NOISE,
+    TECH_CONDITIONING,
+    TECH_DELTA,
+    FORMULA_ROLES_CODE_PASS_6,
+    RELATION_TYPES_CODE_PASS_6,
+    EQ_UNKNOWN,
+    SPACE_TEXT,
+    SPACE_LATENT,
+    SPACE_IMAGE,
+    SPACE_NOISE,
+    SPACE_CONDITIONING,
+    SPACE_DELTA,
+    ROLE_UNKNOWN,
+    ROLE_OUTCOME_PREVIOUS,
+    ROLE_OUTCOME_NEXT,
+    ROLE_OBSERVED_BEHAVIOR,
+    SEV_LOW,
+    SEV_INFO,
+    SEV_MEDIUM,
+    CONFLICT_ROLE_UNKNOWN,
+    CONFLICT_NO_READER_FOUND,
+    CONFLICT_EMPTY_RELATION,
+    CONFLICT_INVALID_SIGNAL_ID,
+    CONFLICT_DELTA_UNAVAILABLE,
+    CONFLICT_BOUNDARY_SHAPE_MISMATCH,
+    CONFLICT_SAMPLER_BOUNDARY_SHAPE_MISMATCH,
+    CONFLICT_SAMPLER_DELTA_UNAVAILABLE,
+    CONFLICT_SAMPLER_METADATA_MISSING,
+    CONFLICT_NO_STABLE_ANCHORS,
+    CONFLICT_NO_ACTIVE_CHANGES,
+    CONFLICT_NO_CONTACT_RULE,
+    CONFLICT_NO_ENDPOINT,
+    CONFLICT_NO_FORBIDDEN_DRIFT,
+    CONFLICT_NOISE_MISSING,
+    CONFLICT_NOISE_SHAPE_UNKNOWN,
+    CONFLICT_NOISE_READER_FAILED,
+    CONFLICT_NOISE_LATENT_SHAPE_MISMATCH,
+    CONFLICT_ALPHA_ROUTE_MISSING,
+    CONFLICT_ALPHA_PARTIAL_INPUT,
+    CONFLICT_FROZEN_ROUTE_MISSING,
+    CONFLICT_FROZEN_PARTIAL_OBSERVABILITY,
+    CONFLICT_PASSTHROUGH_OUTPUT_MISSING,
+    CONFLICT_PACKET_BRANCH_CREATED,
+    CONFLICT_REPORT_SAVE_FAILED,
+    REL_GUIDES,
+    REL_CONSTRAINS,
+    REL_EXPANDS_TO,
+    REL_TRANSFORMS_INTO,
+)
+from .packet import (
+    make_event_packet,
+    ensure_packet,
+    record_stage,
+    add_signal,
+    add_projection,
+    add_relation,
+    add_conflict,
+    get_latest_signals,
+    get_projection_ids_for_signal,
+    signal_exists,
+)
+from .signal import make_event_signal
+from .relation import make_event_relation
+from .conflict import make_conflict
+from .event_sampler import EventSamplerCore, EventSamplerWindow, EventSamplerResult
+import os
+import sys
+
+# Ensure parent directory is in sys.path so relative imports work
+# when loaded by ComfyUI's custom node loader
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_parent_dir = os.path.dirname(_current_dir)
+if _parent_dir not in sys.path:
+    sys.path.insert(0, _parent_dir)
+
+from ..reports.markdown_report import build_markdown_report
+from ..resolvers.role_resolver import resolve_role
+from ..resolvers.operator_registry import OperatorRegistry
+from ..resolvers.s_resolver import build_sstate_from_packet
+from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, safe_shape
+from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
+from ..adapters.wan.wan_adapter import apply_wan_adapter
+
+try:
+    from server import PromptServer
+    from aiohttp import web
+    from comfy.model_management import InterruptProcessingException
+except Exception:
+    PromptServer = None
+    web = None
+    InterruptProcessingException = RuntimeError
+
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r59"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R59 Strategy Math Native Loop"
+EVENT_HORIZON_BODY_VERSION = "0.1-r59"
+_SINGULARITY_PAUSE_STATES = {}
+
+
+def _event_json_safe(value, depth=0):
+    if depth > 8:
+        return str(type(value).__name__)
+    if value is None or isinstance(value, (str, int, bool)):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else str(value)
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(k): _event_json_safe(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_event_json_safe(v, depth + 1) for v in value]
+    return str(value)
+
+
+def _singularity_pause_key(node_id):
+    text = str(node_id or "global").strip()
+    return text or "global"
+
+
+def _singularity_parse_resume_index(value, default=-1):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+if PromptServer is not None and web is not None:
+    @PromptServer.instance.routes.post("/singularity/cascade/continue/{node_id}")
+    async def _singularity_handle_cascade_continue(request):
+        node_id = _singularity_pause_key(request.match_info.get("node_id"))
+        try:
+            payload = await request.json()
+        except Exception:
+            payload = {}
+        resume_frame_index = _singularity_parse_resume_index(
+            payload.get("resume_frame_index", -1),
+            default=-1,
+        )
+        _SINGULARITY_PAUSE_STATES[node_id] = {
+            "status": "continue",
+            "resume_frame_index": resume_frame_index,
+            "updated_at": time.time(),
+        }
+        return web.json_response({
+            "status": "ok",
+            "node_id": node_id,
+            "resume_frame_index": resume_frame_index,
+        })
+
+    @PromptServer.instance.routes.post("/singularity/cascade/cancel/{node_id}")
+    async def _singularity_handle_cascade_cancel(request):
+        node_id = _singularity_pause_key(request.match_info.get("node_id"))
+        _SINGULARITY_PAUSE_STATES[node_id] = {
+            "status": "cancelled",
+            "updated_at": time.time(),
+        }
+        return web.json_response({"status": "ok", "node_id": node_id})
+
+    @PromptServer.instance.routes.post("/singularity/cascade/cancel")
+    async def _singularity_handle_cascade_cancel_all(request):
+        touched = []
+        if _SINGULARITY_PAUSE_STATES:
+            for node_id in list(_SINGULARITY_PAUSE_STATES.keys()):
+                _SINGULARITY_PAUSE_STATES[node_id] = {
+                    "status": "cancelled",
+                    "updated_at": time.time(),
+                }
+                touched.append(node_id)
+        return web.json_response({"status": "ok", "node_ids": touched})
+
+    @PromptServer.instance.routes.get("/singularity/cascade/status/{node_id}")
+    async def _singularity_handle_cascade_status(request):
+        node_id = _singularity_pause_key(request.match_info.get("node_id"))
+        state = _SINGULARITY_PAUSE_STATES.get(node_id, {})
+        return web.json_response({
+            "node_id": node_id,
+            "state": _event_json_safe(state),
+        })
+
+
+
+def _read_signal(packet, technical_type, representation_space, raw_ref, source_stage, manual_role, route_id, reader_operator, metadata=None, route_position=""):
+    packet = ensure_packet(packet)
+    role = resolve_role(
+        technical_type,
+        position_context={"stage_name": source_stage, "route_position": route_position},
+        manual_role=manual_role,
+    )
+
+    conflict_ids = []
+    signal = make_event_signal(
+        technical_type=technical_type,
+        formula_role=role,
+        representation_space=representation_space,
+        raw_ref=raw_ref,
+        source_stage=source_stage,
+        created_by=f"EventRead{technical_type.title()}",
+        reader_operator=reader_operator,
+        route_id=route_id,
+        position_context={"route_position": route_position},
+        metadata=metadata or {},
+    )
+
+    projection = OperatorRegistry().read(signal)
+
+    if role == ROLE_UNKNOWN:
+        conflict = make_conflict(
+            CONFLICT_ROLE_UNKNOWN,
+            severity=SEV_LOW,
+            involved_signal_ids=[signal["id"]],
+            stage_position=source_stage,
+            suspected_cause="RoleResolver could not assign a formula role.",
+            observed_symptom=f"{technical_type} resolved to UnknownRole.",
+            suggested_response="Provide a manual role or improve position_context.",
+        )
+        packet = add_conflict(packet, conflict)
+        conflict_ids.append(conflict["id"])
+
+    if projection.get("metadata", {}).get("warning") == CONFLICT_NO_READER_FOUND or projection.get("operator_name") == "UnknownReader":
+        conflict = make_conflict(
+            CONFLICT_NO_READER_FOUND,
+            severity=SEV_MEDIUM,
+            involved_signal_ids=[signal["id"]],
+            involved_projection_ids=[projection["id"]],
+            stage_position=source_stage,
+            suspected_cause="OperatorRegistry found no reader for this signal.",
+            observed_symptom=f"No reader for technical type {technical_type}.",
+            suggested_response="Add/register a ReaderOperator for this technical type.",
+        )
+        packet = add_conflict(packet, conflict)
+        conflict_ids.append(conflict["id"])
+
+    packet = add_signal(packet, signal)
+    packet = add_projection(packet, projection)
+    packet = record_stage(
+        packet,
+        stage_name=f"EventRead{technical_type.title()}",
+        action="READ_SIGNAL",
+        observed_behavior=f"{technical_type} read as {role}",
+        output_signal_ids=[signal["id"]],
+        projection_ids=[projection["id"]],
+        conflict_ids=conflict_ids,
+        formula_note=f"{technical_type} projected into EVENT_SPACE",
+    )
+    return packet, signal, projection, conflict_ids
+
+
+def _parse_id_list(value):
+    text = str(value or "").strip()
+    if not text:
+        return []
+    if text.lower() in ("latest", "auto"):
+        return []
+    return [x.strip() for x in text.split(",") if x.strip()]
+
+
+
+def _event_core_list_input_images():
+    try:
+        import folder_paths
+        input_dir = folder_paths.get_input_directory()
+        if not os.path.isdir(input_dir):
+            return ["none"]
+        valid_ext = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff"}
+        files = []
+        for name in os.listdir(input_dir):
+            path = os.path.join(input_dir, name)
+            if os.path.isfile(path) and os.path.splitext(name)[1].lower() in valid_ext:
+                files.append(name)
+        files = sorted(files)
+        return ["none"] + files if files else ["none"]
+    except Exception:
+        return ["none"]
+
+
+def _event_core_list_output_folders():
+    try:
+        import folder_paths
+        output_dir = folder_paths.get_output_directory()
+        entries = ["default"]
+        if os.path.isdir(output_dir):
+            for root, dirs, files in os.walk(output_dir):
+                rel = os.path.relpath(root, output_dir)
+                if rel != ".":
+                    entries.append(rel.replace("\\", "/"))
+                if len(entries) >= 100:
+                    break
+        return sorted(set(entries))
+    except Exception:
+        return ["default"]
+
+
+
+def _event_core_preferred_media_dirs(media_type="video"):
+    media_type = str(media_type or "video").lower()
+    if media_type == "video":
+        folder_names = ["VID"]
+    elif media_type == "image":
+        folder_names = ["PIC"]
+    elif media_type == "report":
+        folder_names = ["reports"]
+    else:
+        folder_names = [media_type]
+
+    # Old D:\AI NSFW paths removed (updated 2026-06)
+    roots = []
+    candidates = []
+    for root in roots:
+        for name in folder_names:
+            candidates.append(root / name)
+    return candidates
+
+
+class SingularityExecutionMixin:
+    def _save_image_attempt(self, image, save_prefix, records):
+        result = self._call_node_method("SaveImage", ["save_images"], images=image, filename_prefix=str(save_prefix or "Singularity"))
+        records.append({"stage": "EventSaveFrames", "status": "ok", "result": str(result)[:300]})
+        self._event_universal_stage_math(
+            records,
+            "EventSaveFrames",
+            input_state=image,
+            output_state=str(result)[:300],
+            observed_behavior="decoded frame/image tensor saved as image assets",
+            formula_role="IMAGE/FRAMES VisibleOutcome -> FILE output reference",
+            route_id="route_save_frames",
+            next_requirement="saved image assets should match decoded visible outcome",
+            control_mode="REPORT_ONLY",
+            metadata={"save_prefix": str(save_prefix or "Singularity")},
+        )
+        return str(result)
+
+    def _normalize_video_path_candidate(self, candidate):
+        if candidate is None:
+            return ""
+        c = str(candidate)
+        if not c:
+            return ""
+        exts = (".mp4", ".webp", ".gif", ".mov", ".mkv")
+        if not c.lower().endswith(exts):
+            return ""
+
+        # If absolute, return it even if the file existence check fails during Comfy async timing.
+        if os.path.isabs(c):
+            return c
+
+        try:
+            import folder_paths
+            output_dir = Path(folder_paths.get_output_directory())
+        except Exception:
+            output_dir = Path.cwd() / "output"
+
+        direct = output_dir / c
+        if direct.exists():
+            return str(direct)
+
+        # VHS sometimes gives only filename and subfolder separately; search by basename.
+        if output_dir.exists():
+            matches = list(output_dir.rglob(Path(c).name))
+            if matches:
+                return str(max(matches, key=lambda x: x.stat().st_mtime))
+
+        # As a last resort return the candidate, but report will show it was unresolved.
+        return c
+
+    def _extract_path_from_video_result(self, result, save_prefix, records, *args, **kwargs):
+        """
+        r19: extract path only from standard VHS return / standard ComfyUI output.
+        """
+        raw_description = str(result)[:1000]
+
+        try:
+            import folder_paths
+            output_dir = Path(folder_paths.get_output_directory())
+        except Exception:
+            output_dir = Path.cwd() / "output"
+
+        try:
+            if isinstance(result, dict):
+                gifs = result.get("ui", {}).get("gifs", []) or []
+                for item in gifs:
+                    if isinstance(item, dict):
+                        fullpath = item.get("fullpath")
+                        path = self._normalize_video_path_candidate(fullpath)
+                        if path:
+                            records.append({"stage": "EventVideoCombine_extract_path", "status": "ok", "mode": "ui.gifs.fullpath", "path": path})
+                            return path
+                        filename = item.get("filename")
+                        subfolder = item.get("subfolder", "")
+                        if filename:
+                            candidate = output_dir / str(subfolder) / str(filename)
+                            path = self._normalize_video_path_candidate(str(candidate))
+                            if path:
+                                records.append({"stage": "EventVideoCombine_extract_path", "status": "ok", "mode": "ui.gifs.filename", "path": path})
+                                return path
+        except Exception as e:
+            records.append({"stage": "EventVideoCombine_extract_path", "status": "ui_parse_failed", "error": str(e)})
+
+        candidates = []
+        def visit(obj, depth=0):
+            if obj is None or depth > 8:
+                return
+            if isinstance(obj, str):
+                candidates.append(obj)
+                return
+            if isinstance(obj, (list, tuple, set)):
+                for x in obj:
+                    visit(x, depth + 1)
+                return
+            if isinstance(obj, dict):
+                for key in ("fullpath", "path", "filename", "file", "files", "result", "results", "ui", "gifs", "images"):
+                    if key in obj:
+                        visit(obj[key], depth + 1)
+                return
+            for attr in ("fullpath", "path", "filename", "file", "files", "result", "results", "value", "values", "output", "outputs", "data"):
+                if hasattr(obj, attr):
+                    try:
+                        visit(getattr(obj, attr), depth + 1)
+                    except Exception:
+                        pass
+            d = getattr(obj, "__dict__", None)
+            if isinstance(d, dict):
+                visit(d, depth + 1)
+
+        visit(result)
+        for ext in (".mp4", ".mov", ".mkv", ".webp", ".gif"):
+            for c in candidates:
+                if isinstance(c, str) and c.lower().endswith(ext):
+                    path = self._normalize_video_path_candidate(c)
+                    if path:
+                        records.append({"stage": "EventVideoCombine_extract_path", "status": "ok", "mode": "recursive_standard_vhs", "path": path})
+                        return path
+
+        newest = self._find_latest_standard_output_video(save_prefix, records)
+        if newest:
+            return newest
+
+        records.append({
+            "stage": "EventVideoCombine_extract_path",
+            "status": "not_found",
+            "raw_result_type": f"{type(result).__module__}.{type(result).__name__}",
+            "raw_result": raw_description,
+            "candidates": [str(x)[:200] for x in candidates[:20]],
+        })
+        return ""
+
+
+    def _get_first_available_node_class(self, class_names, records=None, stage="node_class_lookup"):
+        errors = {}
+        for class_name in class_names:
+            try:
+                cls = self._get_node_class(class_name)
+                if records is not None:
+                    records.append({
+                        "stage": stage,
+                        "status": "found",
+                        "class_name": class_name,
+                        "class": str(cls),
+                    })
+                return class_name, cls
+            except Exception as e:
+                errors[class_name] = str(e)
+        if records is not None:
+            records.append({
+                "stage": stage,
+                "status": "not_found",
+                "class_names": list(class_names),
+                "errors": errors,
+            })
+        raise RuntimeError(f"No candidate node class found for {class_names}; errors={errors}")
+
+    def _call_candidate_node_method(self, class_names, method_names, records=None, stage="candidate_node_call", *args, **kwargs):
+        last_error = None
+        tried = []
+        for class_name in class_names:
+            try:
+                # Check class exists first so report shows whether VHS is installed / mapped.
+                self._get_first_available_node_class([class_name], records=records, stage=f"{stage}_class_check")
+                tried.append(class_name)
+                return self._call_node_method(class_name, method_names, *args, **kwargs)
+            except Exception as e:
+                last_error = e
+                if records is not None:
+                    records.append({
+                        "stage": stage,
+                        "status": "candidate_failed",
+                        "class_name": class_name,
+                        "error": str(e),
+                    })
+        raise RuntimeError(f"All candidate node calls failed. tried={tried}; last_error={last_error}")
+
+    def _frames_to_uint8_numpy(self, image, records=None, stage="frames_to_uint8"):
+        try:
+            import numpy as np
+            frames = image
+            if not hasattr(frames, "detach"):
+                raise RuntimeError(f"{stage} expected torch-like IMAGE batch, got {type(frames)}")
+            arr = frames.detach().cpu().numpy()
+            if arr.ndim != 4:
+                raise RuntimeError(f"{stage} expected IMAGE batch [N,H,W,C], got shape={getattr(arr, 'shape', None)}")
+            finite = np.isfinite(arr)
+            nonfinite_count = int(arr.size - finite.sum())
+            if nonfinite_count > 0:
+                raise RuntimeError(f"{stage} refusing to encode non-finite frames: nonfinite_count={nonfinite_count}, shape={arr.shape}")
+            arr = (np.clip(arr, 0.0, 1.0) * 255).astype("uint8")
+            if records is not None:
+                records.append({"stage": stage, "status": "ok", "shape": list(arr.shape), "nonfinite_count": 0})
+            return arr
+        except Exception as e:
+            if records is not None:
+                records.append({"stage": stage, "status": "failed", "error": str(e)})
+            raise
+
+    def _fallback_animated_export(self, image, fps, save_prefix, video_format, records, output_target="USER_D_AI_NSFW", output_folder_mode="DEFAULT", output_folder="default", custom_output_folder=""):
+        """
+        Emergency media writer if VHS is absent or incompatible.
+        Tries mp4 first, then animated WebP. It must physically write a file or return "".
+        """
+        try:
+            arr = self._frames_to_uint8_numpy(image, records=records, stage="EventVideoFallback_frames_to_numpy")
+            output_dir = self._resolve_output_dir(output_folder_mode, output_folder, custom_output_folder, subdir="", output_target=output_target, media_type="video")
+            output_dir.mkdir(parents=True, exist_ok=True)
+            safe_prefix = re.sub(r"[^a-zA-Z0-9_\\-]+", "_", str(save_prefix or "Singularity")).strip("_") or "Singularity"
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+            # 1) imageio v3 / ffmpeg if available.
+            if "mp4" in str(video_format).lower():
+                try:
+                    import imageio.v3 as iio
+                    path = output_dir / f"{safe_prefix}_{ts}_fallback_imageio.mp4"
+                    iio.imwrite(str(path), arr, fps=float(fps), codec="libx264")
+                    if path.exists() and path.stat().st_size > 0:
+                        records.append({"stage": "EventVideoFallbackImageIO", "status": "ok", "path": str(path), "size": path.stat().st_size})
+                        return str(path)
+                    records.append({"stage": "EventVideoFallbackImageIO", "status": "wrote_no_file_or_empty", "path": str(path)})
+                except Exception as e:
+                    records.append({"stage": "EventVideoFallbackImageIO", "status": "failed", "error": str(e)})
+
+                # 2) OpenCV mp4 if available.
+                try:
+                    import cv2
+                    path = output_dir / f"{safe_prefix}_{ts}_fallback_cv2.mp4"
+                    h, w = int(arr.shape[1]), int(arr.shape[2])
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    writer = cv2.VideoWriter(str(path), fourcc, float(fps), (w, h))
+                    if not writer.isOpened():
+                        raise RuntimeError("cv2.VideoWriter did not open")
+                    for frame in arr:
+                        writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                    writer.release()
+                    if path.exists() and path.stat().st_size > 0:
+                        records.append({"stage": "EventVideoFallbackCV2", "status": "ok", "path": str(path), "size": path.stat().st_size})
+                        return str(path)
+                    records.append({"stage": "EventVideoFallbackCV2", "status": "wrote_no_file_or_empty", "path": str(path)})
+                except Exception as e:
+                    records.append({"stage": "EventVideoFallbackCV2", "status": "failed", "error": str(e)})
+
+            # 3) Animated WebP fallback.
+            try:
+                from PIL import Image
+                path = output_dir / f"{safe_prefix}_{ts}_fallback.webp"
+                pil_frames = [Image.fromarray(frame) for frame in arr]
+                duration = int(1000 / max(1, float(fps)))
+                pil_frames[0].save(path, save_all=True, append_images=pil_frames[1:], duration=duration, loop=0, lossless=True)
+                if path.exists() and path.stat().st_size > 0:
+                    records.append({"stage": "EventVideoFallbackWebP", "status": "ok", "path": str(path), "size": path.stat().st_size})
+                    return str(path)
+                records.append({"stage": "EventVideoFallbackWebP", "status": "wrote_no_file_or_empty", "path": str(path)})
+            except Exception as e:
+                records.append({"stage": "EventVideoFallbackWebP", "status": "failed", "error": str(e)})
+
+            return ""
+        except Exception as e:
+            records.append({"stage": "EventVideoFallback", "status": "failed", "error": str(e)})
+            return ""
+
+
+    def _extract_vhs_ui_payload_from_records(self, records):
+        """
+        r21: recover the VHS UI payload so ComfyUI can display the generated video
+        in the node UI without adding IMAGE outputs.
+        """
+        try:
+            import ast
+            for rec in reversed(records or []):
+                if rec.get("stage") == "EventVideoCombine" and rec.get("raw_vhs_result"):
+                    raw = rec.get("raw_vhs_result")
+                    try:
+                        payload = ast.literal_eval(raw)
+                    except Exception:
+                        payload = None
+                    if isinstance(payload, tuple) and len(payload) > 0:
+                        payload = payload[0]
+                    if isinstance(payload, dict) and isinstance(payload.get("ui"), dict):
+                        ui = payload.get("ui")
+                        if "gifs" in ui:
+                            return {"gifs": ui.get("gifs")}
+                        if "images" in ui:
+                            return {"images": ui.get("images")}
+        except Exception:
+            pass
+        return None
+
+    def _video_combine_attempt(self, image, fps, save_prefix, records, video_format="video/h264-mp4", force_vhs=True, output_target="COMFY_OUTPUT", output_folder_mode="DEFAULT", output_folder="default", custom_output_folder=""):
+        """
+        r19: Standard VHS-only save.
+
+        This intentionally matches the working JSON:
+        VHS_VideoCombine receives filename_prefix, format, frame_rate, save_output=True.
+        It does NOT receive output_dir or custom path arguments.
+        VHS saves into the standard ComfyUI output folder.
+        """
+        records.append({
+            "stage": "EventVideoSaveBegin",
+            "status": "start_standard_vhs",
+            "video_format": str(video_format),
+            "fps": fps,
+            "filename_prefix": str(save_prefix or "wansolo"),
+            "path_policy": "standard_comfyui_vhs_output_no_custom_output_dir",
+            "matches_working_json": True,
+            "loop_count": 0,
+            "pingpong": False,
+        })
+        self._event_universal_stage_math(
+            records,
+            "EventVideoSaveBegin",
+            input_state=image,
+            output_state=image,
+            observed_behavior="decoded frames prepared for VHS video combine without loop/pingpong modification",
+            formula_role="FRAMES VisibleOutcome -> FRAMES video input state",
+            route_id="route_video_save_begin",
+            next_requirement="VHS_VideoCombine receives ordered frames with frame_rate and save_output",
+            control_mode="REPORT_ONLY",
+            metadata={"video_format": str(video_format), "fps": float(fps), "loop_count": 0, "pingpong": False},
+        )
+
+        try:
+            self._frames_to_uint8_numpy(image, records=records, stage="EventVideoSave_validate_frames")
+        except Exception as e:
+            raise RuntimeError(f"Cannot save video because decoded frames are invalid: {e}")
+
+        try:
+            result = self._call_candidate_node_method(
+                ["VHS_VideoCombine"],
+                ["combine_video", "combine", "run", "execute"],
+                records=records,
+                stage="EventVideoCombineVHS",
+                images=image,
+                audio=None,
+                meta_batch=None,
+                vae=None,
+                frame_rate=float(fps),
+                loop_count=0,
+                filename_prefix=str(save_prefix or "wansolo"),
+                format=str(video_format or "video/h264-mp4"),
+                pingpong=False,
+                save_output=True,
+                pix_fmt="yuv420p",
+                crf=19,
+                save_metadata=True,
+                trim_to_audio=False,
+            )
+            path = self._extract_path_from_video_result(result, save_prefix, records)
+            if not path:
+                path = self._find_latest_standard_output_video(save_prefix, records)
+
+            records.append({
+                "stage": "EventVideoCombine",
+                "status": "ok" if path else "ok_no_path_returned",
+                "saved_video_path": path,
+                "raw_vhs_result": str(result)[:5000],
+                "formula": "decoded frames + VHS_VideoCombine(save_output=True) = saved video in standard ComfyUI output",
+            })
+            self._event_universal_stage_math(
+                records,
+                "EventVideoCombine",
+                input_state=image,
+                output_state=path or str(result)[:500],
+                observed_behavior="VHS_VideoCombine packaged decoded frames into video file/reference",
+                formula_role="FRAMES VisibleOutcome -> VIDEO file OutcomeFinal",
+                route_id="route_video_combine",
+                next_requirement="final report and UI preview should point to saved video path",
+                control_mode="REPORT_ONLY",
+                metadata={"video_format": str(video_format), "fps": float(fps), "saved_video_path": path or ""},
+            )
+
+            if path:
+                return path
+            raise RuntimeError(f"VHS_VideoCombine ran but no output path was found. raw={str(result)[:500]}")
+        except Exception as e:
+            records.append({"stage": "EventVideoCombine", "status": "failed_standard_vhs", "error": str(e)})
+            raise
+
+    def _find_latest_standard_output_video(self, save_prefix, records):
+        try:
+            import folder_paths
+            output_dir = Path(folder_paths.get_output_directory())
+        except Exception:
+            output_dir = Path.cwd() / "output"
+
+        safe_prefix = str(save_prefix or "wansolo")
+        found = []
+        if output_dir.exists():
+            for ext in (".mp4", ".webp", ".gif", ".mov", ".mkv"):
+                found.extend(output_dir.rglob(f"{safe_prefix}*{ext}"))
+
+        if found:
+            newest = max(found, key=lambda x: x.stat().st_mtime)
+            records.append({
+                "stage": "EventVideoCombine_standard_output_search",
+                "status": "ok",
+                "path": str(newest),
+                "output_dir": str(output_dir),
+            })
+            return str(newest)
+
+        records.append({
+            "stage": "EventVideoCombine_standard_output_search",
+            "status": "not_found",
+            "output_dir": str(output_dir),
+            "prefix": safe_prefix,
+        })
+        return ""
+
+
+    def _make_text_signal(self, packet, text, role, route, source_stage):
+        return _read_signal(
+            packet,
+            TECH_TEXT,
+            SPACE_TEXT,
+            text,
+            source_stage,
+            role,
+            route,
+            "TextStrategyReader",
+            metadata={"text_length": len(str(text or ""))},
+        )
+
+    def _fail_conflict(self, packet, stage, message, metadata=None):
+        conflict = make_conflict(
+            CONFLICT_FROZEN_PARTIAL_OBSERVABILITY,
+            severity=SEV_MEDIUM,
+            stage_position=stage,
+            suspected_cause="Terminal Wan workflow generation did not produce the requested target.",
+            observed_symptom=str(message),
+            suggested_response="Send Execution Records and ComfyUI traceback; next patch will fix exact incompatible stage.",
+            metadata=metadata or {},
+        )
+        packet = add_conflict(packet, conflict)
+        return packet, conflict["id"]
+
+    def _stage_delay(self, seconds, records, label):
+        try:
+            seconds = float(seconds or 0.0)
+        except Exception:
+            seconds = 0.0
+        if seconds <= 0:
+            return
+        try:
+            import time
+            records.append({"stage": "SingularityStageDelay", "status": "sleep", "seconds": seconds, "label": str(label)})
+            time.sleep(seconds)
+        except Exception as e:
+            records.append({"stage": "SingularityStageDelay", "status": "failed", "seconds": seconds, "label": str(label), "error": str(e)})
+
+    def _bounded_strategy_cfg(self, base_cfg, raw_delta_norm, strength, records, label):
+        base_cfg = float(base_cfg)
+        try:
+            raw = max(0.0, float(raw_delta_norm or 0.0))
+        except Exception:
+            raw = 0.0
+        try:
+            strength = float(strength if strength is not None else 1.0)
+        except Exception:
+            strength = 1.0
+
+        mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+        bounded_signal = math.tanh(math.log1p(raw) / 16.0) if raw > 0.0 else 0.0
+        multiplier = 1.0
+        adjusted_cfg = base_cfg
+        status = "observer_only"
+        policy = "preserve_model_native_cfg"
+
+        if mode == "DEEP_STEP_DELTA_CONTROL" and abs(strength - 1.0) >= 1e-9:
+            # Research mode only: raw latent norms are evidence, not CFG units.
+            # Any active CFG pressure must be bounded and explicitly marked.
+            strength_delta = strength - 1.0
+            multiplier = 1.0 + (strength_delta * 0.25 * bounded_signal)
+            multiplier = max(0.25, min(1.75, multiplier))
+            adjusted_cfg = base_cfg * multiplier
+            status = "bounded_research"
+            policy = "deep_research_bounded_cfg_projection"
+        elif mode == "LATENT_DELTA_SCALE":
+            policy = "latent_delta_scale_keeps_cfg_native"
+        elif mode not in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL"):
+            policy = "mode_keeps_cfg_native"
+
+        records.append({
+            "stage": "EventStrategyCfgCoupling",
+            "status": status,
+            "label": str(label),
+            "math_control_mode": mode,
+            "base_cfg": base_cfg,
+            "raw_delta_norm": raw,
+            "strength": strength,
+            "bounded_signal": bounded_signal,
+            "cfg_multiplier": multiplier,
+            "adjusted_cfg": adjusted_cfg,
+            "policy": policy,
+            "formula": "CFG is preserved in LATENT_DELTA_SCALE; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
+        })
+        return adjusted_cfg
+
+    def _save_pause_frames_to_temp(self, frames):
+        import folder_paths
+        import os
+        import random
+        from PIL import Image
+        import numpy as np
+
+        ui_images = []
+        try:
+            temp_dir = folder_paths.get_temp_directory()
+            total_f = int(frames.shape[0])
+
+            tail_start_idx = int(total_f * 0.8)
+            valid_indices = [
+                i for i in range(tail_start_idx, total_f)
+                if ((i + 1) - 1) % 4 == 0
+            ]
+            if len(valid_indices) < 3:
+                valid_indices = [
+                    i for i in range(total_f)
+                    if ((i + 1) - 1) % 4 == 0
+                ]
+            selected_indices = valid_indices[-3:] if valid_indices else [max(0, total_f - 1)]
+            prefix = "singularity_pause_" + str(random.randint(100000, 999999))
+
+            for idx, frame_idx in enumerate(selected_indices):
+                frame = frames[frame_idx]
+                img_array = (255.0 * frame.detach().cpu().numpy()).clip(0, 255).astype(np.uint8)
+                img = Image.fromarray(img_array)
+                filename = f"{prefix}_{idx}.png"
+                filepath = os.path.join(temp_dir, filename)
+                img.save(filepath)
+                ui_images.append({
+                    "filename": filename,
+                    "subfolder": "",
+                    "type": "temp",
+                    "resume_index": int(frame_idx) + 1,
+                })
+        except Exception as e:
+            print(f"[Singularity] Failed to save pause frames: {e}")
+        return ui_images
+
+    def _save_pause_preview_video_to_temp(self, frames, fps, execution_records, segment_index):
+        if frames is None:
+            return None
+        try:
+            import folder_paths
+            import random
+            import numpy as np
+            from PIL import Image
+
+            arr = self._frames_to_uint8_numpy(
+                frames,
+                records=execution_records,
+                stage=f"SingularityCascadePausePreview_{segment_index}_frames_to_numpy",
+            )
+            if arr.ndim != 4 or arr.shape[0] < 1:
+                raise RuntimeError(f"pause preview expected [N,H,W,C], got {getattr(arr, 'shape', None)}")
+
+            original_shape = list(arr.shape)
+            max_edge = 420
+            h, w = int(arr.shape[1]), int(arr.shape[2])
+            longest = max(h, w)
+            if longest > max_edge:
+                scale = float(max_edge) / float(longest)
+                target_w = max(2, int(round(w * scale)))
+                target_h = max(2, int(round(h * scale)))
+                target_w = max(2, target_w - (target_w % 2))
+                target_h = max(2, target_h - (target_h % 2))
+                resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.BICUBIC)
+                arr = np.stack([
+                    np.asarray(Image.fromarray(frame).resize((target_w, target_h), resample=resample))
+                    for frame in arr
+                ], axis=0).astype("uint8")
+
+            temp_dir = Path(folder_paths.get_temp_directory())
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            prefix = "singularity_pause_preview_" + str(segment_index) + "_" + str(random.randint(100000, 999999))
+
+            try:
+                import imageio.v3 as iio
+                filename = f"{prefix}.mp4"
+                path = temp_dir / filename
+                iio.imwrite(
+                    str(path),
+                    arr,
+                    fps=float(fps),
+                    codec="libx264",
+                    macro_block_size=1,
+                    output_params=["-pix_fmt", "yuv420p", "-crf", "24"],
+                )
+                if path.exists() and path.stat().st_size > 0:
+                    payload = {
+                        "filename": filename,
+                        "subfolder": "",
+                        "type": "temp",
+                        "format": "video/h264-mp4",
+                        "frame_count": int(arr.shape[0]),
+                        "preview_kind": "stitched_so_far",
+                    }
+                    execution_records.append({
+                        "stage": f"SingularityCascadePausePreview_{segment_index}",
+                        "status": "ok",
+                        "path": str(path),
+                        "size": int(path.stat().st_size),
+                        "original_shape": original_shape,
+                        "preview_shape": list(arr.shape),
+                        "storage": "temp",
+                        "formula": "stitched cascade frames so far are exposed as preview-only media; final Outcome is still produced by the final concat/video combine",
+                    })
+                    return payload
+                execution_records.append({
+                    "stage": f"SingularityCascadePausePreview_{segment_index}",
+                    "status": "empty_mp4",
+                    "path": str(path),
+                })
+            except Exception as e:
+                execution_records.append({
+                    "stage": f"SingularityCascadePausePreview_{segment_index}_mp4",
+                    "status": "failed_nonfatal",
+                    "error": str(e),
+                })
+
+            try:
+                filename = f"{prefix}.webp"
+                path = temp_dir / filename
+                pil_frames = [Image.fromarray(frame) for frame in arr]
+                duration = int(1000 / max(1, float(fps)))
+                pil_frames[0].save(path, save_all=True, append_images=pil_frames[1:], duration=duration, loop=0, lossless=False, quality=82)
+                if path.exists() and path.stat().st_size > 0:
+                    payload = {
+                        "filename": filename,
+                        "subfolder": "",
+                        "type": "temp",
+                        "format": "image/webp",
+                        "frame_count": int(arr.shape[0]),
+                        "preview_kind": "stitched_so_far",
+                    }
+                    execution_records.append({
+                        "stage": f"SingularityCascadePausePreview_{segment_index}_webp",
+                        "status": "ok",
+                        "path": str(path),
+                        "size": int(path.stat().st_size),
+                        "original_shape": original_shape,
+                        "preview_shape": list(arr.shape),
+                        "storage": "temp",
+                    })
+                    return payload
+            except Exception as e:
+                execution_records.append({
+                    "stage": f"SingularityCascadePausePreview_{segment_index}_webp",
+                    "status": "failed_nonfatal",
+                    "error": str(e),
+                })
+        except Exception as e:
+            execution_records.append({
+                "stage": f"SingularityCascadePausePreview_{segment_index}",
+                "status": "failed_nonfatal",
+                "error": str(e),
+            })
+        return None
+
+    def _wait_for_cascade_continue(self, node_id, generated_frames, segment_index, execution_records, stitched_preview_frames=None, fps=16):
+        node_key = _singularity_pause_key(node_id)
+        pause_frames = self._save_pause_frames_to_temp(generated_frames)
+        preview_video = self._save_pause_preview_video_to_temp(
+            stitched_preview_frames if stitched_preview_frames is not None else generated_frames,
+            fps,
+            execution_records,
+            segment_index,
+        )
+        resume_indices = [
+            _singularity_parse_resume_index(item.get("resume_index"), default=-1)
+            for item in pause_frames
+            if isinstance(item, dict)
+        ]
+        resume_indices = [idx for idx in resume_indices if idx > 0]
+        default_resume_index = resume_indices[-1] if resume_indices else -1
+
+        execution_records.append({
+            "stage": f"SingularityCascadePause_{segment_index}",
+            "status": "waiting_for_continue",
+            "node_id": node_key,
+            "pause_frame_count": len(pause_frames),
+            "resume_candidates": resume_indices,
+            "default_resume_frame_index": default_resume_index,
+            "stitched_preview": _event_json_safe(preview_video),
+            "formula": "cascade boundary waits inside the current prompt until the user selects a MirrorCut frame",
+        })
+
+        if PromptServer is None:
+            execution_records.append({
+                "stage": f"SingularityCascadePause_{segment_index}_Fallback",
+                "status": "auto_continue_no_prompt_server",
+                "resume_frame_index": default_resume_index,
+            })
+            return default_resume_index, pause_frames
+
+        existing_state = _SINGULARITY_PAUSE_STATES.get(node_key, {})
+        if existing_state.get("status") != "continue":
+            _SINGULARITY_PAUSE_STATES[node_key] = {
+                "status": "paused",
+                "segment_index": int(segment_index),
+                "resume_frame_index": default_resume_index,
+                "resume_candidates": resume_indices,
+                "pause_frames": _event_json_safe(pause_frames),
+                "preview_video": _event_json_safe(preview_video),
+                "updated_at": time.time(),
+            }
+
+        PromptServer.instance.send_sync("singularity_cascade_paused", {
+            "node_id": node_key,
+            "segment_index": int(segment_index),
+            "pause_frames": pause_frames,
+            "resume_candidates": resume_indices,
+            "default_resume_frame_index": default_resume_index,
+            "preview_video": preview_video,
+            "stitched_preview": preview_video,
+        })
+
+        while True:
+            state = _SINGULARITY_PAUSE_STATES.get(node_key, {})
+            status = state.get("status")
+            if status == "continue":
+                resume_frame_index = _singularity_parse_resume_index(
+                    state.get("resume_frame_index", default_resume_index),
+                    default=default_resume_index,
+                )
+                if resume_frame_index < 1:
+                    resume_frame_index = default_resume_index
+                _SINGULARITY_PAUSE_STATES.pop(node_key, None)
+                execution_records.append({
+                    "stage": f"SingularityCascadePause_{segment_index}_Continue",
+                    "status": "continue",
+                    "node_id": node_key,
+                    "resume_frame_index": resume_frame_index,
+                })
+                return resume_frame_index, pause_frames
+            if status == "cancelled":
+                _SINGULARITY_PAUSE_STATES.pop(node_key, None)
+                execution_records.append({
+                    "stage": f"SingularityCascadePause_{segment_index}_Cancel",
+                    "status": "cancelled",
+                    "node_id": node_key,
+                })
+                raise InterruptProcessingException()
+            time.sleep(0.1)
+
+    def _trim_cascade_resume_state(self, frames, latent, resume_frame_index, execution_records, stage_prefix):
+        resume_frame_index = max(1, int(resume_frame_index))
+        target_t = max(1, (resume_frame_index - 1) // 4 + 1)
+        try:
+            samples = latent.get("samples") if isinstance(latent, dict) else None
+            if samples is not None and samples.shape[2] > target_t:
+                latent["samples"] = samples[:, :, :target_t, :, :,]
+        except Exception as e:
+            execution_records.append({
+                "stage": f"{stage_prefix}LatentTrim",
+                "status": "failed_nonfatal",
+                "error": str(e),
+            })
+
+        try:
+            if frames is not None and frames.shape[0] > resume_frame_index:
+                frames = frames[:resume_frame_index, :, :, :]
+        except Exception as e:
+            execution_records.append({
+                "stage": f"{stage_prefix}FrameTrim",
+                "status": "failed_nonfatal",
+                "error": str(e),
+            })
+        return frames, latent, target_t
+
+    def _last_frame_image(self, frames, width=64, height=64):
+        return self._representative_preview_frame(frames, width, height, mode="last")
+
+    def _compute_continuation_fitness(self, frames, source_image=None, records=None):
+        """
+        Metrics that matter for using a frame as starting point for the next cascade segment.
+        Focus: sharpness, color fidelity to source (if available), rough texture preservation.
+        Returns dict with per-frame scores (higher = better for continuation).
+        """
+        if frames is None or not hasattr(frames, "dim"):
+            return None
+
+        try:
+            import torch
+            import torch.nn.functional as F
+
+            t = self._tensor_from_latent_like(frames)
+            if t is None or t.dim() != 4:
+                return None
+
+            n = t.shape[0]
+            fitness_scores = []
+
+            # 1. Sharpness via Laplacian variance (very standard and effective)
+            for i in range(n):
+                frame = t[i : i+1].permute(0, 3, 1, 2)  # to [1, C, H, W]
+                # Simple Laplacian approximation
+                laplacian_kernel = torch.tensor([[[[0, 1, 0], [1, -4, 1], [0, 1, 0]]]], 
+                                                device=frame.device, dtype=frame.dtype).repeat(3,1,1,1)
+                lap = F.conv2d(frame, laplacian_kernel, padding=1, groups=3)
+                sharpness = lap.var().item()
+                fitness_scores.append(sharpness)
+
+            # Normalize sharpness
+            if fitness_scores:
+                max_sharp = max(fitness_scores) or 1.0
+                sharpness_scores = [s / max_sharp for s in fitness_scores]
+            else:
+                sharpness_scores = [0.5] * n
+
+            # 2. Color fidelity to source (if source available)
+            color_fidelity = [0.5] * n
+            if source_image is not None:
+                try:
+                    src = self._tensor_from_latent_like(source_image)
+                    if src is not None:
+                        src_mean = src.mean(dim=[0,1,2])  # [C]
+                        for i in range(n):
+                            frame_mean = t[i].mean(dim=[0,1])  # [C]
+                            # Cosine similarity of color means
+                            cos = F.cosine_similarity(frame_mean.unsqueeze(0), src_mean.unsqueeze(0)).item()
+                            color_fidelity[i] = max(0.0, min(1.0, (cos + 1.0) / 2.0))
+                except Exception:
+                    pass
+
+            # Combined continuation fitness (can be tuned)
+            final_fitness = []
+            for i in range(n):
+                score = 0.65 * sharpness_scores[i] + 0.35 * color_fidelity[i]
+                final_fitness.append(float(score))
+
+            if records is not None:
+                records.append({
+                    "stage": "TailFrames_ContinuationFitness",
+                    "status": "ok",
+                    "sharpness_scores": sharpness_scores,
+                    "color_fidelity_to_source": color_fidelity if source_image is not None else None,
+                    "combined_fitness": final_fitness
+                })
+
+            return {
+                "fitness": final_fitness,
+                "sharpness": sharpness_scores,
+                "color_fidelity": color_fidelity
+            }
+
+        except Exception as e:
+            if records is not None:
+                records.append({"stage": "TailFrames_ContinuationFitness", "status": "failed", "error": str(e)})
+            return None
+
+    def _select_best_tail_frames(self, frames, count=3, records=None):
+        """
+        Selection of N frames from the tail, scored by existing motion math.
+        This is part of the "1 UI + formula layer" on top of internal node flows.
+        Returns dict with 'frames' tensor and 'scores' list (higher = more motion / interesting).
+        """
+        if frames is None:
+            if records is not None:
+                records.append({"stage": "TailFramesSelect", "status": "no_frames"})
+            return None
+        try:
+            if not hasattr(frames, "dim") or frames.dim() != 4:
+                if records is not None:
+                    records.append({"stage": "TailFramesSelect", "status": "bad_shape"})
+                return None
+
+            total = frames.shape[0]
+            n = min(int(count), total)
+            tail = frames[-n:]
+
+            # === MAXIMUM USE — SIGNALS THAT ACTUALLY INFLUENCE THE SYSTEM'S CHOICE ===
+            # We prioritize information the internal formula/process already cares about:
+            # - raw_delta_norm from the high branch (core of the raw trembling)
+            # - Per-segment frame_motion_math (especially the last segments)
+            # - Stability/reversal/jerk from the actual generation process
+
+            # 1. Motion on the tail frames themselves (local interestingness)
+            tail_motion = self._frame_motion_math(tail, records or [], "TailFrames_TailOnly")
+
+            local_scores = []
+            if tail_motion and tail_motion.get("status") == "ok":
+                norms = tail_motion.get("norms", [])
+                reversal = tail_motion.get("reversal_ratio", 0.0) or 0.0
+                stability = tail_motion.get("stability_score", 0.5) or 0.5
+
+                for i in range(n):
+                    if i == 0:
+                        local_scores.append(0.0)
+                    else:
+                        idx = i - 1
+                        base = float(norms[idx]) if idx < len(norms) else 0.0
+                        # Frames after high-reversal moments are "more alive" according to raw logic
+                        reversal_boost = 1.0 + min(reversal * 0.6, 0.8)
+                        local_scores.append(base * reversal_boost)
+            else:
+                for i in range(n):
+                    local_scores.append(0.0 if i == 0 else float((tail[i] - tail[i-1]).abs().mean().item()))
+
+            # 2. Pull the most system-relevant signals from recent execution_records
+            last_raw_deltas = []      # raw_delta_norm from high samplers
+            last_segment_motion = []  # full motion records from last segments
+
+            if records:
+                for rec in reversed(records):
+                    if not isinstance(rec, dict):
+                        continue
+                    if "raw_delta_norm" in rec and rec["raw_delta_norm"] is not None:
+                        last_raw_deltas.append(float(rec["raw_delta_norm"]))
+                    if rec.get("stage", "").startswith("EventMath_cascade_") and rec.get("stage", "").endswith("_frame_motion"):
+                        last_segment_motion.append(rec)
+
+            # We care most about the last 1-2 segments (they produced the tail)
+            relevant_deltas = last_raw_deltas[:2]
+            relevant_motion = last_segment_motion[:2]
+
+            avg_relevant_delta = sum(relevant_deltas) / len(relevant_deltas) if relevant_deltas else 0.0
+
+            # Aggregate "system interest" from last segments (high delta + certain motion profiles = more valuable frames)
+            system_interest = 1.0
+            if relevant_deltas:
+                system_interest *= (1.0 + min(avg_relevant_delta / 6000.0, 1.5))
+
+            if relevant_motion:
+                for m in relevant_motion:
+                    stab = m.get("stability_score", 0.5)
+                    rev = m.get("reversal_ratio", 0.0) or 0.0
+                    # The system (raw philosophy) tends to value moments with decent delta + some reversal
+                    system_interest *= (1.0 + rev * 0.5) * (1.0 + (1.0 - min(stab, 1.0)) * 0.3)
+
+            # 3. Final system proposal scores
+            final_scores = []
+            for i, local in enumerate(local_scores):
+                recency = 1.0 + (i / max(n-1, 1)) * 0.2
+                score = local * system_interest * recency
+                final_scores.append(float(score))
+
+            # Normalize
+            mx = max(final_scores) if final_scores else 1.0
+            if mx > 0:
+                final_scores = [s / mx for s in final_scores]
+
+            # === KB-GROUNDED RAW FORMULA EXTENSION (bidirectional Mirror reading for tail) ===
+            # From _knowledge_base: left side (segment past Outcome + ObservedBehavior via raw_deltas + motion)
+            # forms Strategy context. Right side: each tail candidate as potential admissible causal continuation (B+ + O+).
+            # MirrorBreak = semantic distance (how much choosing this tail would break the event equality for chaining).
+            # We compute raw, no clamps beyond [0,1] normalization for scoring, explicit terms only.
+            # [RAW5] per-candidate for full trace.
+            mirror_break_scores = []
+            admissible_continuation_scores = []
+            past_strategy_proxy = 0.0
+            if relevant_deltas:
+                past_strategy_proxy = sum(relevant_deltas) / len(relevant_deltas)
+            if relevant_motion:
+                for m in relevant_motion:
+                    rev = m.get("reversal_ratio", 0.0) or 0.0
+                    stab = m.get("stability_score", 0.5) or 0.5
+                    past_strategy_proxy += (rev * 0.4 + (1.0 - min(stab, 1.0)) * 0.3)
+
+            for i in range(n):
+                # Observed for this candidate (right side proxy): local motion of the tail frame + recency as "future trace"
+                cand_local = local_scores[i] if i < len(local_scores) else 0.0
+                cand_recency = 1.0 + (i / max(n-1, 1)) * 0.2
+                observed_for_cand = cand_local * cand_recency
+
+                # Raw MirrorBreak (semantic distance between past Strategy context and this candidate as continuation)
+                # Lower = better admissible continuation (keeps the event coherent per formula right side)
+                if past_strategy_proxy > 0:
+                    raw_diff = abs(past_strategy_proxy - observed_for_cand)
+                    mb = min(1.0, raw_diff / max(past_strategy_proxy, 1.0))
+                else:
+                    mb = 0.5  # neutral if no strong past signal
+
+                mirror_break_scores.append(float(mb))
+                admissible = 1.0 - mb
+                admissible_continuation_scores.append(float(admissible))
+
+                if records is not None:
+                    records.append({
+                        "stage": "FORMULA_TAIL_MIRROR_BREAK",
+                        "candidate_index": i,
+                        "mirror_break": float(mb),
+                        "admissible_continuation": float(admissible),
+                        "past_strategy_proxy": float(past_strategy_proxy),
+                        "observed_for_candidate": float(observed_for_cand),
+                        "raw_components": {
+                            "relevant_raw_deltas": relevant_deltas,
+                            "local_motion_score": cand_local,
+                            "recency": cand_recency
+                        },
+                        "note": "[RAW5] Bidirectional: left=segment Strategy (deltas+motion from high/low seam), right=candidate as admissible O+ for next cascade. MirrorBreak = semantic distance per KB Mirror Core / admissible causal continuation."
+                    })
+
+            # Blend existing system scores with new formula admissible scores (raw, explicit weights)
+            blended_formula_scores = []
+            for i in range(n):
+                sys_s = final_scores[i] if i < len(final_scores) else 0.0
+                adm = admissible_continuation_scores[i] if i < len(admissible_continuation_scores) else 0.5
+                blended = 0.6 * sys_s + 0.4 * adm   # 60% existing system signals (raw deltas + motion), 40% formula admissible continuation
+                blended_formula_scores.append(float(blended))
+
+            # Re-normalize blended for recommendation use
+            mb_mx = max(blended_formula_scores) if blended_formula_scores else 1.0
+            if mb_mx > 0:
+                blended_formula_scores = [s / mb_mx for s in blended_formula_scores]
+
+            if records is not None:
+                records.append({
+                    "stage": "TailFramesSelect",
+                    "status": "ok",
+                    "requested": count,
+                    "returned": n,
+                    "total_frames": total,
+                    "mode": "system_native_signals_maximum + KB_formula_bidirectional",
+                    "scores": blended_formula_scores,  # now carries stronger formula right-side admissible continuation
+                    "mirror_break_scores": mirror_break_scores,
+                    "admissible_continuation_scores": admissible_continuation_scores,
+                    "system_signals": {
+                        "last_raw_deltas_used": relevant_deltas,
+                        "last_segments_motion_used": len(relevant_motion),
+                        "system_interest_multiplier": system_interest,
+                        "past_strategy_proxy": past_strategy_proxy
+                    },
+                    "formula_note": "Mirror reading from KB: left (t-1 Outcome + Observed via raw deltas/motion at seam) forms Strategy context; right scores candidates as admissible continuation for next segment without breaking event equality."
+                })
+
+            return {
+                "frames": tail,
+                "scores": blended_formula_scores,
+                "mirror_break_scores": mirror_break_scores,
+                "admissible_continuation_scores": admissible_continuation_scores,
+                "meta": {
+                    "system_interest": system_interest,
+                    "relevant_raw_deltas": relevant_deltas,
+                    "past_strategy_proxy": past_strategy_proxy
+                }
+            }
+        except Exception as e:
+            if records is not None:
+                records.append({"stage": "TailFramesSelect", "status": "failed", "error": str(e)})
+            return None
+
+    def _drop_first_frame_batch(self, frames, records, segment_index):
+        """
+        r22 temporal continuity guard:
+        segment N starts from the last frame of segment N-1.
+        Keeping that first generated frame duplicates the previous terminal frame and can look like
+        a motion reset or vector reversal at the cascade boundary.
+        """
+        try:
+            if hasattr(frames, "dim") and frames.dim() == 4 and frames.shape[0] > 1:
+                out = frames[1:]
+                records.append({
+                    "stage": "SingularityCascadeDropFirstFrame",
+                    "status": "ok",
+                    "segment_index": int(segment_index),
+                    "before_shape": list(frames.shape),
+                    "after_shape": list(out.shape),
+                    "reason": "remove duplicated source/continuation frame at cascade boundary",
+                })
+                return out
+        except Exception as e:
+            records.append({
+                "stage": "SingularityCascadeDropFirstFrame",
+                "status": "failed",
+                "segment_index": int(segment_index),
+                "error": str(e),
+            })
+        return frames
+
+    def _concat_frame_batches(self, batches, records):
+        valid = [b for b in batches if b is not None]
+        if not valid:
+            return None
+        if len(valid) == 1:
+            return valid[0]
+        try:
+            import torch
+            out = torch.cat(valid, dim=0)
+            records.append({
+                "stage": "SingularityCascadeFrameConcat",
+                "status": "ok",
+                "segments": len(valid),
+                "shape": list(out.shape) if hasattr(out, "shape") else str(type(out)),
+            })
+            return out
+        except Exception as e:
+            records.append({
+                "stage": "SingularityCascadeFrameConcat",
+                "status": "failed_using_last_segment_only",
+                "segments": len(valid),
+                "error": str(e),
+            })
+            return valid[-1]
+
+    def _concat_frame_batches_for_pause_preview(self, batches, records, segment_index):
+        valid = [b for b in batches if b is not None]
+        if not valid:
+            return None
+        if len(valid) == 1:
+            return valid[0]
+        try:
+            import torch
+            out = torch.cat(valid, dim=0)
+            records.append({
+                "stage": "SingularityCascadePausePreviewConcat",
+                "status": "ok",
+                "segment_index": int(segment_index),
+                "segments": len(valid),
+                "shape": list(out.shape) if hasattr(out, "shape") else str(type(out)),
+                "formula": "ordered cascade segment outcomes are temporarily stitched only for pause preview, not committed as final video output",
+            })
+            return out
+        except Exception as e:
+            records.append({
+                "stage": "SingularityCascadePausePreviewConcat",
+                "status": "failed_using_current_segment_only",
+                "segment_index": int(segment_index),
+                "segments": len(valid),
+                "error": str(e),
+            })
+            return valid[-1]
+
+    def _cascade_prompt_for_segment(self, prompt_text, segment_index, records=None, kind="positive"):
+        raw = str(prompt_text or "")
+        if not raw.strip():
+            return raw
+
+        def marker_number(line):
+            text = str(line or "").strip()
+            if not text:
+                return None
+            while text.startswith("#"):
+                text = text[1:].strip()
+            if text.startswith("::") and text.endswith("::"):
+                text = text[2:-2].strip()
+            if text.startswith("[") and text.endswith("]"):
+                text = text[1:-1].strip()
+            match = re.match(r"(?i)^(?:cascade|segment|prompt)\s*[_\s:-]*(\d+)$", text)
+            if not match:
+                return None
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+
+        segments = {}
+        current = None
+        for line in raw.splitlines():
+            number = marker_number(line)
+            if number is not None:
+                current = number
+                segments.setdefault(number, [])
+                continue
+            if current is not None:
+                segments.setdefault(current, []).append(line)
+
+        if not segments:
+            return raw
+
+        requested = int(segment_index or 1)
+        if requested in segments:
+            selected_key = requested
+            fallback = False
+        else:
+            lower = [key for key in segments if key <= requested]
+            selected_key = max(lower) if lower else min(segments)
+            fallback = True
+
+        selected = "\n".join(segments.get(selected_key, [])).strip()
+        if not selected:
+            selected = raw.strip()
+            fallback = True
+
+        if records is not None:
+            records.append({
+                "stage": "EventCascadePromptSchedule",
+                "status": "selected" if not fallback else "fallback_selected",
+                "kind": str(kind or "prompt"),
+                "requested_segment": requested,
+                "selected_segment": int(selected_key),
+                "available_segments": sorted(int(key) for key in segments),
+                "text_length": len(selected),
+                "formula_role": "per-segment prompt text -> StrategyCandidate carrier",
+                "marker_syntax": "### Cascade 1 / [Cascade 1] / ::Cascade 1::",
+            })
+        return selected
+
+    def _run_event_horizon_segment_core(
+        self,
+        *,
+        segment_index,
+        source_image,
+        primary_model,
+        secondary_model,
+        clip,
+        vae,
+        positive_prompt,
+        negative_prompt,
+        active_branch_mode,
+        width,
+        height,
+        frames,
+        batch_size,
+        seed,
+        sampler_name,
+        scheduler,
+        global_steps,
+        primary_cfg,
+        secondary_cfg,
+        primary_start_step,
+        primary_end_step,
+        secondary_start_step,
+        secondary_end_step,
+        primary_sd3_shift,
+        secondary_sd3_shift,
+        decode_tile_size,
+        decode_overlap,
+        decode_temporal_size,
+        decode_temporal_overlap,
+        image_upscale_method,
+        image_crop,
+        stage_delay_seconds,
+        records,
+        barrier_records,
+    ):
+        segment_label = f"cascade_{segment_index}"
+        records.append({
+            "stage": "SingularityCascadeSegmentBegin",
+            "status": "begin",
+            "segment_index": segment_index,
+            "frames": int(frames),
+            "formula": "source frame + segment transition = EventSingularity_segment = decoded frame batch",
+        })
+
+        segment_positive_prompt = self._cascade_prompt_for_segment(positive_prompt, segment_index, records, kind="positive")
+        segment_negative_prompt = self._cascade_prompt_for_segment(negative_prompt, segment_index, records, kind="negative")
+        positive = self._encode_text(clip, segment_positive_prompt, records, label=f'{segment_label}_TextEncodePositive')
+        negative = self._encode_text(clip, segment_negative_prompt, records, label=f'{segment_label}_TextEncodeNegative')
+        self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_text_encode")
+        scaled_image = self._scale_image(source_image, width, height, image_upscale_method, image_crop, records)
+
+        wan_positive, wan_negative, wan_latent = self._wan_image_to_video(
+            positive, negative, vae, scaled_image, width, height, frames, batch_size, records
+        )
+        self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_wan_image_to_video")
+
+        high_model = self._apply_sd3_shift(primary_model, primary_sd3_shift, f"{segment_label}_high", records)
+        high_window = EventSamplerWindow(
+            branch_name=f"{segment_label}_high",
+            branch_role="cascade_segment_high_motion_structure",
+            seed=int(seed) + int(segment_index) - 1,
+            steps=int(global_steps),
+            cfg=float(primary_cfg),
+            sampler_name=str(sampler_name),
+            scheduler=str(scheduler),
+            start_at_step=int(primary_start_step),
+            end_at_step=int(primary_end_step),
+            add_noise="enable",
+            return_with_leftover_noise="enable",
+            sd3_shift=float(primary_sd3_shift),
+        )
+        print(f"[RAW5] high sampler launching seg={segment_index} cfg={primary_cfg} range={primary_start_step}-{primary_end_step}")
+        latent_after_high, raw_delta_norm, delta_high = self._event_sample_window(
+            high_model, wan_positive, wan_negative, wan_latent, high_window, records
+        )
+        print(f"[RAW5] high sampler done seg={segment_index} raw_delta_norm={raw_delta_norm}")
+        self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_high_sampler")
+        if delta_high is None:
+            records.append({
+                "stage": f"EventMathDualBranchDeltaCoupling_{segment_label}",
+                "status": "high_delta_unavailable",
+                "segment_index": int(segment_index),
+            })
+        delta_low = None
+
+        final_latent = latent_after_high
+        print(f"[RAW5] branch decision seg={segment_index} mode={active_branch_mode}")
+        if active_branch_mode == "DUAL_HIGH_LOW":
+            latent_before_low = latent_after_high
+            print(f"[RAW5] entering DUAL_HIGH_LOW path seg={segment_index}")
+
+            low_model = self._apply_sd3_shift(secondary_model or primary_model, secondary_sd3_shift, f"{segment_label}_low", records)
+            
+            low_delta_strength = getattr(self, "_event_delta_strengths", {}).get("low", 1.0)
+            print(f"[RAW5] recording cfg policy seg={segment_index} secondary_cfg={secondary_cfg}, raw_delta_norm={raw_delta_norm}, strength={low_delta_strength}")
+            modified_secondary_cfg = self._bounded_strategy_cfg(
+                secondary_cfg,
+                raw_delta_norm,
+                low_delta_strength,
+                records,
+                f"cascade_{segment_index}_low_cfg",
+            )
+
+            print(f"[RAW5] FORMULA_RESULT seg={segment_index} cfg_policy_result={modified_secondary_cfg}")
+            print(f"[RAW5] DUAL branch active, preparing low (1-4 range) seg={segment_index}")
+                
+            low_window = EventSamplerWindow(
+                branch_name=f"{segment_label}_low",
+                branch_role="cascade_segment_low_detail_refinement",
+                seed=int(seed) + int(segment_index) - 1,
+                steps=int(global_steps),
+                cfg=float(modified_secondary_cfg),
+                sampler_name=str(sampler_name),
+                scheduler=str(scheduler),
+                start_at_step=int(secondary_start_step),
+                end_at_step=int(secondary_end_step),
+                add_noise="disable",
+                return_with_leftover_noise="disable",
+                sd3_shift=float(secondary_sd3_shift),
+            )
+            print(f"[RAW5] low launched seg={segment_index} cfg={modified_secondary_cfg}")
+            latent_after_low, _, delta_low = self._event_sample_window(
+                low_model, wan_positive, wan_negative, latent_before_low, low_window, records
+            )
+            self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_low_sampler")
+            print(f"[RAW5] low done seg={segment_index} cfg={modified_secondary_cfg}")
+            if delta_low is None:
+                records.append({
+                    "stage": f"EventMathDualBranchDeltaCoupling_{segment_label}",
+                    "status": "low_delta_unavailable",
+                    "segment_index": int(segment_index),
+                })
+            final_latent = latent_after_low
+
+        # _dual_branch_delta_coupling_math excised (physical cut #21): removed smart post-hoc alignment scoring on raw branch deltas.
+        # Let the raw interaction stand without an interpretive comfort layer.
+
+        frames_out = self._decode_tiled(
+            vae, final_latent,
+            decode_tile_size, decode_overlap, decode_temporal_size, decode_temporal_overlap,
+            records
+        )
+        self._math_tensor_summary(frames_out, records, f"EventMath_cascade_{segment_index}_decoded_frames", strict=False)
+        self._frame_motion_math(frames_out, records, f"EventMath_cascade_{segment_index}_frame_motion")
+        self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_decode")
+        last_frame = self._last_frame_image(frames_out, width, height)
+        records.append({
+            "stage": "SingularityCascadeSegmentEnd",
+            "status": "ok",
+            "segment_index": segment_index,
+            "frames": int(frames),
+            "last_frame_for_next_segment": True,
+        })
+        return frames_out, last_frame, final_latent
+
+    def run(
+        self,
+        primary_model,
+        clip,
+        vae,
+        source_image_file,
+        positive_prompt,
+        negative_prompt,
+        event_strategy,
+        generation_target,
+        terminal_mode,
+        enable_continuation_outputs,
+        execution_mode,
+        branch_mode,
+        cascade_count,
+        cascade_mode,
+        frames_per_cascade,
+        width,
+        height,
+        frames,
+        batch_size,
+        fps,
+        seed,
+        sampler_name,
+        scheduler,
+        global_steps,
+        primary_cfg,
+        secondary_cfg,
+        primary_start_step,
+        primary_end_step,
+        secondary_start_step,
+        secondary_end_step,
+        primary_sd3_shift,
+        secondary_sd3_shift,
+        decode_tile_size,
+        decode_overlap,
+        decode_temporal_size,
+        decode_temporal_overlap,
+        image_upscale_method,
+        image_crop,
+        stage_delay_seconds,
+        save_video,
+        video_format,
+        force_vhs_video_combine,
+        save_frames,
+        save_report,
+        output_target,
+        save_output_image,
+        save_prefix,
+        output_folder_mode,
+        output_folder,
+        custom_output_folder,
+        report_detail,
+        pause_after_cascade_1=False,
+        pause_after_cascade_2=False,
+        pause_after_cascade_3=False,
+        pause_after_cascade_4=False,
+        secondary_model=None,
+        image=None,
+        mask=None,
+        use_formula_recommendation=False,
+        selected_tail_index=0,
+    ):
+        run_id = now_run_id(prefix="Singularity")
+        pause_node_id = _singularity_pause_key(
+            getattr(self, "_singularity_node_id", None)
+            or getattr(self, "_event_horizon_node_id", None)
+            or run_id
+        )
+        self._event_strategy_coupling = {"low_strength_multiplier": 1.0}
+
+        branch_barrier_records = []
+        execution_records = []
+        cascade_execution_plan = None
+        runtime_aliases = self._event_runtime_aliases()
+        execution_records.append({
+            "stage": "SingularityRuntimeVersion",
+            "status": "loaded",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "math_report_enabled": True,
+            "expected_math_stages": [
+                "EventMath_high_latent_before",
+                "EventMath_high_latent_after",
+                "EventMath_low_latent_before",
+                "EventMath_low_latent_after",
+                "EventMathStrategyCarrierCoupling",
+                "EventMathDualBranchDeltaCoupling",
+                "EventMath_decoded_frame_motion",
+                "EventUniversalMath_EventTextEncodePositive",
+                "EventUniversalMath_EventTextEncodeNegative",
+                "EventUniversalMath_EventImageScaleStart",
+                "EventUniversalMath_EventWanImageToVideoSeed",
+                "EventUniversalMath_EventSamplerHigh",
+                "EventUniversalMath_EventCleanupBetweenSamplers",
+                "EventUniversalMath_EventSamplerLow",
+                "EventUniversalMath_EventVAEDecodeTiled",
+                "EventUniversalMath_EventVideoCombine",
+                "EventUniversalMath_EventModelShift_high",
+                "EventUniversalMath_EventModelShift_low",
+                "EventUniversalMath_EventCleanupBetweenSamplers",
+                "EventUniversalMath_EventVideoSaveBegin",
+                "EventUniversalBoundary_EventCascadeBoundary",
+                "EventCoreBodyInit",
+                "EventOneNodePolicy",
+                "EventCoreBodyConsistencyAudit",
+                "EventCoreBodyStageOrderAudit",
+                "EventCoreBodyCompletionGate",
+                "EventCoreBodySummary",
+                "EventCoreBodyReportCard",
+                "EventCoreBodyFinalize",
+            ],
+        })
+        execution_records.append({
+            "stage": "EventWorkflowBinding",
+            "status": "recorded",
+            "runtime_class": self.__class__.__name__,
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "alias_count": len(runtime_aliases),
+            "aliases": runtime_aliases,
+            "compatibility": {
+                "Singularity": bool("Singularity" in runtime_aliases),
+            },
+            "formula": "The public workflow node alias resolves to one internal Event Core Body runtime implementation.",
+        })
+        input_normalization = getattr(self, "_event_input_normalization", None)
+        if isinstance(input_normalization, dict):
+            adjustments = input_normalization.get("adjustments", [])
+            reason_histogram = {}
+            for adj in adjustments:
+                if not isinstance(adj, dict):
+                    continue
+                reason = str(adj.get("reason", "unknown") or "unknown")
+                reason_histogram[reason] = int(reason_histogram.get(reason, 0)) + 1
+            execution_records.append({
+                "stage": "EventInputNormalization",
+                "status": "recorded",
+                "normalized_values": input_normalization.get("normalized", {}),
+                "adjustment_count": len(adjustments),
+                "adjustment_reason_histogram": reason_histogram,
+                "normalized_signature": input_normalization.get("normalized_signature", ""),
+                "formula": "input configuration is normalized before stage execution to preserve deterministic route semantics",
+            })
+            if adjustments:
+                execution_records.append({
+                    "stage": "EventInputNormalizationAdjustments",
+                    "status": "recorded",
+                    "adjustments": adjustments,
+                })
+        self._event_control_warning(
+            execution_records,
+            getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
+            getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
+            getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+        )
+        execution_records.append({
+            "stage": "EventMathControlSummary",
+            "status": "recorded",
+            "math_control_mode": getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
+            "high_delta_strength_requested": getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
+            "low_delta_strength_requested": getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+            "sampler_trace_mode": getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"),
+            "sampler_trace_max_steps": getattr(self, "_event_sampler_trace", {}).get("max_steps", 64),
+            "active_generation_math_path": (
+                "semantic_overlay_native_sampler"
+                if str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")).upper() == "LATENT_DELTA_SCALE"
+                else "native_step_loop" if str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")).upper() == "DEEP_STEP_DELTA_CONTROL"
+                else "boundary_sampler_wrapper"
+            ),
+            "strategy_carrier_coupling": "enabled_for_low_branch_without_step_replacement",
+            "precision_step": 0.0001,
+            "precision_round": 0.0001,
+        })
+        execution_records.append({
+            "stage": "EventUniversalPipelineMap",
+            "status": "recorded",
+            "formula": "Every internal stage is read as NodeInputState + NodeObservedBehavior = NodeSState = NodeOutputState",
+            "route": [
+                "EventTextEncodePositive",
+                "EventTextEncodeNegative",
+                "EventImageScaleStart",
+                "EventWanImageToVideoSeed",
+                "EventModelShiftHigh",
+                "EventSamplerHigh",
+                "EventCleanupBetweenSamplers",
+                "EventModelShiftLow",
+                "EventSamplerLow",
+                "EventVAEDecodeTiled",
+                "SingularityCascadeBoundary",
+                "EventVideoSaveBegin",
+                "EventVideoCombine",
+                "EventSaveReport",
+                "EventCleanupAfterGeneration",
+            ],
+            "status_note": "r44 keeps the Event Core Body inside one Singularity node; EVENT_PACKET/S-Wire are internal runtime body, not a manual visual graph",
+        })
+        execution_records.append({
+            "stage": "EventOneNodePolicy",
+            "status": "active",
+            "external_visual_node": "Singularity",
+            "manual_event_graph_required": False,
+            "internal_body": [
+                "EventPacket",
+                "FormulaReader",
+                "RoleResolver",
+                "RouteMemory",
+                "SState",
+                "UniversalStageMath",
+                "UniversalBoundaryMath",
+                "ReportBuilder",
+            ],
+            "reason": "Avoids manual ComfyUI workflow errors, wire-order drift, lost route memory, and mismatched Event logic between hidden stages.",
+        })
+
+        prompt_key_source = (
+            str(positive_prompt or "") + "\n---NEGATIVE---\n" + str(negative_prompt or "") +
+            f"\nclip={type(clip).__name__}:{id(clip)}"
+        )
+        encoder_cache_key = hashlib.sha256(prompt_key_source.encode("utf-8", errors="ignore")).hexdigest()[:24]
+        model_route_builder_policy = {
+            "current_mode": "external_model_route_observed",
+            "current_external_route": [
+                "UNET loader",
+                "LoRA loader/matrix",
+                "Torch compile guard",
+                "ModelSamplingSD3 shift",
+                "Singularity sampler core",
+            ],
+            "future_internal_route": [
+                "internal UNET/CLIP/VAE loader",
+                "internal LoRA matrix switch",
+                "internal compile guard/adapter",
+                "internal SD3 route builder",
+                "Singularity sampler core",
+            ],
+            "integration_options": {
+                "A_external_minimal": "public-safe route; external loader/LoRA/compile nodes feed Singularity",
+                "B_internal_builder": "Singularity owns model names, LoRA matrix and compile guard but keeps external MODEL sockets available",
+                "C_full_one_node_body": "Singularity loads from model selection to video save; highest observability, highest compatibility risk",
+            },
+            "order_law": "Torch compile belongs after LoRA application and before ModelSamplingSD3/sampler use.",
+            "formula_role": "MODEL Operator route is part of Strategy(t), not a separate convenience chain.",
+            "side_effect_policy": "Internalization must preserve fixed-seed output or report the route as controlled intervention.",
+        }
+        execution_records.append({
+            "stage": "EventModelRouteBuilderPolicy",
+            "status": "observer_policy_active",
+            "formula": "MODEL + LoRA + compile + SD3 shift form the Operator side of Strategy(t); order is observable and must not be hidden.",
+            **model_route_builder_policy,
+        })
+        execution_records.append({
+            "stage": "EventRuntimeLayerProbes",
+            "status": "observer_only",
+            "runtime_monitor": "active",
+            "compile_guard": "observed_as_external_or_future_internal_adapter",
+            "encoder_cache": "key_computed_cache_disabled_until_equivalence_proof",
+            "branch_barrier": "smart branch barrier records preserved StrategyCarrier and released memory actions per phase",
+            "lora_matrix_switch": "external_model_clip_route_observed; future internal matrix must precede compile",
+            "prompt_operator_panel": "prompt fields observed as StrategyCandidate carriers; no prompt rewrite",
+            "cascade_prompt_schedule": "active via markers only: ### Cascade 1 / [Cascade 1] / ::Cascade 1::",
+            "test_runner": "not active inside generation node; report data is structured for external runner",
+            "universal_input_normalization": "readers and RoleResolver remain internal; fixed Wan interface still current",
+            "encoder_cache_key_preview": encoder_cache_key,
+            "formula": "Forgotten runtime-layer ideas are present as internal observer records before active intervention.",
+        })
+
+        saved_video_path = ""
+        saved_report_path = ""
+        video_ui_payload = {}
+        generated_frames = None
+        generated_latent = None
+        source_preview = None
+        result_preview = None
+        result_status = "NONE"
+        failure_reason = ""
+        ui_images = []  # safety: always defined, even if early failure before the try block
+
+        # r14d compatibility guard: old saved workflows or stale node widgets
+        # must not crash if output_target is missing during execution.
+        if "output_target" not in locals() or output_target is None:
+            output_target = "USER_D_AI_NSFW"
+
+        # Internal image picker: if external IMAGE socket is not connected, use source_image_file.
+        uploaded_image = None
+        if image is None:
+            uploaded_image = self._load_image_from_upload(source_image_file, execution_records)
+            if uploaded_image is not None:
+                image = uploaded_image
+        source_preview = self._representative_preview_frame(image, width, height, mode="first")
+
+        requested_video = generation_target in ("VIDEO", "AUTO")
+        requested_image = generation_target in ("IMAGE", "AUTO")
+
+        if branch_mode == "SINGLE":
+            active_branch_mode = "SINGLE"
+        else:
+            active_branch_mode = "DUAL_HIGH_LOW"  # raw: no fallback, let observed behavior emerge if secondary missing
+
+        mode_to_count = {
+            "SOLO_1": 1,
+            "CASCADE_2": 2,
+            "CASCADE_3": 3,
+            "CASCADE_4": 4,
+            "CASCADE_5": 5,
+        }
+        mode_count = int(mode_to_count.get(str(cascade_mode), int(cascade_count or 1)))
+        numeric_count = int(cascade_count or mode_count or 1)
+        requested_cascade_count = max(mode_count, numeric_count)
+        requested_cascade_count = max(1, min(5, requested_cascade_count))
+        frames = int(frames_per_cascade or frames)
+        legacy_pause_flags = {
+            1: bool(pause_after_cascade_1),
+            2: bool(pause_after_cascade_2),
+            3: bool(pause_after_cascade_3),
+            4: bool(pause_after_cascade_4),
+        }
+        pause_after_segments = [
+            int(segment_index)
+            for segment_index in range(1, int(requested_cascade_count))
+            if legacy_pause_flags.get(segment_index, False)
+        ]
+        ignored_pause_after_segments = [
+            int(segment_index)
+            for segment_index, enabled in legacy_pause_flags.items()
+            if enabled and segment_index >= int(requested_cascade_count)
+        ]
+        expected_output_frames = (
+            int(frames)
+            if int(requested_cascade_count) <= 1
+            else int(frames) + (int(requested_cascade_count) - 1) * max(0, int(frames) - 1)
+        )
+        cascade_execution_plan = {
+            "policy_version": "cascade_plan_v1_legacy_flags",
+            "policy": "LEGACY_FLAGS",
+            "requested_segments": int(requested_cascade_count),
+            "final_segment_index": int(requested_cascade_count),
+            "frames_per_cascade": int(frames),
+            "expected_output_frames_if_no_trims": int(expected_output_frames),
+            "pause_after_segments": pause_after_segments,
+            "pause_count": len(pause_after_segments),
+            "legacy_pause_flags": {str(k): bool(v) for k, v in legacy_pause_flags.items()},
+            "ignored_pause_after_segments": ignored_pause_after_segments,
+            "supports_dynamic_n_cascade": False,
+            "future_policy_note": "Current public route is fixed to five cascades; future route can replace legacy flags with N-segment pause policies.",
+            "formula": "CascadePlan defines StrategyCarrier boundaries before execution; Gate verifies the actual route against this plan.",
+        }
+
+        packet = make_event_packet(metadata={
+            "created_by": "SingularityCascade",
+            "version": EVENT_HORIZON_RUNTIME_VERSION,
+            "run_id": run_id,
+            "node_role": "terminal_event_horizon_cascade",
+            "cascade_execution_plan": cascade_execution_plan,
+        })
+
+        packet = self._event_core_body_init(packet, execution_records, run_id, route_name="wan_terminal_one_node")
+        execution_records.append({
+            "stage": "SingularityCascadePlan",
+            "status": "recorded",
+            **cascade_execution_plan,
+        })
+
+        conflict_ids = []
+        relation_ids = []
+        signal_ids = []
+
+        packet = record_stage(
+            packet,
+            stage_name="WanEventWorkflowCore",
+            action="INIT_EVENT_HORIZON_CASCADE_WORKFLOW",
+            observed_behavior="Terminal-first Singularity workflow initialized",
+            metadata={
+                "run_id": run_id,
+                "generation_target": generation_target,
+                "cascade_mode": cascade_mode,
+                "cascade_count": requested_cascade_count,
+                "frames_per_cascade": frames,
+                "terminal_mode": terminal_mode,
+                "enable_continuation_outputs": enable_continuation_outputs,
+                "execution_mode": execution_mode,
+                "active_branch_mode": active_branch_mode,
+                "cascade_execution_plan": cascade_execution_plan,
+            },
+        )
+
+        packet["metadata"]["event_program_status"] = {
+            "current_mode": execution_mode,
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "math_report_enabled": True,
+            "terminal_mode": bool(terminal_mode),
+            "generation_target": generation_target,
+            "result_status": result_status,
+            "program_state": "terminal_save_first_generation_body",
+            "final_target_output": "saved_video_or_saved_frames",
+            "cascade_execution_plan": cascade_execution_plan,
+            "normal_outputs": "status_paths_report_only_no_image_sockets",
+            "continuation_outputs": "removed_from_main_terminal_node_in_r15_use_future_extractor_node",
+            "sampler_replacement": "EventSamplerCore boundary replacement; native step loop pending",
+            "no_fake_success_rule": "source image is never presented as successful VIDEO result",
+        }
+
+        packet["metadata"]["terminal_ui_model"] = {
+            "start_preview": "input image",
+            "result_preview": "generated frames/video representative frame if available",
+            "save_first": True,
+            "default_target": "VIDEO",
+        }
+
+        packet["metadata"]["wan_workflow_interface"] = {
+            "interface_variant": "terminal_B_no_lora_strings",
+            "source_workflow": "Singularity / Wan2.2 I2V Quant 14B",
+            "lora_policy": "Current public route applies LoRA outside; future internal route must apply LoRA before compile.",
+            "model_route_builder_policy": model_route_builder_policy,
+            "required_external": ["primary_model", "clip", "vae", "source_image_file or image for VIDEO"],
+            "optional_external": ["secondary_model", "mask", "external image socket"],
+            "width": width,
+            "height": height,
+            "frames": frames,
+            "batch_size": batch_size,
+            "fps": fps,
+            "seed": seed,
+            "generation_target": generation_target,
+            "video_format": video_format,
+            "force_vhs_video_combine": force_vhs_video_combine,
+            "output_target": output_target,
+            "output_folder_mode": output_folder_mode,
+            "output_folder": output_folder,
+            "custom_output_folder": custom_output_folder,
+            "preferred_video_dir": r"D:\AI NSFW\VID",
+            "preferred_image_dir": r"D:\AI NSFW\PIC",
+            "preview_policy": "source preview only; result last-frame only when continuation is enabled",
+            "event_strategy_note": "optional future control field; currently stored in Event Program report, not required for animation",
+            "cascade_prompt_schedule_policy": "If prompt markers are present, each cascade segment receives its own StrategyCandidate text; otherwise the single prompt is reused unchanged.",
+            "execution_mode": execution_mode,
+            "branch_mode_requested": branch_mode,
+            "branch_mode_active": active_branch_mode,
+
+            "ksampler_replacement": "EventSamplerCore",
+            "ksampler_windows": {
+                "primary": {"start": primary_start_step, "end": primary_end_step, "add_noise": "enable", "return_leftover_noise": "enable"},
+                "secondary": {"start": secondary_start_step, "end": secondary_end_step, "add_noise": "disable", "return_leftover_noise": "disable"},
+                "global_steps": global_steps,
+            },
+        }
+
+        packet["metadata"]["wan_event_internal_topology"] = {
+            "universal_event_node_rule": "every internal stage must pass through an Singularity; relation center is Event Singularity",
+            "event_horizon_model": {
+                "Singularity": "boundary layer where a technical node input/output transition becomes Event-Horizon-aware",
+                "EventSingularity": "EventSingularity center where input state, observed behavior, and output state collapse into one relation point",
+                "formula": "NodeInputState + NodeObservedBehavior = EventSingularity = NodeOutputState"
+            },
+            "model_route_builder": {
+                "current": "external loader/LoRA/compile/SD3 route is observed as Strategy Operator input",
+                "future": "internal route builder may own loaders, LoRA matrix, compile guard and SD3 patching after equivalence gates",
+                "strict_order": ["loader", "lora_matrix", "compile_guard", "sd3_shift", "sampler"],
+            },
+            "terminal_route": [
+                "EventTextEncodePositive",
+                "EventTextEncodeNegative",
+                "EventImageScaleStart",
+                "EventWanImageToVideoSeed",
+                "EventModelShiftHigh",
+                "EventSamplerHigh",
+                "EventCleanupBetweenSamplers",
+                "EventModelShiftLow",
+                "EventSamplerLow",
+                "EventVAEDecodeTiled",
+                "EventVideoCombine",
+                "EventSaveReport",
+            ],
+            "internal_hidden_states": [
+                "conditioning_positive",
+                "conditioning_negative",
+                "wan_latent_seed",
+                "latent_before_high",
+                "latent_after_high",
+                "delta_high",
+                "latent_before_low",
+                "latent_after_low",
+                "delta_low",
+                "decoded_frames",
+                "video_file",
+                "S0_wan_terminal",
+            ],
+        }
+
+        if str(positive_prompt or "").strip():
+            packet, sig, proj, conf = self._make_text_signal(packet, positive_prompt, "StrategyCurrent", "wan_positive_prompt_route", "EventTextEncodePositive")
+            signal_ids.append(sig["id"])
+            conflict_ids.extend(conf)
+        if str(negative_prompt or "").strip():
+            packet, sig, proj, conf = self._make_text_signal(packet, negative_prompt, "NegativeConstraint", "wan_negative_prompt_route", "EventTextEncodeNegative")
+            signal_ids.append(sig["id"])
+            conflict_ids.extend(conf)
+        if str(event_strategy or "").strip():
+            packet, sig, proj, conf = self._make_text_signal(packet, event_strategy, "EventProgramStrategy", "wan_event_strategy_route", "Wan_event_strategy")
+            signal_ids.append(sig["id"])
+            conflict_ids.extend(conf)
+
+        if image is not None:
+            packet, sig, proj, conf = _read_signal(
+                packet, TECH_IMAGE, SPACE_IMAGE, image, "EventSourcePreview", "SourceAnchor",
+                "wan_source_image_route", "ImageOutcomeReader", route_position="start_preview"
+            )
+            signal_ids.append(sig["id"])
+            conflict_ids.extend(conf)
+
+        if generation_target == "VIDEO" and image is None:
+            failure_reason = "VIDEO target requires source image for WanImageToVideo; no image was connected."
+            result_status = "FAILED"
+            packet, cid = self._fail_conflict(packet, "WanEventWorkflowCore/InputValidation", failure_reason, {"generation_target": generation_target})
+            conflict_ids.append(cid)
+
+        if execution_mode in ("RUN", "TRY_EVENT_HORIZON_CASCADE", "TRY_WAN_SOLO_EXECUTION") and result_status != "FAILED":
+            execution_records.append({
+                "stage": "SingularityCascadeExecutionGate",
+                "status": "running",
+                "execution_mode": execution_mode,
+                "cascade_count": requested_cascade_count,
+                "frames_per_cascade": frames,
+                "cascade_execution_plan": cascade_execution_plan,
+            })
+            try:
+                if image is None:
+                    raise RuntimeError("Singularity VIDEO route requires source image input.")
+
+                execution_records.append({
+                    "stage": "SingularityCascadeSegmentBegin",
+                    "status": "begin",
+                    "segment_index": 1,
+                    "frames": int(frames),
+                    "route": "initial_body",
+                    "formula": "source image + first sampler body = EventSingularity_segment_1 = decoded frame batch",
+                })
+
+                segment_positive_prompt = self._cascade_prompt_for_segment(positive_prompt, 1, execution_records, kind="positive")
+                segment_negative_prompt = self._cascade_prompt_for_segment(negative_prompt, 1, execution_records, kind="negative")
+                positive = self._encode_text(clip, segment_positive_prompt, execution_records, label='TextEncodePositive')
+                negative = self._encode_text(clip, segment_negative_prompt, execution_records, label='TextEncodeNegative')
+                execution_records.append({"stage": "EventTextEncode", "status": "ok", "formula": "prompt + CLIP behavior = S_text = conditioning"})
+                self._stage_delay(stage_delay_seconds, execution_records, "after_text_encode")
+
+                scaled_image = self._scale_image(image, width, height, image_upscale_method, image_crop, execution_records)
+
+                wan_positive, wan_negative, wan_latent = self._wan_image_to_video(
+                    positive, negative, vae, scaled_image, width, height, frames, batch_size, execution_records
+                )
+                self._stage_delay(stage_delay_seconds, execution_records, "after_wan_image_to_video")
+
+                packet, wan_latent_sig, wan_latent_proj, conf = _read_signal(
+                    packet, TECH_LATENT, SPACE_LATENT, wan_latent,
+                    "EventWanImageToVideoSeed", "OutcomePrevious",
+                    "wan_i2v_latent_seed_route", "LatentEventReader", route_position="wan_i2v_latent_seed"
+                )
+                conflict_ids.extend(conf)
+
+                high_model = self._apply_sd3_shift(primary_model, primary_sd3_shift, "high", execution_records)
+
+                print(f"[RAW5] FIRST BODY high steps: {primary_start_step}-{primary_end_step} cfg={primary_cfg} global={global_steps}")
+                print(f"[RAW5] FIRST BODY low steps target: {secondary_start_step}-{secondary_end_step} cfg={secondary_cfg}")
+
+                high_window = EventSamplerWindow(
+                    branch_name="high",
+                    branch_role="coarse_motion_global_trajectory",
+                    seed=int(seed),
+                    steps=int(global_steps),
+                    cfg=float(primary_cfg),
+                    sampler_name=str(sampler_name),
+                    scheduler=str(scheduler),
+                    start_at_step=int(primary_start_step),
+                    end_at_step=int(primary_end_step),
+                    add_noise="enable",
+                    return_with_leftover_noise="enable",
+                    sd3_shift=float(primary_sd3_shift),
+                )
+
+                # Fixed unpack: _event_sample_window now consistently returns (latent_after, raw_delta_norm, delta_tensor)
+                # (the 2-value unpack was stale from before the raw_delta return was added for formula in segments).
+                # Without this, ValueError on return, caught by outer except, low force block never reached.
+                # This was the root cause of "low does not run" + only high raw printed + 60s even after unconditional force code.
+                latent_after_high, _high_raw_delta, _high_delta = self._event_sample_window(
+                    high_model, wan_positive, wan_negative, wan_latent, high_window, execution_records
+                )
+                self._stage_delay(stage_delay_seconds, execution_records, "after_high_sampler")
+                packet["metadata"].setdefault("event_sampler_results", {})["high"] = {
+                    "ok": True,
+                    "raw_delta_norm": _high_raw_delta,
+                    "first_body": True,
+                }
+
+                # === DUMB DIRECT LOW BYPASS FOR FIRST BODY (img2vid start) ===
+                # Full study of entire _knowledge_base + the VERY LAST node Gemini made (r58_InputIntegrityHardening.zip extracted nodes.py + core/):
+                # Even in final r58 (and r55/r49): normalize_clean had secondary_start_n = primary_end_n (or clamp min=primary_end) + "forced_to_primary_end_for_dual_branch",
+                # and the first-body low path was ONLY "if active_branch_mode == "DUAL_HIGH_LOW" and secondary_model is not None"" (plus branch_barrier smart cleanup).
+                # + wrapper _event_sample_window (EventSamplerCore boundary) for low.
+                # This + pause/cascade_1 logic is why low never started after high in 0-1/1-4 LightV2x "img to vid start" despite correct prints.
+                # Per core directive + user: direct physical cut, user steps literal (never mutated), formula reads raw values as ObservedBehavior,
+                # direct _low_level (let native KSamplerAdvanced own the exact 1-4 window + progress, no custom mechanism).
+                # We force the low here when *user's* secondary range has start < end (for acceleration), using secondary or primary_model with native CFG.
+                # Records kept minimal for tail/Mirror/formula. Later segments keep their paths. Old overriding DUAL block removed.
+                # See also nodes.py _normalize_clean_inputs (no primary_end link, dual_branch=True hard).
+                packet, high_sig, high_proj, conf = _read_signal(
+                    packet, TECH_LATENT, SPACE_LATENT, latent_after_high,
+                    "EventSamplerHigh_latent_after", "OutcomeNext",
+                    "wan_high_after_route", "LatentEventReader", route_position="after_event_sampler_high"
+                )
+                conflict_ids.extend(conf)
+
+                delta_high, delta_err = compute_tensor_delta(wan_latent, latent_after_high)
+
+                if delta_high is not None:
+                    packet, delta_sig, delta_proj, conf = _read_signal(
+                        packet, TECH_DELTA, SPACE_DELTA, delta_high,
+                        "EventSamplerHigh_delta", "ObservedBehaviorCurrent",
+                        "wan_high_delta_route", "DeltaReader",
+                        metadata={"before_signal_id": wan_latent_sig["id"], "after_signal_id": high_sig["id"], "before_ref": extract_latent_samples(wan_latent)}
+                    )
+                    conflict_ids.extend(conf)
+                    rel = make_event_relation(
+                        relation_type=REL_TRANSFORMS_INTO,
+                        source_signal_ids=[wan_latent_sig["id"], delta_sig["id"]],
+                        target_signal_ids=[high_sig["id"]],
+                        source_projection_ids=[wan_latent_proj["id"], delta_proj["id"]],
+                        target_projection_ids=[high_proj["id"]],
+                        operator_name="EventSamplerCore",
+                        formula_meaning="EventSamplerHigh transforms Wan latent seed into high/noise motion latent",
+                        local_strategy_id="S0_wan_terminal.high_sampler",
+                        equality_status=EQ_UNKNOWN,
+                        metadata={"branch": "high", "sampler_replacement": "EventSamplerCore"},
+                    )
+                    packet = add_relation(packet, rel)
+                    relation_ids.append(rel["id"])
+                else:
+                    execution_records.append({"stage": "EventSamplerHigh_delta", "status": "unavailable", "error": str(delta_err)})
+
+                final_latent = latent_after_high
+                delta_low = None
+
+                # === ALWAYS FORCE LOW AFTER HIGH IN FIRST BODY (img to vid start) ===
+                # Dumb physical: for the critical first segment with 0-1 high / 1-4 low acceleration,
+                # always run the low directly using the user-specified secondary steps and native CFG.
+                # This bypasses any guard, any step linking from normalize, any wrapper, any pause/cascade logic.
+                # Matches the requirement "0-1 / 1-4 steps always for light v2x" and the direct low call to let native KSampler own the window.
+                # The condition on start < end was not reliably triggering in practice (even when prints showed 1-4),
+                # so we force it unconditionally here for the first body. Later segments use their own logic.
+                print("[RAW] *** FORCING low immediately after first body high (direct _low_level_sampler_operation) ***")
+                print(f"[RAW5] FIRST BODY forcing low with steps {secondary_start_step}-{secondary_end_step}")
+                # Debug prints modeled after Gemini's last r59 attempt in the live ComfyUI-Event-Equality-Core when she was forcing low to run
+                print(f"\n[EVENT HORIZON DEBUG] RUNNING LOW SAMPLER (direct bypass for first body).")
+                print(f"[EVENT HORIZON DEBUG] primary_start={primary_start_step}, primary_end={primary_end_step}")
+                print(f"[EVENT HORIZON DEBUG] secondary_start={secondary_start_step}, secondary_end={secondary_end_step}")
+                print(f"[EVENT HORIZON DEBUG] window_steps={int(secondary_end_step) - int(secondary_start_step)}")
+                import torch
+                raw_delta_norm = 0.0
+                if delta_high is not None:
+                    try:
+                        raw_delta_norm = float(torch.linalg.vector_norm(delta_high).item())
+                    except Exception:
+                        raw_delta_norm = 0.0
+                low_delta_strength = float(getattr(self, "_event_delta_strengths", {}).get("low", 1.0) or 1.0)
+                low_cfg = self._bounded_strategy_cfg(
+                    secondary_cfg,
+                    raw_delta_norm,
+                    low_delta_strength,
+                    execution_records,
+                    "first_body_low_cfg",
+                )
+                low_model = self._apply_sd3_shift(secondary_model or primary_model, secondary_sd3_shift, "low", execution_records)
+                # DIRECT, no EventSamplerCore / wrapper / per-step math owning the KSamplerAdvanced window.
+                # This is the dumb physical bypass for the exact symptom (low never starts after high in first body + pause/cascade_1).
+                print(f"[RAW] *** DIRECT LOW BYPASS CALL: start={secondary_start_step} end={secondary_end_step} cfg={low_cfg} (strength={low_delta_strength}, raw_delta_norm={raw_delta_norm}) (this is the 1-4 refinement, NOT another high) ***")
+                latent_after_low_native = self._low_level_sampler_operation(
+                    model=low_model,
+                    positive=wan_positive,
+                    negative=wan_negative,
+                    latent=latent_after_high,
+                    seed=int(seed),
+                    steps=int(global_steps),
+                    cfg=low_cfg,
+                    sampler_name=str(sampler_name),
+                    scheduler=str(scheduler),
+                    start_at_step=int(secondary_start_step),
+                    end_at_step=int(secondary_end_step),
+                    add_noise="disable",
+                    return_leftover_noise="disable",
+                )
+                latent_after_low = self._apply_latent_delta_control(
+                    latent_after_high,
+                    latent_after_low_native,
+                    "low",
+                    execution_records,
+                )
+                final_latent = latent_after_low
+                print(f"[RAW] low done with cfg={low_cfg} (first body direct bypass)")
+                print(f"[RAW] LOW COMPLETE - final_latent now from low (should fix noise break at end if previous was double-high)")
+                delta_low_native, _ = compute_tensor_delta(latent_after_high, latent_after_low_native)
+                low_native_delta_norm = 0.0
+                if delta_low_native is not None:
+                    import torch
+                    low_native_delta_norm = float(torch.linalg.vector_norm(delta_low_native).item())
+                delta_low_effective, _ = compute_tensor_delta(latent_after_high, latent_after_low)
+                low_effective_delta_norm = 0.0
+                if delta_low_effective is not None:
+                    import torch
+                    low_effective_delta_norm = float(torch.linalg.vector_norm(delta_low_effective).item())
+                print(f"[RAW] low native_delta_norm={low_native_delta_norm} effective_delta_norm={low_effective_delta_norm}")
+
+                # === CONNECT THE LOW "MAKARONY" / PASTA (internal stage wiring for first body) ===
+                # To make the direct low part of the expected internal node chain (the "pasta").
+                # The expected records in runtime (from packet) include EventMath_low_latent_before/after,
+                # EventUniversalMath_EventSamplerLow, finite guard, etc.
+                # Without these, the low in first body (the critical img-to-vid start) is "disconnected" from
+                # reports, SState, formula integrity checks, Tail3 scoring, etc.
+                # We replicate the key post-processing from _event_sample_window (but keep direct native call
+                # for the sampler itself, no EventSamplerCore wrapper owning progress/steps).
+                self._math_tensor_summary(latent_after_high, execution_records, "EventMath_low_latent_before", strict=False)
+                self._math_tensor_summary(latent_after_low, execution_records, "EventMath_low_latent_after", reference=latent_after_high, strict=False)
+
+                self._finite_guard(latent_after_low, execution_records, "EventFiniteGuard_low_latent_after", strict=True)
+
+                self._event_universal_stage_math(
+                    execution_records,
+                    "EventSamplerLow",
+                    input_state=latent_after_high,
+                    output_state=latent_after_low,
+                    observed_behavior=f"low sampler (direct first body bypass) transformed high latent through step window {secondary_start_step}->{secondary_end_step}",
+                    formula_role="LATENT OutcomePrevious (high) + direct low sampler update = LATENT OutcomeNext (first body StrategyCarrier)",
+                    route_id="route_sampler_low_first_body",
+                    next_requirement="VAE decode requires event-compatible low latent",
+                    control_mode=str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")),
+                    metadata={
+                        "branch": "low",
+                        "start_at_step": int(secondary_start_step),
+                        "end_at_step": int(secondary_end_step),
+                        "add_noise": "disable",
+                        "return_with_leftover_noise": "disable",
+                        "sampler_execution_path": "direct_low_level_bypass",
+                    },
+                )
+
+                # Record enough for math/tail/Mirror without letting wrapper own the sampler call
+                execution_records.append({
+                    "stage": "event_sampler_begin",
+                    "status": "begin",
+                    "branch_name": "low",
+                    "branch_role": "refinement_detail_stabilization_first_body_bypass",
+                    "start_at_step": int(secondary_start_step),
+                    "end_at_step": int(secondary_end_step),
+                    "replacement_layer": "direct_low_level_bypass",
+                })
+                execution_records.append({
+                    "stage": "event_sampler_end",
+                    "status": "ok",
+                    "branch_name": "low",
+                })
+                packet["metadata"].setdefault("event_sampler_results", {})["low"] = {
+                    "ok": True,
+                    "direct_bypass": True,
+                    "cfg_used": low_cfg,
+                    "native_delta_norm": low_native_delta_norm,
+                    "effective_delta_norm": low_effective_delta_norm,
+                    "cfg_policy": "model_native_cfg_preserved_in_LATENT_DELTA_SCALE",
+                }
+
+                packet, low_before_sig, low_before_proj, conf = _read_signal(
+                    packet, TECH_LATENT, SPACE_LATENT, latent_after_high,
+                    "EventSamplerLow_latent_before", "OutcomePrevious",
+                    "wan_low_before_route", "LatentEventReader", route_position="before_event_sampler_low"
+                )
+                conflict_ids.extend(conf)
+
+                packet, low_after_sig, low_after_proj, conf = _read_signal(
+                    packet, TECH_LATENT, SPACE_LATENT, latent_after_low,
+                    "EventSamplerLow_latent_after", "OutcomeNext",
+                    "wan_low_after_route", "LatentEventReader", route_position="after_event_sampler_low"
+                )
+                conflict_ids.extend(conf)
+
+                delta_low, delta_err = compute_tensor_delta(latent_after_high, latent_after_low)
+                if delta_low is not None:
+                    packet, delta2_sig, delta2_proj, conf = _read_signal(
+                        packet, TECH_DELTA, SPACE_DELTA, delta_low,
+                        "EventSamplerLow_delta", "ObservedBehaviorCurrent",
+                        "wan_low_delta_route", "DeltaReader",
+                        metadata={"before_signal_id": high_sig["id"], "after_signal_id": low_after_sig["id"], "before_ref": extract_latent_samples(latent_after_high)}
+                    )
+                    conflict_ids.extend(conf)
+                    rel = make_event_relation(
+                        relation_type=REL_TRANSFORMS_INTO,
+                        source_signal_ids=[high_sig["id"], delta2_sig["id"]],
+                        target_signal_ids=[low_after_sig["id"]],
+                        source_projection_ids=[high_proj["id"], delta2_proj["id"]],
+                        target_projection_ids=[low_after_proj["id"]],
+                        operator_name="DirectLowLevelBypass",
+                        formula_meaning="(first body direct bypass per KB) high Outcome + low sampler ObservedBehavior = low StrategyCarrier admissible continuation",
+                        local_strategy_id="S0_wan_terminal.low_sampler",
+                        equality_status=EQ_UNKNOWN,
+                        metadata={
+                            "branch": "low",
+                            "sampler": "direct_low_level_bypass",
+                            "cfg_used": low_cfg,
+                            "native_delta_norm": low_native_delta_norm,
+                            "effective_delta_norm": low_effective_delta_norm,
+                            "delta_role": "ObservedBehaviorCurrent",
+                        },
+                    )
+                    packet = add_relation(packet, rel)
+                    relation_ids.append(rel["id"])
+                else:
+                    execution_records.append({"stage": "EventSamplerLow_delta", "status": "unavailable", "error": str(delta_err)})
+
+                execution_records.append({
+                    "stage": "EventMathStrategyProposal_low",
+                    "status": "recorded",
+                    "native_delta_norm": low_native_delta_norm,
+                    "effective_delta_norm": low_effective_delta_norm,
+                    "formula": "Outcome(high) + low sampler ObservedBehavior = StrategyCarrier for decode/continuation (first body)"
+                })
+
+                # _dual_branch_delta_coupling_math excised (physical cut #21): removed smart post-hoc alignment scoring on raw branch deltas.
+                # Let the raw interaction stand without an interpretive comfort layer.
+
+                generated_latent = final_latent
+                print(f"[RAW] decode + pause logic will use LOW result (not high). pause_after_cascade_1={pause_after_cascade_1}")
+
+                generated_frames = self._decode_tiled(
+                    vae, generated_latent,
+                    decode_tile_size, decode_overlap, decode_temporal_size, decode_temporal_overlap,
+                    execution_records
+                )
+                self._math_tensor_summary(generated_frames, execution_records, "EventMath_decoded_frames", strict=False)
+                self._frame_motion_math(generated_frames, execution_records, "EventMath_decoded_frame_motion")
+                execution_records.append({
+                    "stage": "SingularityCascadeSegmentEnd",
+                    "status": "ok",
+                    "segment_index": 1,
+                    "frames": int(generated_frames.shape[0]) if hasattr(generated_frames, "shape") and len(generated_frames.shape) > 0 else int(frames),
+                    "last_frame_for_next_segment": True,
+                    "route": "initial_body",
+                })
+                self._stage_delay(stage_delay_seconds, execution_records, "after_decode")
+
+                packet, img_sig, img_proj, conf = _read_signal(
+                    packet, TECH_IMAGE, SPACE_IMAGE, generated_frames,
+                    "EventVAEDecodeTiled_frames", "VisibleOutcome",
+                "wan_decoded_frames_route", "ImageOutcomeReader", route_position="decoded_frames"
+                )
+                conflict_ids.extend(conf)
+
+                # Singularity extension.
+                self._pause_flag_triggered = False
+                # Resume cache logic fully excised (physical cut #16): no more protected state carry-over for pause/resume.
+                # Same-run pause/continue trims frames/latent and resumes segment 2 from the selected MirrorCut anchor.
+                segment_batches = [generated_frames]
+                current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                start_segment = 2
+
+                # Handle pause at cascade 1
+                if pause_after_cascade_1 and start_segment == 2:
+                    resume_frame_index, _pause_frames = self._wait_for_cascade_continue(
+                        pause_node_id,
+                        generated_frames,
+                        1,
+                        execution_records,
+                        stitched_preview_frames=generated_frames,
+                        fps=fps,
+                    )
+                    generated_frames, generated_latent, target_t = self._trim_cascade_resume_state(
+                        generated_frames,
+                        generated_latent,
+                        resume_frame_index,
+                        execution_records,
+                        "SingularityCascadeResume",
+                    )
+
+                    segment_batches = [generated_frames]
+                    current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                    pause_after_cascade_1 = False
+                    self._pause_flag_triggered = False
+                    if requested_cascade_count < start_segment:
+                        requested_cascade_count = start_segment
+                        execution_records.append({
+                            "stage": "SingularityCascadeResumeCountLift",
+                            "status": "resume_requires_next_segment",
+                            "start_segment": start_segment,
+                            "cascade_count": requested_cascade_count,
+                        })
+                    execution_records.append({
+                        "stage": "SingularityCascadeResume",
+                        "status": "resumed_same_run",
+                        "node_id": pause_node_id,
+                        "resume_frame_index": int(resume_frame_index),
+                        "latent_temporal_target_t": int(target_t),
+                        "start_segment": start_segment,
+                        "formula": "same-run pause selected a MirrorCut frame and continued the cascade without queueing a new prompt",
+                    })
+                    print(f"[RAW] PAUSE AFTER CASCADE 1 CONTINUED in same prompt from frame {resume_frame_index}.")
+
+                if requested_cascade_count >= start_segment:
+                    execution_records.append({
+                        "stage": "SingularityCascadeBegin",
+                        "status": "begin",
+                        "cascade_count": requested_cascade_count,
+                        "frames_per_cascade": frames,
+                        "cascade_execution_plan": cascade_execution_plan,
+                    })
+                    for segment_index in range(start_segment, requested_cascade_count + 1):
+                        next_frames, current_cascade_image, generated_latent = self._run_event_horizon_segment_core(
+                            segment_index=segment_index,
+                            source_image=current_cascade_image,
+                            primary_model=primary_model,
+                            secondary_model=secondary_model,
+                            clip=clip,
+                            vae=vae,
+                            positive_prompt=positive_prompt,
+                            negative_prompt=negative_prompt,
+                            active_branch_mode=active_branch_mode,
+                            width=width,
+                            height=height,
+                            frames=frames,
+                            batch_size=batch_size,
+                            seed=seed,
+                            sampler_name=sampler_name,
+                            scheduler=scheduler,
+                            global_steps=global_steps,
+                            primary_cfg=primary_cfg,
+                            secondary_cfg=secondary_cfg,
+                            primary_start_step=primary_start_step,
+                            primary_end_step=primary_end_step,
+                            secondary_start_step=secondary_start_step,
+                            secondary_end_step=secondary_end_step,
+                            primary_sd3_shift=primary_sd3_shift,
+                            secondary_sd3_shift=secondary_sd3_shift,
+                            decode_tile_size=decode_tile_size,
+                            decode_overlap=decode_overlap,
+                            decode_temporal_size=decode_temporal_size,
+                            decode_temporal_overlap=decode_temporal_overlap,
+                            image_upscale_method=image_upscale_method,
+                            image_crop=image_crop,
+
+                            stage_delay_seconds=stage_delay_seconds,
+                            records=execution_records,
+
+                            barrier_records=branch_barrier_records,
+                        )
+                        if segment_index > 1:
+                            next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
+                        self._cascade_boundary_math(segment_batches[-1], next_frames, execution_records, segment_index)
+                        segment_batches.append(next_frames)
+                        
+                        pause_flags = {
+                            2: pause_after_cascade_2,
+                            3: pause_after_cascade_3,
+                            4: pause_after_cascade_4
+                        }
+                        if pause_flags.get(segment_index, False):
+                            pause_preview_frames = self._concat_frame_batches_for_pause_preview(
+                                segment_batches,
+                                execution_records,
+                                segment_index,
+                            )
+                            resume_frame_index, _pause_frames = self._wait_for_cascade_continue(
+                                pause_node_id,
+                                next_frames,
+                                segment_index,
+                                execution_records,
+                                stitched_preview_frames=pause_preview_frames,
+                                fps=fps,
+                            )
+                            next_frames, generated_latent, target_t = self._trim_cascade_resume_state(
+                                next_frames,
+                                generated_latent,
+                                resume_frame_index,
+                                execution_records,
+                                f"SingularityCascadeResume_{segment_index}",
+                            )
+                            segment_batches[-1] = next_frames
+                            current_cascade_image = self._last_frame_image(next_frames, width, height)
+                            self._pause_flag_triggered = False
+                            execution_records.append({
+                                "stage": "SingularityCascadeResume",
+                                "status": "resumed_same_run",
+                                "node_id": pause_node_id,
+                                "segment_index": int(segment_index),
+                                "resume_frame_index": int(resume_frame_index),
+                                "latent_temporal_target_t": int(target_t),
+                                "start_segment": int(segment_index) + 1,
+                                "formula": "same-run pause selected a MirrorCut frame, trimmed the decoded frame batch, and continued the cascade without saving an intermediate video",
+                            })
+                            print(f"[RAW] PAUSE AFTER CASCADE {segment_index} CONTINUED in same prompt from frame {resume_frame_index}.")
+
+                    generated_frames = self._concat_frame_batches(segment_batches, execution_records)
+                    self._frame_motion_math(generated_frames, execution_records, "EventMath_concatenated_frame_motion")
+                    completed_segments = len(segment_batches)
+                    execution_records.append({
+                        "stage": "SingularityCascadeEnd",
+                        "status": "ok",
+                        "segments": completed_segments,
+                        "requested_segments": requested_cascade_count,
+                        "total_requested_frames": requested_cascade_count * int(frames),
+                        "actual_output_frames": int(generated_frames.shape[0]) if generated_frames is not None and hasattr(generated_frames, "shape") else None,
+                    })
+                    self._event_universal_stage_math(
+                        execution_records,
+                        "SingularityCascadeEnd",
+                        input_state=segment_batches[0] if segment_batches else None,
+                        output_state=generated_frames,
+                        observed_behavior="multiple cascade frame batches concatenated into one continuous output sequence",
+                        formula_role="FRAME_BATCHES segment outcomes -> FRAMES full cascade outcome",
+                        route_id="route_cascade_concat",
+                        next_requirement="video combine requires one ordered frame batch",
+                        control_mode="REPORT_ONLY",
+                        metadata={"segments": completed_segments, "requested_segments": requested_cascade_count, "frames_per_cascade": int(frames)},
+                    )
+
+                if save_frames or save_output_image or generation_target == "IMAGE":
+                    try:
+                        self._save_image_attempt(generated_frames, save_prefix, execution_records)
+                    except Exception as e:
+                        execution_records.append({"stage": "EventSaveFrames", "status": "failed", "error": str(e)})
+
+                if requested_video and save_video:
+                    try:
+                        saved_video_path = self._video_combine_attempt(generated_frames, fps, save_prefix, execution_records, video_format=video_format, force_vhs=force_vhs_video_combine, output_target=output_target, output_folder_mode=output_folder_mode, output_folder=output_folder, custom_output_folder=custom_output_folder)
+                        result_status = "VIDEO"
+                    except Exception as e:
+                        execution_records.append({"stage": "EventVideoCombine", "status": "failed", "error": str(e)})
+                        if generation_target == "VIDEO":
+                            result_status = "FAILED"
+                            failure_reason = f"VIDEO target requested but video combine failed: {e}"
+                            packet, cid = self._fail_conflict(packet, "EventVideoCombine", failure_reason, {"generation_target": generation_target})
+                            conflict_ids.append(cid)
+                        else:
+                            result_status = "FRAMES"
+                else:
+                    result_status = "FRAMES" if generated_frames is not None else "NONE"
+
+                ui_images = []
+
+                video_ui_payload = self._extract_vhs_ui_payload_from_records(execution_records)
+
+            except InterruptProcessingException as e:
+                failure_reason = str(e) or "Singularity cascade paused run was cancelled."
+                result_status = "CANCELLED"
+                execution_records.append({
+                    "stage": "SingularityCascadeCancel",
+                    "status": "cancelled",
+                    "error": failure_reason,
+                })
+            except Exception as e:
+                failure_reason = str(e)
+                result_status = "FAILED"
+                execution_records.append({"stage": "terminal_wan_execution", "status": "failed", "error": failure_reason})
+                packet, cid = self._fail_conflict(packet, "WanEventWorkflowCore/Execution", failure_reason, {"execution_mode": execution_mode, "generation_target": generation_target})
+                conflict_ids.append(cid)
+
+        elif execution_mode == "REPORT_ONLY":
+            result_status = "INCOMPLETE"
+            execution_records.append({"stage": "execution", "status": "skipped_report_only"})
+        else:
+            result_status = "INCOMPLETE"
+            execution_records.append({
+                "stage": "execution",
+                "status": "skipped_unsupported_execution_mode",
+                "execution_mode": execution_mode,
+                "expected_modes": ["RUN", "TRY_EVENT_HORIZON_CASCADE", "TRY_WAN_SOLO_EXECUTION", "REPORT_ONLY"],
+            })
+
+        # r12 safety: saved_video_path must be a clean string path, never raw VHS payload.
+        if not isinstance(saved_video_path, str):
+            raw_saved_video_payload = str(saved_video_path)[:1000]
+            try:
+                saved_video_path = self._extract_path_from_video_result(saved_video_path, save_prefix, execution_records)
+            except Exception as e:
+                execution_records.append({"stage": "EventVideoPathFinalCoerce", "status": "failed", "error": str(e), "raw_payload": raw_saved_video_payload})
+                saved_video_path = ""
+            else:
+                execution_records.append({"stage": "EventVideoPathFinalCoerce", "status": "ok", "path": saved_video_path, "raw_payload": raw_saved_video_payload})
+
+        barrier_phase_counts = {}
+        barrier_with_strategy = 0
+        barrier_preserved = 0
+        for item in branch_barrier_records:
+            phase = str(item.get("barrier_phase", "unknown"))
+            barrier_phase_counts[phase] = barrier_phase_counts.get(phase, 0) + 1
+            if item.get("strategy_state_required"):
+                barrier_with_strategy += 1
+                if item.get("strategy_state_preserved"):
+                    barrier_preserved += 1
+
+
+        packet["metadata"]["branch_barrier_records"] = branch_barrier_records
+        packet["metadata"]["branch_barrier_summary"] = {
+            "record_count": len(branch_barrier_records),
+            "phase_counts": barrier_phase_counts,
+            "strategy_state_checks": barrier_with_strategy,
+            "strategy_state_preserved_count": barrier_preserved,
+            "observer_only": True,
+        }
+        packet["metadata"]["execution_records"] = execution_records
+        packet["metadata"]["result_status"] = {
+            "generation_target": generation_target,
+            "result_status": result_status,
+            "failure_reason": failure_reason,
+            "saved_video_path": saved_video_path,
+            "cascade_execution_plan": cascade_execution_plan,
+            "fake_success_prevented": True,
+            "source_image_was_not_returned_as_successful_video": True,
+            "source_image_file": str(source_image_file) if source_image_file else "",
+        }
+        packet["metadata"]["program_output_policy"] = {
+            "terminal_mode": bool(terminal_mode),
+            "normal_result": "saved files + status, no IMAGE outputs",
+            "continuation_outputs": "removed from main terminal node in r15",
+            "image_passthrough_policy": "never claim source image as generated VIDEO result",
+            "video_required_for_success": generation_target == "VIDEO",
+        }
+        # update program status with final result
+        packet["metadata"]["event_program_status"]["result_status"] = result_status
+        packet["metadata"]["event_program_status"]["saved_video_path"] = saved_video_path
+        packet["metadata"]["event_program_status"]["failure_reason"] = failure_reason
+
+        packet = self._event_core_body_finalize(packet, execution_records, result_status, saved_video_path, failure_reason)
+        packet["metadata"]["execution_records"] = execution_records
+
+        packet, sstate = build_sstate_from_packet(packet, position="S0_wan_terminal", active_relation_ids=relation_ids)
+
+        packet = record_stage(
+            packet,
+            stage_name="WanEventWorkflowCore",
+            action="BUILD_TERMINAL_WAN_REPORT",
+            observed_behavior="Built terminal Wan Event Program report with save-first output policy",
+            input_signal_ids=signal_ids,
+            relation_ids=relation_ids,
+            sstate_ids=[sstate["id"]] if sstate else [],
+            conflict_ids=conflict_ids,
+            formula_note="terminal external inputs -> internal Event-Horizon-aware subnodes -> EventSamplerCore high/low -> decoded frames/video -> saved result",
+            metadata={
+                "result_status": result_status,
+                "failure_reason": failure_reason,
+                "saved_video_path": saved_video_path,
+                "execution_records": execution_records,
+            },
+        )
+
+        if save_report:
+            report = build_markdown_report(packet)
+            if not str(report or "").strip():
+                execution_records.append({
+                    "stage": "EventSaveReportBuild",
+                    "status": "empty_report_from_builder",
+                    "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+                })
+            else:
+                execution_records.append({
+                    "stage": "EventSaveReportBuild",
+                    "status": "ok",
+                    "chars": len(str(report)),
+                    "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+                })
+            try:
+                saved_report_path = self._save_report_file(report, save_prefix, "COMFY_OUTPUT", "DEFAULT", "default", "")
+                try:
+                    report_size = Path(saved_report_path).stat().st_size
+                except Exception:
+                    report_size = -1
+                execution_records.append({
+                    "stage": "EventSaveReport",
+                    "status": "standard_comfy_output_ok",
+                    "path": saved_report_path,
+                    "bytes": report_size,
+                    "nonempty": bool(report_size and report_size > 0),
+                    "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+                })
+                if report_size <= 0:
+                    raise RuntimeError(f"Report was saved but is empty: {saved_report_path}")
+                sidecar_info = self._save_runtime_monitor_sidecars(packet, saved_report_path, saved_video_path, save_prefix)
+                execution_records.append({
+                    "stage": "EventRuntimeMonitorSidecars",
+                    "status": sidecar_info.get("status", "unknown"),
+                    "json_path": sidecar_info.get("json_path", ""),
+                    "csv_path": sidecar_info.get("csv_path", ""),
+                    "diff_path": sidecar_info.get("diff_path", ""),
+                    "previous_json_path": sidecar_info.get("previous_json_path", ""),
+                    "record_count": sidecar_info.get("record_count", 0),
+                    "motion_stage": sidecar_info.get("motion_stage", ""),
+                    "motion_profile": sidecar_info.get("motion_profile", ""),
+                    "motion_stability_score": sidecar_info.get("motion_stability_score", ""),
+                    "observer_only": True,
+                    "formula": "Runtime Monitor writes machine-readable ObservedBehavior sidecars without changing generation.",
+                })
+                report = build_markdown_report(packet)
+                report_size = self._rewrite_report_file(saved_report_path, report)
+            except Exception as e:
+                execution_records.append({"stage": "EventSaveReport", "status": "failed", "error": str(e), "runtime_version": EVENT_HORIZON_RUNTIME_VERSION})
+                saved_report_path = ""
+        else:
+            report = ""
+            saved_report_path = ""
+            execution_records.append({"stage": "EventSaveReport", "status": "disabled_by_user", "runtime_version": EVENT_HORIZON_RUNTIME_VERSION})
+
+        # Preview model:
+        # - source_preview always shows the input/source.
+        # - result_preview shows generated frames only if real generation produced frames.
+        # - if generation failed, result_preview is a blank placeholder, not the source image.
+        if enable_continuation_outputs and generated_frames is not None and result_status in ("FRAMES", "VIDEO"):
+            result_preview = self._representative_preview_frame(generated_frames, width, height, mode="last")
+        else:
+            result_preview = self._placeholder_image(width, height)
+
+        # Compute tail frames + formula scores (part of unifying UI layer over internal flows)
+        tail_result = self._select_best_tail_frames(generated_frames, count=3, records=execution_records)
+
+        tail_3_frames = tail_result["frames"] if tail_result else None
+        tail_scores = tail_result.get("scores", [0.0, 0.0, 0.0]) if tail_result else [0.0, 0.0, 0.0]
+        mirror_breaks = tail_result.get("mirror_break_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
+        admissible_conts = tail_result.get("admissible_continuation_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
+
+        # Continuation fitness (sharpness + color match to source) — critical for cascade chaining
+        continuation_fitness = self._compute_continuation_fitness(
+            tail_3_frames, 
+            source_image=uploaded_image, 
+            records=execution_records
+        )
+
+        # Formula recommendation (the "best" according to blended system + KB bidirectional formula)
+        formula_best_index = 0
+        if tail_scores:
+            formula_best_index = tail_scores.index(max(tail_scores))
+
+        # Combined "best for cascade continuation" score (what the system recommends for chaining)
+        # Now includes explicit admissible_continuation from Mirror reading (right side of formula)
+        continuation_scores = [0.0] * 3
+        if continuation_fitness and continuation_fitness.get("fitness"):
+            fit = continuation_fitness["fitness"]
+            for i in range(min(3, len(fit))):
+                # Balance per KB: system raw signals + practical fitness + admissible continuation (formula right side)
+                sys_score = tail_scores[i] if i < len(tail_scores) else 0.0
+                cont_score = fit[i]
+                adm = admissible_conts[i] if i < len(admissible_conts) else 0.5
+                # 50% sys (raw deltas+motion), 30% continuation fitness, 20% formula admissible (Mirror right side)
+                continuation_scores[i] = 0.50 * sys_score + 0.30 * cont_score + 0.20 * adm
+
+            # Re-normalize
+            max_c = max(continuation_scores) or 1.0
+            if max_c > 0:
+                continuation_scores = [s / max_c for s in continuation_scores]
+
+        # The system's strongest proposal for continuation (gold hint only)
+        system_best_for_continuation = 0
+        if continuation_scores:
+            system_best_for_continuation = continuation_scores.index(max(continuation_scores))
+
+        # Selection is ALWAYS manual via green (explicit click on Tail 3 bar). 
+        # use_formula_recommendation only controls whether gold ★ advisor (formula best) is highlighted in UI.
+        # The selected_tail_index (synced from bar clicks) provides the user's manual choice when provided.
+        manual_sel = int(selected_tail_index) if selected_tail_index is not None else -1
+        if use_formula_recommendation:
+            initial_selected_index = formula_best_index
+        else:
+            initial_selected_index = manual_sel if manual_sel in (0, 1, 2) else -1
+
+        # Split into 3 separate IMAGE outputs for the UI layer to use
+        tail_frame_0 = None
+        tail_frame_1 = None
+        tail_frame_2 = None
+        if tail_3_frames is not None and hasattr(tail_3_frames, "shape") and tail_3_frames.shape[0] > 0:
+            tail_frame_0 = tail_3_frames[0:1]
+            if tail_3_frames.shape[0] >= 2:
+                tail_frame_1 = tail_3_frames[1:2]
+            if tail_3_frames.shape[0] >= 3:
+                tail_frame_2 = tail_3_frames[2:3]
+
+        if not ui_images:
+            ui_images = self._make_ui_previews(source_preview, result_preview, save_prefix, execution_records, include_result_preview=enable_continuation_outputs)
+        packet["metadata"]["ui_preview"] = {
+            "source_preview": "source image or upload",
+            "result_preview": "disabled; no PreviewImage calls in terminal node",
+            "continuation_seed_frame": "not emitted by main terminal node in r15; use future extractor/chain node",
+            "tail_frames_exposed": "tail_frame_0 / tail_frame_1 / tail_frame_2 as separate IMAGE outputs (3 last frames from tail)",
+            "ui_images_count": len(ui_images),
+            "video_ui_payload_returned": bool(video_ui_payload),
+            "tail_3_frames_available": tail_3_frames is not None,
+            "tail_3_count": tail_3_frames.shape[0] if tail_3_frames is not None and hasattr(tail_3_frames, "shape") else 0,
+            "tail_scores": tail_scores,  # blended system + KB formula admissible continuation scores
+            "mirror_break_scores": mirror_breaks,  # per-candidate semantic distance (lower = better event continuation)
+            "admissible_continuation_scores": admissible_conts,  # right side of formula: how well candidate continues the event (B+ + O+)
+            "formula_best_tail_index": formula_best_index,  # what the raw formula recommends as the best of the 3
+            "initial_selected_tail_index": initial_selected_index,  # respects the use_formula_recommendation toggle (default manual)
+            "system_best_for_continuation": system_best_for_continuation,  # hybrid: raw deltas/motion + fitness + admissible continuation
+            "continuation_fitness_scores": continuation_scores if 'continuation_scores' in locals() else [],
+            "formula_raw_note": "KB Mirror Core bidirectional: left=segment Strategy (Outcome+Observed via raw_delta + motion at high/low seam), right=candidate tail as admissible causal continuation. MirrorBreak = semantic distance. See FORMULA_TAIL_MIRROR_BREAK records. Always manual green; gold only proposal when use_formula_recommendation."
+        }
+
+        if tail_3_frames is not None:
+            packet["metadata"]["tail_3_best_frames"] = {
+                "description": "Last 3 frames from the end of the generated sequence (formula proposes admissible continuation per KB Mirror reading)",
+                "shape": list(tail_3_frames.shape) if hasattr(tail_3_frames, "shape") else None,
+                "scores": tail_scores,
+                "mirror_break_scores": mirror_breaks,
+                "admissible_continuation_scores": admissible_conts,
+                "formula_best_index": formula_best_index,
+                "user_selected_index": manual_sel if 'manual_sel' in locals() else initial_selected_index,
+                "mirror_note": "Human Strategy (green outline / manual click) meets Formula ObservedBehavior (motion scores). Selection is always bidirectional reweighting — formula proposes, human Strategy decides or overrides."
+            }
+
+        status = (
+            f"Singularity v{EVENT_HORIZON_RUNTIME_VERSION} | target={generation_target} | result={result_status} | "
+            f"terminal={terminal_mode} | continuation={enable_continuation_outputs} | "
+            f"video_path={saved_video_path or 'none'} | report_path={saved_report_path or 'none'}"
+        )
+        if failure_reason:
+            status += f" | failure={failure_reason}"
+
+        continuation_image = self._representative_preview_frame(generated_frames, width, height, mode="last") if (enable_continuation_outputs and generated_frames is not None) else self._placeholder_image(width, height)
+        continuation_latent = generated_latent if enable_continuation_outputs else None
+        continuation_packet = packet if enable_continuation_outputs else None
+
+        result_tuple = (
+            status,
+            saved_video_path,
+            saved_report_path,
+            report,
+            tail_frame_0,
+            tail_frame_1,
+            tail_frame_2,
+        )
+
+        if not video_ui_payload:
+            video_ui_payload = {}
+            
+        if video_ui_payload:
+            return {"ui": video_ui_payload, "result": result_tuple}
+
+        return result_tuple
+
+
+
+
+
+

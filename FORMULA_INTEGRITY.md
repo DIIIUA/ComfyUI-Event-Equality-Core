@@ -1,6 +1,6 @@
 # Formula Integrity Rules
 
-These rules protect Event Equality Core from degrading into a normal pile of unrelated ComfyUI nodes.
+These rules protect Singularity from degrading into a normal pile of unrelated ComfyUI nodes.
 
 ## Core rules
 
@@ -85,3 +85,4 @@ generic core first
 adapter labels second
 correction never in v0.1
 ```
+

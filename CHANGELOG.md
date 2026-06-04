@@ -1,4 +1,54 @@
-# Event Horizon / Event Equality Core - Public Changelog
+# Singularity - Public Changelog
+
+## 2026-06-05 - Public Alpha Package Prep
+
+Status: public alpha packaging pass for the active cascade frame-selection build.
+
+- Rewrote the public README in English.
+- Updated package metadata to describe the real feature: Wan I2V cascade continuation with manual tail-frame selection and diagnostics.
+- Clarified that the public value is frame selection, same-run continuation, final stitched output, and report evidence.
+- Clarified that math modes are diagnostic/research controls, not a guarantee of visual quality.
+- Confirmed the current delta sweep labels: recent solo runs were high-delta tests, not low-delta tests.
+- Prepared the release surface for ComfyUI-Manager registration.
+
+## 2026-06-04 - CascadePlan / Public Alpha Gate Candidate
+
+Status: local release-candidate documentation and telemetry build, installed into the active ComfyUI desktop node. Requires full ComfyUI Desktop restart before physical testing.
+
+- Added `SingularityCascadePlan` as the report-level route contract for cascade execution.
+- The plan records requested segment count, final segment index, frames per cascade, pause boundaries, ignored pause flags beyond the selected cascade count, and expected output frames before manual trims.
+- Updated CompletionGate semantics: `PASS` now requires the requested cascade route to reach a final video outcome, not merely a structurally coherent partial route.
+- Added `cascade_progress`, `route_complete`, `final_output_ok`, and `blocking_reasons` to the Event Core Body summary/gate records.
+- Cancelled/no-video paused runs are diagnostic only and should report `CANCELLED` or blocked status instead of false `PASS`.
+- Kept the current public-safe cascade limit at 5 while documenting future N-cascade pause policies as a later feature.
+- Added internal release readiness docs for a Public Alpha focused on manual frame selection across up to five cascades.
+
+Public Alpha gate:
+
+```text
+5-cascade frame selection produces one final stitched VIDEO
+report contains SingularityCascadePlan
+CompletionGate = PASS only for final VIDEO
+cancelled/no-video run does not receive PASS
+```
+
+## 2026-06-04 - Local Cascade Resume UI Stabilization
+
+Status: local stabilization build, installed into the active ComfyUI desktop node.
+
+- Confirmed same-run cascade resume: the second cascade continues from the selected tail frame instead of restarting a fresh video.
+- Added a detached media overlay below the node with `Source`, three tail candidates, and `Result`.
+- Enlarged the detached media overlay so frame choices can be inspected without zooming tightly into the node. The overlay is allowed to be wider than the node itself.
+- Kept the Continue button visible only while the cascade is paused; it disappears after the run completes.
+- Restored the native ComfyUI image upload button on `source_image_file` so users can browse/upload new source images, not only pick already-known Comfy input assets.
+- Added Singularity-specific handling for VHS latent preview: `vhslatentpreview` is kept as a small fixed-size live preview instead of scaling from the full node width.
+- Native/frozen image and video previews are hidden in favor of the Singularity media overlay, so the post-run panel reflects source, tail candidates, and result instead of stale noise.
+- Fixed media overlay lifecycle after cancelled or restarted cascades: stale Source/Tail/Result panels are now removed on source changes, fresh execution starts, and new pause events so old UI cannot stack over the new run.
+- Added real paused-cascade cancel handling: the UI now has `Cancel Pause`, standard ComfyUI interrupt is patched to notify Singularity's backend wait loop, and `/singularity/cascade/cancel` can cancel all active paused cascade states without pressing Continue first.
+- Reworked cascade pause boundaries after cascade 2/3/4: every pause now uses the same same-run wait/continue path as cascade 1, trims the selected decoded frame batch in code, keeps all decoded segment batches alive, and runs one final batch concat/video combine instead of saving intermediate PAUSED videos.
+- Added pause-time stitched preview media: the `Result` tile now shows a temp-only preview of the already-stitched video from the first frame through the current cascade boundary, while the final saved video is still produced only once at the end.
+- Clarified cascade report numbering: the first generated body is now recorded as cascade segment 1, so reports show segments 1-5 instead of only continuation segments 2-5.
+- Restored report hygiene for public testing: sampler begin/proposal records now carry explicit statuses, final Event Core Body counts are derived from runtime records instead of writing misleading zeros, and runtime-monitor JSON/CSV/diff sidecars are written next to the saved markdown report.
 
 ## 0.1.1-r59 Public Alpha Clean
 
@@ -11,7 +61,7 @@ current public:  ComfyUI-Event-Equality-Core_v0.1.1-r59_PublicAlphaClean.zip
 
 Status: public alpha / experimental.
 
-The main r59 goal is to keep one clean user-facing node, `Event Horizon`, while adding stronger diagnostics, safer input handling, and a better placement for the math layer so it does not break the native generation physics.
+The main r59 goal is to keep one clean user-facing node, `Singularity`, while adding stronger diagnostics, safer input handling, and a better placement for the math layer so it does not break the native generation physics.
 
 ## Short Summary
 
@@ -29,8 +79,8 @@ Compared with r56:
 r56 public exported:
 
 ```text
-EventHorizon
-EventHorizonR56PublicAlpha
+Singularity
+SingularityR56PublicAlpha
 EventDebugPing
 EventSaveReportToFile
 ```
@@ -38,16 +88,16 @@ EventSaveReportToFile
 r59 public clean exports only:
 
 ```text
-EventHorizon
+Singularity
 ```
 
 In the ComfyUI interface this appears as:
 
 ```text
-Event Horizon
+Singularity
 ```
 
-If an old workflow was saved with a versioned class id such as `EventHorizonR56PublicAlpha`, remove that old node and add a fresh `Event Horizon` node. This is intentional: the public package should stay clean and not accumulate internal development aliases.
+If an old workflow was saved with a versioned class id such as `SingularityR56PublicAlpha`, remove that old node and add a fresh `Singularity` node. This is intentional: the public package should stay clean and not accumulate internal development aliases.
 
 ## What Was Added After r56
 
@@ -239,7 +289,7 @@ The report does not remove drift by itself. It shows where drift appears so fixe
 ### External Node
 
 ```text
-Event Horizon
+Singularity
 ```
 
 This is the only visible node in the public clean package.
@@ -255,7 +305,7 @@ It combines:
 - video saving;
 - report saving;
 - runtime diagnostics;
-- Event Equality records.
+- Singularity records.
 
 ### Required Inputs
 
@@ -648,4 +698,8 @@ Kept:
 - pyproject;
 - version file;
 - formula integrity note.
+
+
+
+
 

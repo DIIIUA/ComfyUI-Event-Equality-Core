@@ -1,1 +1,2 @@
-# Event Equality Core - utils package
+# Singularity - utils package
+
