@@ -102,9 +102,9 @@ from .utils.tensor_stats import compute_tensor_delta, extract_latent_samples, sa
 from .utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from .adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r59"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R59 Strategy Math Native Loop"
-EVENT_HORIZON_BODY_VERSION = "0.1-r59"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r60"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R60 Cascade UI Public Alpha"
+EVENT_HORIZON_BODY_VERSION = "0.1-r60"
 
 
 def _event_json_safe(value, depth=0):
@@ -2617,22 +2617,22 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 "primary_model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "source_image_file": (_event_core_list_input_images(), {"image_upload": True}),
+                "source_image_file": (_event_core_list_input_images(), {"image_upload": True, "default": "none"}),
 
                 "positive_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
-                "negative_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
-                "temporal_texture_lock": ("BOOLEAN", {"default": True}),
+                "negative_prompt": ("STRING", {"default": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走", "multiline": True, "height": 180, "dynamicPrompts": False}),
+                "temporal_texture_lock": ("BOOLEAN", {"default": False}),
 
-                                "cascade_count": ("INT", {"default": 1, "min": 1, "max": 5}),
-                "pause_after_cascade_1": ("BOOLEAN", {"default": False}),
+                                "cascade_count": ("INT", {"default": 2, "min": 1, "max": 5}),
+                "pause_after_cascade_1": ("BOOLEAN", {"default": True}),
                 "pause_after_cascade_2": ("BOOLEAN", {"default": False}),
                 "pause_after_cascade_3": ("BOOLEAN", {"default": False}),
                 "pause_after_cascade_4": ("BOOLEAN", {"default": False}),
                 "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096}),
-                "width": ("INT", {"default": 416, "min": 16, "max": 8192, "step": 8}),
-                "height": ("INT", {"default": 608, "min": 16, "max": 8192, "step": 8}),
+                "width": ("INT", {"default": 704, "min": 16, "max": 8192, "step": 8}),
+                "height": ("INT", {"default": 1280, "min": 16, "max": 8192, "step": 8}),
                 "fps": ("INT", {"default": 16, "min": 1, "max": 240}),
-                "seed": ("INT", {"default": 359, "min": 0, "max": 0xffffffffffffffff}),
+                "seed": ("INT", {"default": 123, "min": 0, "max": 0xffffffffffffffff}),
 
                 "sampler_name": ("STRING", {"default": "euler"}),
                 "scheduler": ("STRING", {"default": "simple"}),
@@ -2645,7 +2645,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 "secondary_end_step": ("INT", {"default": 4, "min": 0, "max": 10000}),
 
                 # Keep combo UX, but include lowercase legacy tokens so stale workflows do not hard-fail before normalization.
-                "math_control_mode": (["OBSERVE_ONLY", "LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "observe_only", "latent_delta_scale", "deep_step_delta_control"], {"default": "LATENT_DELTA_SCALE"}),
+                "math_control_mode": (["OBSERVE_ONLY", "LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "observe_only", "latent_delta_scale", "deep_step_delta_control"], {"default": "OBSERVE_ONLY"}),
                 "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
                 "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
 
@@ -2656,7 +2656,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 "decode_temporal_overlap": ("INT", {"default": 12, "min": 0, "max": 65535}),
 
                 "image_upscale_method": (["nearest-exact", "nearest", "bilinear", "area", "bicubic", "lanczos"], {"default": "nearest-exact"}),
-                "image_crop": (["disabled", "center"], {"default": "disabled"}),
+                "image_crop": (["disabled", "center"], {"default": "center"}),
 
                 "save_video": ("BOOLEAN", {"default": True}),
                 "video_format": (["video/h264-mp4", "video/h265-mp4", "image/webp", "image/gif"], {"default": "video/h264-mp4"}),
@@ -2861,7 +2861,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         # and "the step route is treated like the formula is the sampler".
         # We deliberately do NOT link steps here (user steps are sacred, formula only on values/raw_delta). See execution.py first-body direct bypass.
 
-        cascade_count_n = clamp_int("cascade_count", cascade_count, 1, 1, 5)
+        cascade_count_n = clamp_int("cascade_count", cascade_count, 2, 1, 5)
         pause_after_flags_n = {
             1: coerce_bool("pause_after_cascade_1", pause_after_cascade_1),
             2: coerce_bool("pause_after_cascade_2", pause_after_cascade_2),
@@ -2891,18 +2891,18 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
 
         width_n = align_to_step(
             "width",
-            clamp_int("width", width, 416, 16, 8192),
+            clamp_int("width", width, 704, 16, 8192),
             step=8,
             min_value=16,
         )
         height_n = align_to_step(
             "height",
-            clamp_int("height", height, 608, 16, 8192),
+            clamp_int("height", height, 1280, 16, 8192),
             step=8,
             min_value=16,
         )
         fps_n = clamp_int("fps", fps, 16, 1, 240)
-        seed_n = clamp_int("seed", seed, 359, 0, 0xFFFFFFFFFFFFFFFF)
+        seed_n = clamp_int("seed", seed, 123, 0, 0xFFFFFFFFFFFFFFFF)
 
         sampler_default = allowed_samplers[0] if allowed_samplers else "euler"
         scheduler_default = allowed_schedulers[0] if allowed_schedulers else "simple"
@@ -2985,7 +2985,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             {"nearest-exact", "nearest", "bilinear", "area", "bicubic", "lanczos"},
             "nearest-exact",
         )
-        image_crop_n = clamp_enum("image_crop", image_crop, {"disabled", "center"}, "disabled")
+        image_crop_n = clamp_enum("image_crop", image_crop, {"disabled", "center"}, "center")
         video_format_n = clamp_enum(
             "video_format",
             video_format,
@@ -3155,12 +3155,12 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         normalized = normalization.get("normalized", {})
         self._event_input_normalization = normalization
 
-        cascade_count = int(normalized.get("cascade_count", 1))
+        cascade_count = int(normalized.get("cascade_count", 2))
         frames_per_cascade = int(normalized.get("frames_per_cascade", 49))
-        width = int(normalized.get("width", 416))
-        height = int(normalized.get("height", 608))
+        width = int(normalized.get("width", 704))
+        height = int(normalized.get("height", 1280))
         fps = int(normalized.get("fps", 16))
-        seed = int(normalized.get("seed", 359))
+        seed = int(normalized.get("seed", 123))
         sampler_name = str(normalized.get("sampler_name", "euler"))
         scheduler = str(normalized.get("scheduler", "simple"))
         global_steps = int(normalized.get("global_steps", 4))
@@ -3178,7 +3178,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         decode_temporal_size = int(normalized.get("decode_temporal_size", 32))
         decode_temporal_overlap = int(normalized.get("decode_temporal_overlap", 12))
         image_upscale_method = str(normalized.get("image_upscale_method", "nearest-exact"))
-        image_crop = str(normalized.get("image_crop", "disabled"))
+        image_crop = str(normalized.get("image_crop", "center"))
         video_format = str(normalized.get("video_format", "video/h264-mp4"))
         save_prefix = str(normalized.get("save_prefix", "Singularity"))
         sampler_trace_mode = str(normalized.get("sampler_trace_mode", "OFF"))

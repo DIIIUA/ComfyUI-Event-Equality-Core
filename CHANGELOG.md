@@ -1,5 +1,61 @@
 # Singularity - Public Changelog
 
+## 0.1.1-r60 Public Alpha Desktop Cascade UI Fix
+
+Status: public alpha update for ComfyUI Desktop / modern frontend cascade continuation.
+
+The main r60 goal is to make the manual cascade frame-selection workflow safer for public users: cleaner defaults, less UI overlap, preserved native image upload, and a public interface that does not expose research controls as normal user switches.
+
+### Short Summary
+
+- Updated runtime/package version from `0.1.1-r59` to `0.1.1-r60`.
+- Improved the detached Source / Tail 1 / Tail 2 / Tail 3 / Result pause panel.
+- The pause panel now hides behind normal ComfyUI modal/dialog surfaces instead of drawing over them.
+- The pause panel also hides when internal workflow panels or drawers overlap it.
+- Kept the native ComfyUI `source_image_file` upload button.
+- Hid and disabled the public UI for `use_formula_recommendation`; the internal argument remains for old workflow compatibility, but public users no longer see it as a normal option.
+- Reset public defaults for a clean starter node:
+  - `source_image_file = none`
+  - `positive_prompt = empty`
+  - built-in base negative prompt
+  - `cascade_count = 2`
+  - `pause_after_cascade_1 = true`
+  - `width = 704`
+  - `height = 1280`
+  - `seed = 123`
+  - `math_control_mode = OBSERVE_ONLY`
+  - `image_crop = center`
+- Rewrote the README and homepage/CVTI description for normal users, with plain explanations of cascade continuation, drift, math modes, reports, and public-alpha limits.
+
+### What Changed For Users
+
+The node now opens as a clean two-cascade frame-selection test instead of a local development preset. A new user can add the node, connect the model/CLIP/VAE route, choose or upload a source image, write a prompt, generate, choose a tail frame, continue, and inspect one final stitched video.
+
+The math layer is still present, but the public default is observer-first:
+
+```text
+math_control_mode = OBSERVE_ONLY
+high_delta_strength = 1.0
+low_delta_strength = 1.0
+```
+
+This means r60 starts as a safer baseline. Users who want to test delta behavior can intentionally switch to `LATENT_DELTA_SCALE`.
+
+### UI Notes
+
+r60 specifically targets the ComfyUI Desktop behavior seen after the modern frontend update. The pause panel is still detached under the node, but it now treats modals, manager windows, workflow panels, sidebars, and drawers as blocking surfaces when they cover the panel area.
+
+### Compatibility Notes
+
+Old workflows that already contain `use_formula_recommendation` should not fail merely because the public UI hides it. The field remains accepted by the Python signature, but new public nodes force the visible user route to manual green tail selection.
+
+### Still Public Alpha
+
+- Current public cascade limit: 5.
+- Infinite cascades are not implemented yet.
+- Prompt-per-cascade scheduling is future work.
+- `CompletionGate = PASS` means the route completed and a final video exists. It does not guarantee visual quality.
+
 ## 2026-06-05 - Public Alpha Package Prep
 
 Status: public alpha packaging pass for the active cascade frame-selection build.

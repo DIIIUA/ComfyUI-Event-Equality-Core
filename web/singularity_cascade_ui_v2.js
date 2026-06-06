@@ -1,5 +1,5 @@
 console.log("%c[Singularity UI] Extension script loaded (for browser or desktop/Electron). If you don't see this in DevTools console, the JS is not being executed in your frontend.", "color: #0f0; font-weight: bold");
-console.log("Singularity UI - Gemini stable groups + minimal Tail 3 (fixed visibility)");
+console.log("Singularity UI - overlay anchor + Comfy surface occlusion fix 20260606_1632");
 
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
@@ -28,7 +28,53 @@ const PAUSE_OVERLAY = {
     tileHeight: 260,
     buttonHeight: 38,
     nodeWidthScale: 1.35,
+    zIndex: 120,
 };
+
+const COMFY_GLOBAL_BLOCKING_OVERLAY_SELECTORS = [
+    ".p-dialog-mask",
+    ".p-dialog",
+    ".p-overlaypanel",
+    ".p-popover",
+    ".comfyui-popup.open",
+    ".comfy-modal",
+    ".comfy-modal-content",
+    ".comfyui-dialog",
+    ".comfyui-modal",
+    ".manager-dialog",
+    ".extension-manager",
+    "[role='dialog']",
+    "[aria-modal='true']",
+];
+
+const COMFY_OCCLUDING_SURFACE_SELECTORS = [
+    ".p-sidebar",
+    ".p-sidebar-content",
+    ".p-drawer",
+    ".p-drawer-content",
+    ".p-drawer-mask",
+    ".comfy-menu",
+    ".comfy-menu-container",
+    ".comfy-side-bar",
+    ".comfy-sidebar",
+    ".comfyui-sidebar",
+    ".workflow-panel",
+    ".workflows-panel",
+    ".workflow-sidebar",
+    ".workflows-sidebar",
+    ".workflow-browser",
+    ".workflow-explorer",
+    "[class*='workflow']",
+    "[class*='Workflow']",
+    "[class*='drawer']",
+    "[class*='Drawer']",
+    "[class*='sidebar']",
+    "[class*='Sidebar']",
+    "[class*='side-panel']",
+    "[class*='SidePanel']",
+    "[class*='panel']",
+    "[class*='Panel']",
+];
 
 const LATENT_PREVIEW = {
     width: 220,
@@ -41,6 +87,9 @@ const CONTINUE_ROUTE = "/singularity/cascade/continue/";
 const CANCEL_ROUTE = "/singularity/cascade/cancel/";
 const CANCEL_ALL_ROUTE = "/singularity/cascade/cancel";
 const PROMPT_WIDGET_NAMES = new Set(["positive_prompt", "negative_prompt"]);
+const PUBLIC_HIDDEN_WIDGET_NAMES = new Set([
+    "use_formula_recommendation",
+]);
 const SUPPRESSED_MEDIA_WIDGET_NAMES = new Set([
     "$$canvas-image-preview",
     "vhslatentpreview",
@@ -60,7 +109,7 @@ const GROUPS = [
     { id: "SAMPLING", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step", "math_control_mode", "high_delta_strength", "low_delta_strength"] },
     { id: "DECODE", color: "#059669", bg: "rgba(5, 150, 105, 0.09)", names: ["decode_tile_size", "decode_overlap", "decode_temporal_size", "decode_temporal_overlap", "image_upscale_method", "image_crop"] },
     { id: "POST GEN", color: "#dc2626", bg: "rgba(220, 38, 38, 0.09)", names: ["save_video", "video_format", "save_report", "save_prefix"] },
-    { id: "TAIL 3", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["use_formula_recommendation", "selected_tail_index"] },
+    { id: "TAIL 3", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["selected_tail_index"] },
 ];
 
 function isSingularityNode(node) {
@@ -82,11 +131,8 @@ function setWidgetValue(node, name, value) {
 function clampNodeSize(node) {
     if (!node || !node.setSize) return;
     const width = Math.max(Number(node.size?.[0]) || UI.minWidth, UI.minWidth);
-    let height = UI.minHeight;
-    try {
-        const contentBottom = getWidgetContentBottom(node);
-        height = Math.max(UI.minHeight, contentBottom + UI.nodeBottomPad);
-    } catch (e) {}
+    const visualHeight = getNodeVisualHeight(node);
+    let height = Math.max(UI.minHeight, visualHeight);
     height = Math.min(height, UI.maxHeight);
     if (width !== node.size?.[0] || height !== node.size?.[1]) {
         node.setSize([width, height]);
@@ -105,7 +151,19 @@ function stabilizePromptWidgets(node) {
     }
 }
 
+function hidePublicOnlyWidgets(node) {
+    const widgets = node?.widgets || [];
+    for (const widget of widgets) {
+        if (!widget || !PUBLIC_HIDDEN_WIDGET_NAMES.has(widget.name)) continue;
+        widget.value = false;
+        widget.label = "";
+        widget.hidden = true;
+        widget.computeSize = function() { return [0, -6]; };
+    }
+}
+
 function stabilizeNodeLayout(node) {
+    hidePublicOnlyWidgets(node);
     stabilizePromptWidgets(node);
     clampNodeSize(node);
 }
@@ -140,6 +198,14 @@ function getWidgetContentBottom(node) {
         fallbackY = rawY + height + 4;
     }
     return Math.max(100, bottom + 8);
+}
+
+function getNodeVisualHeight(node) {
+    let height = Number(node?.size?.[1]) || UI.minHeight;
+    try {
+        height = Math.max(height, getWidgetContentBottom(node) + UI.nodeBottomPad);
+    } catch (e) {}
+    return Math.max(UI.minHeight, height);
 }
 
 function viewUrlFromMediaInfo(item, fallbackType = "temp") {
@@ -529,16 +595,79 @@ function getNodeScreenPosition(node, graphX, graphY) {
     };
 }
 
+function rectsIntersect(a, b) {
+    if (!a || !b) return false;
+    return !(
+        a.right <= b.left ||
+        a.left >= b.right ||
+        a.bottom <= b.top ||
+        a.top >= b.bottom
+    );
+}
+
+function isIgnorableBlockingElement(el, overlay) {
+    if (!el || el === overlay || overlay?.contains?.(el) || el.closest?.(".singularity-media-overlay")) return true;
+    const tagName = String(el.tagName || "").toUpperCase();
+    if (tagName === "HTML" || tagName === "BODY" || tagName === "CANVAS") return true;
+    if (el.id === "graph-canvas") return true;
+    if (el.classList?.contains?.("litegraph") || el.classList?.contains?.("litegraphcanvas")) return true;
+    return false;
+}
+
+function isVisibleBlockingElement(el, overlay, overlayRect = null, requireIntersection = false) {
+    if (isIgnorableBlockingElement(el, overlay)) return false;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    if (style) {
+        if (style.display === "none" || style.visibility === "hidden") return false;
+        if (Number(style.opacity) === 0) return false;
+    }
+    const rect = el.getBoundingClientRect?.();
+    if (!rect || rect.width <= 1 || rect.height <= 1) return false;
+    if (requireIntersection && overlayRect && !rectsIntersect(rect, overlayRect)) return false;
+    return true;
+}
+
+function hasBlockingComfyOverlay(overlay) {
+    if (typeof document === "undefined") return false;
+    const overlayRect = overlay?.getBoundingClientRect?.();
+    for (const selector of COMFY_GLOBAL_BLOCKING_OVERLAY_SELECTORS) {
+        const elements = document.querySelectorAll(selector);
+        for (const el of elements) {
+            if (isVisibleBlockingElement(el, overlay, overlayRect, false)) return true;
+        }
+    }
+    for (const selector of COMFY_OCCLUDING_SURFACE_SELECTORS) {
+        const elements = document.querySelectorAll(selector);
+        for (const el of elements) {
+            if (isVisibleBlockingElement(el, overlay, overlayRect, true)) return true;
+        }
+    }
+    return false;
+}
+
+function updatePauseOverlayVisibility(node) {
+    const overlay = node?._singularityPauseOverlay;
+    if (!overlay) return false;
+    const blocked = hasBlockingComfyOverlay(overlay);
+    overlay.dataset.comfyBlocked = blocked ? "true" : "false";
+    overlay.style.visibility = blocked ? "hidden" : "visible";
+    overlay.style.pointerEvents = blocked ? "none" : "auto";
+    overlay.style.zIndex = String(PAUSE_OVERLAY.zIndex);
+    return blocked;
+}
+
 function positionPauseOverlay(node) {
     const overlay = node?._singularityPauseOverlay;
     if (!overlay || !node?.pos || !node?.size) return;
+    if (updatePauseOverlayVisibility(node)) return;
     const nodeWidth = Math.max(Number(node.size[0]) || UI.minWidth, UI.minWidth);
+    const visualHeight = getNodeVisualHeight(node);
     const baseWidth = Math.max(
         PAUSE_OVERLAY.minWidth,
         Math.min(Math.round(nodeWidth * PAUSE_OVERLAY.nodeWidthScale), PAUSE_OVERLAY.maxWidth)
     );
     const graphX = Number(node.pos[0] || 0) + (nodeWidth - baseWidth) / 2;
-    const graphY = Number(node.pos[1] || 0) + Number(node.size[1] || UI.minHeight) + PAUSE_OVERLAY.gap;
+    const graphY = Number(node.pos[1] || 0) + visualHeight + PAUSE_OVERLAY.gap;
     const screen = getNodeScreenPosition(node, graphX, graphY);
     if (!screen) return;
     overlay.style.left = `${screen.x}px`;
@@ -641,7 +770,7 @@ function ensurePauseOverlay(node) {
     overlay.dataset.nodeId = String(node.id ?? "");
     setElementStyle(overlay, {
         position: "fixed",
-        zIndex: "10000",
+        zIndex: String(PAUSE_OVERLAY.zIndex),
         pointerEvents: "auto",
         boxSizing: "border-box",
         padding: `${PAUSE_OVERLAY.pad}px`,

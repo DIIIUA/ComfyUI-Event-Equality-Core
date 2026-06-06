@@ -108,9 +108,9 @@ except Exception:
     web = None
     InterruptProcessingException = RuntimeError
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r59"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R59 Strategy Math Native Loop"
-EVENT_HORIZON_BODY_VERSION = "0.1-r59"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r60"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R60 Cascade UI Public Alpha"
+EVENT_HORIZON_BODY_VERSION = "0.1-r60"
 _SINGULARITY_PAUSE_STATES = {}
 
 
@@ -1232,6 +1232,7 @@ class SingularityExecutionMixin:
 
             # 2. Pull the most system-relevant signals from recent execution_records
             last_raw_deltas = []      # raw_delta_norm from high samplers
+            last_bounded_signals = [] # normalized seam pressure from Strategy coupling
             last_segment_motion = []  # full motion records from last segments
 
             if records:
@@ -1240,11 +1241,14 @@ class SingularityExecutionMixin:
                         continue
                     if "raw_delta_norm" in rec and rec["raw_delta_norm"] is not None:
                         last_raw_deltas.append(float(rec["raw_delta_norm"]))
+                    if "bounded_signal" in rec and rec["bounded_signal"] is not None:
+                        last_bounded_signals.append(float(rec["bounded_signal"]))
                     if rec.get("stage", "").startswith("EventMath_cascade_") and rec.get("stage", "").endswith("_frame_motion"):
                         last_segment_motion.append(rec)
 
             # We care most about the last 1-2 segments (they produced the tail)
             relevant_deltas = last_raw_deltas[:2]
+            relevant_bounded = last_bounded_signals[:2]
             relevant_motion = last_segment_motion[:2]
 
             avg_relevant_delta = sum(relevant_deltas) / len(relevant_deltas) if relevant_deltas else 0.0
@@ -1256,8 +1260,8 @@ class SingularityExecutionMixin:
 
             if relevant_motion:
                 for m in relevant_motion:
-                    stab = m.get("stability_score", 0.5)
-                    rev = m.get("reversal_ratio", 0.0) or 0.0
+                    stab = m.get("frame_motion_stability_score", m.get("stability_score", 0.5))
+                    rev = m.get("frame_delta_reversal_ratio", m.get("reversal_ratio", 0.0)) or 0.0
                     # The system (raw philosophy) tends to value moments with decent delta + some reversal
                     system_interest *= (1.0 + rev * 0.5) * (1.0 + (1.0 - min(stab, 1.0)) * 0.3)
 
@@ -1282,27 +1286,42 @@ class SingularityExecutionMixin:
             mirror_break_scores = []
             admissible_continuation_scores = []
             past_strategy_proxy = 0.0
-            if relevant_deltas:
-                past_strategy_proxy = sum(relevant_deltas) / len(relevant_deltas)
+            if relevant_bounded:
+                past_delta_signal = sum(relevant_bounded) / len(relevant_bounded)
+            elif relevant_deltas:
+                avg_delta = sum(relevant_deltas) / len(relevant_deltas)
+                past_delta_signal = avg_delta / (avg_delta + 6000.0)
+            else:
+                past_delta_signal = 0.5
+
+            motion_parts = []
             if relevant_motion:
                 for m in relevant_motion:
-                    rev = m.get("reversal_ratio", 0.0) or 0.0
-                    stab = m.get("stability_score", 0.5) or 0.5
-                    past_strategy_proxy += (rev * 0.4 + (1.0 - min(stab, 1.0)) * 0.3)
+                    rev = m.get("frame_delta_reversal_ratio", m.get("reversal_ratio", 0.0)) or 0.0
+                    stab = m.get("frame_motion_stability_score", m.get("stability_score", 0.5)) or 0.5
+                    spike = m.get("frame_delta_spike_ratio", 1.0) or 1.0
+                    jerk = m.get("frame_delta_jerk_ratio", 0.0) or 0.0
+                    motion_parts.append(
+                        0.40 * min(max(float(rev), 0.0), 1.0)
+                        + 0.30 * (1.0 - min(max(float(stab), 0.0), 1.0))
+                        + 0.20 * min(max((float(spike) - 1.0) / 1.5, 0.0), 1.0)
+                        + 0.10 * min(max(float(jerk), 0.0), 1.0)
+                    )
+            past_motion_signal = sum(motion_parts) / len(motion_parts) if motion_parts else 0.5
+            past_strategy_proxy = min(max(0.65 * past_delta_signal + 0.35 * past_motion_signal, 0.0), 1.0)
+
+            local_score_max = max(local_scores) if local_scores else 0.0
 
             for i in range(n):
-                # Observed for this candidate (right side proxy): local motion of the tail frame + recency as "future trace"
+                # Observed for this candidate (right side proxy): normalized tail motion + recency as "future trace".
                 cand_local = local_scores[i] if i < len(local_scores) else 0.0
-                cand_recency = 1.0 + (i / max(n-1, 1)) * 0.2
-                observed_for_cand = cand_local * cand_recency
+                cand_local_norm = (float(cand_local) / float(local_score_max)) if local_score_max > 0 else 0.0
+                cand_recency_norm = i / max(n - 1, 1)
+                observed_for_cand = min(max(0.75 * cand_local_norm + 0.25 * cand_recency_norm, 0.0), 1.0)
 
-                # Raw MirrorBreak (semantic distance between past Strategy context and this candidate as continuation)
+                # MirrorBreak compares normalized Strategy-side signals, not raw latent norm units vs pixel motion units.
                 # Lower = better admissible continuation (keeps the event coherent per formula right side)
-                if past_strategy_proxy > 0:
-                    raw_diff = abs(past_strategy_proxy - observed_for_cand)
-                    mb = min(1.0, raw_diff / max(past_strategy_proxy, 1.0))
-                else:
-                    mb = 0.5  # neutral if no strong past signal
+                mb = min(1.0, abs(float(past_strategy_proxy) - float(observed_for_cand)))
 
                 mirror_break_scores.append(float(mb))
                 admissible = 1.0 - mb
@@ -1318,10 +1337,14 @@ class SingularityExecutionMixin:
                         "observed_for_candidate": float(observed_for_cand),
                         "raw_components": {
                             "relevant_raw_deltas": relevant_deltas,
+                            "relevant_bounded_signals": relevant_bounded,
+                            "past_delta_signal": float(past_delta_signal),
+                            "past_motion_signal": float(past_motion_signal),
                             "local_motion_score": cand_local,
-                            "recency": cand_recency
+                            "local_motion_normalized": float(cand_local_norm),
+                            "recency_normalized": float(cand_recency_norm)
                         },
-                        "note": "[RAW5] Bidirectional: left=segment Strategy (deltas+motion from high/low seam), right=candidate as admissible O+ for next cascade. MirrorBreak = semantic distance per KB Mirror Core / admissible causal continuation."
+                        "note": "[RAW6] Bidirectional normalized Mirror: left=normalized segment Strategy (bounded seam pressure + motion), right=normalized candidate continuation. MirrorBreak = same-scale semantic distance per KB Mirror Core."
                     })
 
             # Blend existing system scores with new formula admissible scores (raw, explicit weights)
@@ -1350,6 +1373,7 @@ class SingularityExecutionMixin:
                     "admissible_continuation_scores": admissible_continuation_scores,
                     "system_signals": {
                         "last_raw_deltas_used": relevant_deltas,
+                        "last_bounded_signals_used": relevant_bounded,
                         "last_segments_motion_used": len(relevant_motion),
                         "system_interest_multiplier": system_interest,
                         "past_strategy_proxy": past_strategy_proxy
@@ -2802,6 +2826,72 @@ class SingularityExecutionMixin:
         packet["metadata"]["event_program_status"]["saved_video_path"] = saved_video_path
         packet["metadata"]["event_program_status"]["failure_reason"] = failure_reason
 
+        # Tail formula evidence must exist before Event Core finalization/report
+        # so Strategy Matrix can see tail->next-source as an observed collision.
+        tail_result = self._select_best_tail_frames(generated_frames, count=3, records=execution_records)
+        tail_3_frames = tail_result["frames"] if tail_result else None
+        tail_scores = tail_result.get("scores", [0.0, 0.0, 0.0]) if tail_result else [0.0, 0.0, 0.0]
+        mirror_breaks = tail_result.get("mirror_break_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
+        admissible_conts = tail_result.get("admissible_continuation_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
+
+        continuation_fitness = self._compute_continuation_fitness(
+            tail_3_frames,
+            source_image=uploaded_image,
+            records=execution_records,
+        )
+
+        formula_best_index = 0
+        if tail_scores:
+            formula_best_index = tail_scores.index(max(tail_scores))
+
+        continuation_scores = [0.0] * 3
+        if continuation_fitness and continuation_fitness.get("fitness"):
+            fit = continuation_fitness["fitness"]
+            for i in range(min(3, len(fit))):
+                sys_score = tail_scores[i] if i < len(tail_scores) else 0.0
+                cont_score = fit[i]
+                adm = admissible_conts[i] if i < len(admissible_conts) else 0.5
+                continuation_scores[i] = 0.50 * sys_score + 0.30 * cont_score + 0.20 * adm
+
+            max_c = max(continuation_scores) or 1.0
+            if max_c > 0:
+                continuation_scores = [s / max_c for s in continuation_scores]
+
+        system_best_for_continuation = 0
+        if continuation_scores:
+            system_best_for_continuation = continuation_scores.index(max(continuation_scores))
+
+        manual_sel = int(selected_tail_index) if selected_tail_index is not None else -1
+        if use_formula_recommendation:
+            initial_selected_index = formula_best_index
+        else:
+            initial_selected_index = manual_sel if manual_sel in (0, 1, 2) else -1
+
+        packet["metadata"]["tail_3_formula_summary"] = {
+            "tail_3_frames_available": tail_3_frames is not None,
+            "tail_3_count": tail_3_frames.shape[0] if tail_3_frames is not None and hasattr(tail_3_frames, "shape") else 0,
+            "tail_scores": tail_scores,
+            "mirror_break_scores": mirror_breaks,
+            "admissible_continuation_scores": admissible_conts,
+            "formula_best_tail_index": formula_best_index,
+            "initial_selected_tail_index": initial_selected_index,
+            "system_best_for_continuation": system_best_for_continuation,
+            "continuation_fitness_scores": continuation_scores,
+            "report_timing": "pre_finalize",
+            "formula_role": "tail candidate as admissible Outcome(t+1)+ObservedBehavior(t+1) for next cascade Strategy",
+        }
+        if tail_3_frames is not None:
+            packet["metadata"]["tail_3_best_frames"] = {
+                "description": "Last 3 frames from the end of the generated sequence (formula proposes admissible continuation per KB Mirror reading)",
+                "shape": list(tail_3_frames.shape) if hasattr(tail_3_frames, "shape") else None,
+                "scores": tail_scores,
+                "mirror_break_scores": mirror_breaks,
+                "admissible_continuation_scores": admissible_conts,
+                "formula_best_index": formula_best_index,
+                "user_selected_index": manual_sel,
+                "mirror_note": "Human Strategy (green outline / manual click) meets Formula ObservedBehavior (motion scores). Selection is always bidirectional reweighting - formula proposes, human Strategy decides or overrides.",
+            }
+
         packet = self._event_core_body_finalize(packet, execution_records, result_status, saved_video_path, failure_reason)
         packet["metadata"]["execution_records"] = execution_records
 
@@ -2890,58 +2980,7 @@ class SingularityExecutionMixin:
         else:
             result_preview = self._placeholder_image(width, height)
 
-        # Compute tail frames + formula scores (part of unifying UI layer over internal flows)
-        tail_result = self._select_best_tail_frames(generated_frames, count=3, records=execution_records)
-
-        tail_3_frames = tail_result["frames"] if tail_result else None
-        tail_scores = tail_result.get("scores", [0.0, 0.0, 0.0]) if tail_result else [0.0, 0.0, 0.0]
-        mirror_breaks = tail_result.get("mirror_break_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
-        admissible_conts = tail_result.get("admissible_continuation_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
-
-        # Continuation fitness (sharpness + color match to source) — critical for cascade chaining
-        continuation_fitness = self._compute_continuation_fitness(
-            tail_3_frames, 
-            source_image=uploaded_image, 
-            records=execution_records
-        )
-
-        # Formula recommendation (the "best" according to blended system + KB bidirectional formula)
-        formula_best_index = 0
-        if tail_scores:
-            formula_best_index = tail_scores.index(max(tail_scores))
-
-        # Combined "best for cascade continuation" score (what the system recommends for chaining)
-        # Now includes explicit admissible_continuation from Mirror reading (right side of formula)
-        continuation_scores = [0.0] * 3
-        if continuation_fitness and continuation_fitness.get("fitness"):
-            fit = continuation_fitness["fitness"]
-            for i in range(min(3, len(fit))):
-                # Balance per KB: system raw signals + practical fitness + admissible continuation (formula right side)
-                sys_score = tail_scores[i] if i < len(tail_scores) else 0.0
-                cont_score = fit[i]
-                adm = admissible_conts[i] if i < len(admissible_conts) else 0.5
-                # 50% sys (raw deltas+motion), 30% continuation fitness, 20% formula admissible (Mirror right side)
-                continuation_scores[i] = 0.50 * sys_score + 0.30 * cont_score + 0.20 * adm
-
-            # Re-normalize
-            max_c = max(continuation_scores) or 1.0
-            if max_c > 0:
-                continuation_scores = [s / max_c for s in continuation_scores]
-
-        # The system's strongest proposal for continuation (gold hint only)
-        system_best_for_continuation = 0
-        if continuation_scores:
-            system_best_for_continuation = continuation_scores.index(max(continuation_scores))
-
-        # Selection is ALWAYS manual via green (explicit click on Tail 3 bar). 
-        # use_formula_recommendation only controls whether gold ★ advisor (formula best) is highlighted in UI.
-        # The selected_tail_index (synced from bar clicks) provides the user's manual choice when provided.
-        manual_sel = int(selected_tail_index) if selected_tail_index is not None else -1
-        if use_formula_recommendation:
-            initial_selected_index = formula_best_index
-        else:
-            initial_selected_index = manual_sel if manual_sel in (0, 1, 2) else -1
-
+        # Tail math was computed before Event Core finalization/report; here we only expose the already-scored frames.
         # Split into 3 separate IMAGE outputs for the UI layer to use
         tail_frame_0 = None
         tail_frame_1 = None

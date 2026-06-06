@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r59"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R59 Strategy Math Native Loop"
-EVENT_HORIZON_BODY_VERSION = "0.1-r59"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r60"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R60 Cascade UI Public Alpha"
+EVENT_HORIZON_BODY_VERSION = "0.1-r60"
 
 
 def _event_json_safe(value, depth=0):
@@ -281,6 +281,683 @@ class SingularityTelemetryMixin:
         body["live_route_count"] = int(body.get("live_route_count", 0) or 0)
         body["runtime_monitor_count"] = int(body.get("runtime_monitor_count", 0) or 0)
         return packet
+
+    def _event_strategy_matrix_from_records(self, execution_records, result_status="", saved_video_path=""):
+        """
+        Report-only map of places where carriers collide into Strategy.
+        This is deliberately observer-only: it creates evidence records, never sampler control.
+        """
+        records = [r for r in (execution_records or []) if isinstance(r, dict)]
+
+        def stage_text(record):
+            parts = [
+                str(record.get("stage", "") or ""),
+                str(record.get("status", "") or ""),
+                str(record.get("formula", "") or ""),
+                str(record.get("formula_role", "") or ""),
+                str(record.get("observed_behavior", "") or ""),
+                str(record.get("route_id", "") or ""),
+                str(record.get("branch_name", "") or ""),
+                str(record.get("branch", "") or ""),
+            ]
+            return " ".join(parts).lower()
+
+        def hits(*needles):
+            needles_l = [str(n or "").lower() for n in needles if str(n or "").strip()]
+            out = []
+            for rec in records:
+                text = stage_text(rec)
+                if any(n in text for n in needles_l):
+                    out.append(str(rec.get("stage", "") or "unknown"))
+            return out
+
+        categories = {
+            "text_positive": hits("eventtextencodepositive", "textencodepositive"),
+            "text_negative": hits("eventtextencodenegative", "textencodenegative"),
+            "text": hits("eventtextencode", "text encode", "conditioning"),
+            "image": hits("eventimagescalestart", "image scale", "source image", "eventimagescale"),
+            "latent_seed": hits("eventwanimagetovideoseed", "wan_i2v_latent_seed", "wan image to video"),
+            "high_sampler": hits("eventsamplerhigh", "samplerhigh", "branch_name high", "branch high"),
+            "low_sampler": hits("eventsamplerlow", "samplerlow", "branch_name low", "branch low"),
+            "delta_control": hits("eventmathdeltacontrol", "latent_delta_scale", "delta control"),
+            "cfg_policy": hits("eventstrategycfg", "eventmathsamplerpathpolicy", "cfg_policy"),
+            "motion": hits("eventmath_decoded_frame_motion", "eventmath_concatenated_frame_motion", "frame_motion"),
+            "cascade": hits("singularitycascadebegin", "singularitycascadesegmentend", "singularitycascadeend"),
+            "pause": hits("singularitycascadepause", "singularitycascaderesume", "mirrorcut"),
+            "boundary": hits("eventuniversalboundary", "cascadeboundary", "cascade boundary"),
+            "tail_formula": hits("formula_tail_mirror_break", "tailframesselect", "admissible_continuation"),
+            "video": hits("eventvideocombine", "videosave", "saved_video_path"),
+        }
+        categories["text_any"] = sorted(set(categories["text_positive"] + categories["text_negative"] + categories["text"]))
+
+        numeric_keys = (
+            "raw_delta_norm",
+            "native_delta_norm",
+            "effective_delta_norm",
+            "low_effective_delta_norm",
+            "low_native_delta_norm",
+            "delta_norm",
+            "relative_delta",
+            "strength_runtime",
+            "base_strength",
+            "coupling_multiplier",
+            "step_schedule_factor",
+            "resume_frame_index",
+            "latent_temporal_target_t",
+            "actual_output_frames",
+            "total_requested_frames",
+            "frames",
+            "fps",
+            "candidate_index",
+            "mirror_break",
+            "admissible_continuation",
+            "past_strategy_proxy",
+            "observed_for_candidate",
+            "bounded_signal",
+            "frame_delta_norm_mean",
+            "frame_delta_norm_std",
+            "frame_delta_norm_cv_ratio",
+            "frame_delta_spike_ratio",
+            "frame_delta_reversal_ratio",
+            "frame_delta_jerk_ratio",
+            "frame_motion_stability_score",
+        )
+
+        def numeric_snapshots(stage_hits):
+            stage_hit_set = set(stage_hits or [])
+            snapshots = []
+            for rec in records:
+                if str(rec.get("stage", "") or "") not in stage_hit_set:
+                    continue
+                snap = {}
+                for key in numeric_keys:
+                    if key not in rec:
+                        continue
+                    value = rec.get(key)
+                    if isinstance(value, (int, float)) and not isinstance(value, bool):
+                        if isinstance(value, float) and not math.isfinite(value):
+                            value = str(value)
+                        snap[key] = value
+                if snap:
+                    snap["stage"] = str(rec.get("stage", "") or "unknown")
+                    snapshots.append(snap)
+            if len(snapshots) > 12:
+                return snapshots[:4] + snapshots[-8:]
+            return snapshots
+
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            value = safe_float(value, 0.0)
+            return max(0.0, min(1.0, value))
+
+        def snapshot_values(snapshots, key):
+            values = []
+            for snap in snapshots or []:
+                value = safe_float(snap.get(key), None)
+                if value is not None:
+                    values.append(value)
+            return values
+
+        def latest_snapshot_value(snapshots, key, default=None):
+            for snap in reversed(snapshots or []):
+                value = safe_float(snap.get(key), None)
+                if value is not None:
+                    return value
+            return default
+
+        def compute_collision_scores(collision_id, status, missing_conflict, snapshots):
+            status = str(status or "")
+            conflict_score = clamp01(missing_conflict)
+            drift_score = None
+            basis = {
+                "base_missing_evidence_score": conflict_score,
+                "metrics_used": [],
+                "score_version": "strategy_collision_scores_v1_report_only",
+            }
+
+            if status == "not_applicable_single_segment":
+                basis["reason"] = "single segment has no tail/next-source boundary"
+                return {
+                    "conflict_score": 0.0,
+                    "drift_score": None,
+                    "basis": basis,
+                    "dynamic_recommendation": "No cascade boundary exists in this run; use a pause/resume run to score tail_next_source.",
+                }
+
+            if collision_id == "previous_next_frame_motion":
+                stability = latest_snapshot_value(snapshots, "frame_motion_stability_score", None)
+                spike = latest_snapshot_value(snapshots, "frame_delta_spike_ratio", 1.0)
+                reversal = latest_snapshot_value(snapshots, "frame_delta_reversal_ratio", 0.0)
+                jerk = latest_snapshot_value(snapshots, "frame_delta_jerk_ratio", 0.0)
+                if stability is not None:
+                    motion_conflict = clamp01(1.0 - stability)
+                    conflict_score = max(conflict_score, motion_conflict)
+                    drift_score = clamp01(
+                        0.45 * motion_conflict
+                        + 0.25 * clamp01((float(spike) - 1.0) / 1.5)
+                        + 0.20 * clamp01(float(reversal))
+                        + 0.10 * clamp01(float(jerk))
+                    )
+                    basis["metrics_used"].extend([
+                        "frame_motion_stability_score",
+                        "frame_delta_spike_ratio",
+                        "frame_delta_reversal_ratio",
+                        "frame_delta_jerk_ratio",
+                    ])
+                    basis["motion"] = {
+                        "stability": stability,
+                        "spike": spike,
+                        "reversal": reversal,
+                        "jerk": jerk,
+                    }
+
+            elif collision_id == "tail_next_source":
+                mirror_values = snapshot_values(snapshots, "mirror_break")
+                admissible_values = snapshot_values(snapshots, "admissible_continuation")
+                if mirror_values or admissible_values:
+                    best_mirror = min(mirror_values) if mirror_values else None
+                    best_admissible = max(admissible_values) if admissible_values else None
+                    drift_score = clamp01(best_mirror if best_mirror is not None else 1.0 - best_admissible)
+                    conflict_score = max(conflict_score, 0.0 if status == "observed" else drift_score)
+                    best_candidate = None
+                    if mirror_values:
+                        for snap in snapshots or []:
+                            if safe_float(snap.get("mirror_break"), None) == best_mirror:
+                                best_candidate = safe_float(snap.get("candidate_index"), None)
+                                break
+                    basis["metrics_used"].extend(["mirror_break", "admissible_continuation"])
+                    basis["tail_formula"] = {
+                        "best_mirror_break": best_mirror,
+                        "best_admissible_continuation": best_admissible,
+                        "best_candidate_index": int(best_candidate) if best_candidate is not None else None,
+                    }
+
+            elif collision_id == "high_low_sampler_strategy":
+                bounded = latest_snapshot_value(snapshots, "bounded_signal", None)
+                high_raw_values = snapshot_values(snapshots, "raw_delta_norm")
+                strength_values = snapshot_values(snapshots, "strength_runtime")
+                if bounded is not None:
+                    drift_score = clamp01(bounded)
+                    basis["metrics_used"].append("bounded_signal")
+                if high_raw_values:
+                    basis["raw_delta_norm_max"] = max(high_raw_values)
+                    basis["metrics_used"].append("raw_delta_norm")
+                if strength_values:
+                    max_strength_delta = max(abs(v - 1.0) for v in strength_values)
+                    if max_strength_delta > 1e-9 and drift_score is not None:
+                        conflict_score = max(conflict_score, clamp01(max_strength_delta * drift_score))
+                    basis["strength_runtime_values"] = strength_values[:6]
+
+            elif collision_id == "visible_video_outcome":
+                actual = latest_snapshot_value(snapshots, "actual_output_frames", None)
+                total = latest_snapshot_value(snapshots, "total_requested_frames", None)
+                if actual is not None:
+                    basis["metrics_used"].append("actual_output_frames")
+                    basis["actual_output_frames"] = actual
+                if total is not None:
+                    basis["metrics_used"].append("total_requested_frames")
+                    basis["total_requested_frames"] = total
+                if str(result_status or "").upper() != "VIDEO" or not str(saved_video_path or "").strip():
+                    conflict_score = 1.0
+                    drift_score = 1.0
+                    basis["reason"] = "final visible video Outcome is missing"
+
+            dynamic_recommendation = ""
+            if drift_score is not None and drift_score >= 0.55:
+                dynamic_recommendation = "High drift evidence: keep this collision report-only and run a fixed-seed A/B before enabling any bounded control."
+            elif conflict_score >= 0.5:
+                dynamic_recommendation = "Missing or conflicting evidence: collect a focused run before using this collision for guidance."
+
+            return {
+                "conflict_score": clamp01(conflict_score),
+                "drift_score": clamp01(drift_score) if drift_score is not None else None,
+                "basis": basis,
+                "dynamic_recommendation": dynamic_recommendation,
+            }
+
+        micro_formula_blueprints = {
+            "prompt_image_anchor": {
+                "left_outcome": ["source_image", "image_anchor", "visible_pose/layout"],
+                "left_observed_behavior": ["positive_prompt_direction", "negative_prompt_boundary", "clip_encoding_behavior"],
+                "strategy_point": "The model must read prompt meaning and source image as one admissible scene.",
+                "right_observed_behavior": ["conditioning_pressure_on_latent_seed", "prompt-image contradiction or agreement"],
+                "right_outcome": ["wan_latent_seed", "image-conditioned StrategyCarrier"],
+                "collision_math": ["semantic_anchor_agreement_score", "prompt_image_contradiction_score", "conditioning_preservation_score"],
+                "intervention_surface": ["prompt relation proposal", "conditioning relation weighting", "report warning before active control"],
+                "public_safe_control": "proposal_only",
+            },
+            "positive_negative_prompt_polarity": {
+                "left_outcome": ["positive_prompt_carrier"],
+                "left_observed_behavior": ["negative_prompt_countervector"],
+                "strategy_point": "Positive and negative conditioning must define a clean semantic corridor, not erase required scene traits.",
+                "right_observed_behavior": ["cfg_boundary_pressure", "conditioning separation"],
+                "right_outcome": ["bounded conditioning pair"],
+                "collision_math": ["prompt_overlap_score", "negative_conflict_score", "semantic_corridor_width"],
+                "intervention_surface": ["prompt warning", "negative prompt cleanup proposal", "future conditioning mask research"],
+                "public_safe_control": "proposal_only",
+            },
+            "image_latent_noise_seed": {
+                "left_outcome": ["source_image", "scaled_image"],
+                "left_observed_behavior": ["wan_image_to_video_seed_projection", "noise field initialization"],
+                "strategy_point": "The source image must survive conversion into the latent/noise possibility field.",
+                "right_observed_behavior": ["latent_seed_anchor_drift", "seed reproducibility behavior"],
+                "right_outcome": ["wan_latent_seed"],
+                "collision_math": ["latent_anchor_norm", "seed_anchor_stability", "image_to_latent_preservation"],
+                "intervention_surface": ["seed/report evidence", "future anchor preservation proposal", "no prompt rewriting"],
+                "public_safe_control": "report_only",
+            },
+            "high_low_sampler_strategy": {
+                "left_outcome": ["latent_after_high", "high sampler OutcomeNext"],
+                "left_observed_behavior": ["high_delta", "high sampler trajectory"],
+                "strategy_point": "High output becomes the StrategyCarrier that low sampler must refine without breaking.",
+                "right_observed_behavior": ["low_delta", "low sampler refinement", "delta strength/coupling behavior"],
+                "right_outcome": ["latent_after_low", "decode-ready latent"],
+                "collision_math": ["high_low_delta_ratio", "low_refinement_pressure", "strategy_carrier_stability"],
+                "intervention_surface": ["LATENT_DELTA_SCALE", "bounded coupling multiplier", "deep-step research only after evidence"],
+                "public_safe_control": "bounded_latent_delta_research",
+            },
+            "tail_next_source": {
+                "left_outcome": ["visible_tail_frame", "trimmed current segment"],
+                "left_observed_behavior": ["user selected resume frame", "MirrorCut trim behavior"],
+                "strategy_point": "The selected tail frame becomes the next segment's source StrategyCarrier.",
+                "right_observed_behavior": ["next segment source behavior", "cascade continuation drift"],
+                "right_outcome": ["next_cascade_source_image", "stitched frame batch"],
+                "collision_math": ["tail_admissibility_score", "resume_cut_delta", "continuation_boundary_score"],
+                "intervention_surface": ["manual frame choice", "formula recommendation proposal", "future prompt-per-segment assist"],
+                "public_safe_control": "manual_or_proposal_only",
+            },
+            "previous_next_frame_motion": {
+                "left_outcome": ["previous_visible_frame"],
+                "left_observed_behavior": ["frame_motion_delta", "boundary jump", "jerk/spike behavior"],
+                "strategy_point": "Adjacent frames must preserve event continuity while allowing visible motion.",
+                "right_observed_behavior": ["next_frame_motion_pressure", "continuity drift"],
+                "right_outcome": ["next_visible_frame"],
+                "collision_math": ["motion_delta", "spike_ratio", "reversal_ratio", "boundary_jump_score"],
+                "intervention_surface": ["visual diagnostics", "future continuity guidance", "do not override CompletionGate"],
+                "public_safe_control": "report_only",
+            },
+            "visible_video_outcome": {
+                "left_outcome": ["decoded_frame_batch"],
+                "left_observed_behavior": ["video combine/save behavior"],
+                "strategy_point": "The internal event becomes a visible saved Outcome that must be inspected by the user.",
+                "right_observed_behavior": ["final playback continuity", "fps/duration/frame count"],
+                "right_outcome": ["saved_video_path", "final mp4/webm Outcome"],
+                "collision_math": ["frame_count_consistency", "duration_consistency", "visible_quality_review"],
+                "intervention_surface": ["report evidence", "visual review", "public release gate"],
+                "public_safe_control": "report_only",
+            },
+        }
+
+        def make_micro_formula(collision_id, carriers, required, optional, stage_hits, status, conflict_score, drift_score, score_basis):
+            blueprint = micro_formula_blueprints.get(collision_id, {})
+            expansion_state = (
+                "ready_for_collision_math"
+                if status in ("observed", "partial_evidence")
+                else "waiting_for_required_evidence"
+            )
+            return {
+                "local_strategy_id": f"S_collision_{collision_id}",
+                "scope": "collision-local",
+                "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+                "left_side": {
+                    "outcome_previous": blueprint.get("left_outcome", []),
+                    "observed_behavior_previous": blueprint.get("left_observed_behavior", []),
+                    "evidence_categories_required": list(required or []),
+                },
+                "strategy_point": {
+                    "meaning": blueprint.get("strategy_point", "Carrier intersection becomes a local Strategy point."),
+                    "carriers": list(carriers or []),
+                    "stage_hit_count": len(stage_hits or []),
+                    "status": status,
+                },
+                "right_side": {
+                    "observed_behavior_next": blueprint.get("right_observed_behavior", []),
+                    "outcome_next": blueprint.get("right_outcome", []),
+                    "evidence_categories_optional": list(optional or []),
+                },
+                "collision_math": {
+                    "available_metric_families": blueprint.get("collision_math", []),
+                    "conflict_score": conflict_score,
+                    "drift_score": drift_score,
+                    "measured_now": bool(stage_hits),
+                    "score_basis": score_basis,
+                },
+                "intervention": {
+                    "surface": blueprint.get("intervention_surface", []),
+                    "public_safe_control": blueprint.get("public_safe_control", "report_only"),
+                    "active_control_allowed": False,
+                    "activation_rule": "Only after report evidence, visual review, fixed-seed comparison, and explicit research mode.",
+                },
+                "expansion_state": expansion_state,
+            }
+
+        def make_collision(collision_id, carriers, required, optional, intersection, formula_role, recommendation):
+            stage_hits = []
+            evidence = {}
+            for category in list(required or []) + list(optional or []):
+                cat_hits = categories.get(category, [])
+                evidence[category] = {
+                    "present": bool(cat_hits),
+                    "hit_count": len(cat_hits),
+                    "stage_hits": cat_hits[:10],
+                }
+                stage_hits.extend(cat_hits)
+            required_missing = [category for category in (required or []) if not categories.get(category)]
+            if not required_missing:
+                status = "observed"
+            elif stage_hits:
+                status = "partial_evidence"
+            else:
+                status = "missing_evidence"
+            if collision_id == "tail_next_source" and not categories.get("cascade"):
+                status = "not_applicable_single_segment"
+            required_total = max(1, len(required or []))
+            missing_conflict = float(len(required_missing) / required_total)
+            stage_hits = list(dict.fromkeys(stage_hits))
+            metric_snapshots = numeric_snapshots(stage_hits)
+            score_result = compute_collision_scores(collision_id, status, missing_conflict, metric_snapshots)
+            conflict_score = score_result.get("conflict_score", missing_conflict)
+            drift_score = score_result.get("drift_score")
+            score_basis = score_result.get("basis", {})
+            local_formula = make_micro_formula(
+                collision_id,
+                carriers,
+                required,
+                optional,
+                stage_hits,
+                status,
+                conflict_score,
+                drift_score,
+                score_basis,
+            )
+            dynamic_recommendation = score_result.get("dynamic_recommendation") or ""
+            final_recommendation = str(recommendation or "")
+            if dynamic_recommendation:
+                final_recommendation = f"{final_recommendation} {dynamic_recommendation}".strip()
+            return {
+                "stage": f"EventVectorCollisionRecord_{collision_id}",
+                "status": status,
+                "collision_id": collision_id,
+                "formula": "Outcome + ObservedBehavior are read at carrier intersections to locate Strategy(t); report-only, no active control.",
+                "formula_role": formula_role,
+                "local_formula": local_formula,
+                "carriers": list(carriers or []),
+                "intersection": str(intersection or ""),
+                "evidence": evidence,
+                "stage_hit_count": len(stage_hits),
+                "stage_hits": stage_hits[:18],
+                "metric_snapshots": metric_snapshots,
+                "conflict_score": conflict_score,
+                "drift_score": drift_score,
+                "score_basis": score_basis,
+                "recommendation": final_recommendation,
+                "active_control_allowed": False,
+                "control_mode": "REPORT_ONLY",
+            }
+
+        collisions = [
+            make_collision(
+                "prompt_image_anchor",
+                ["positive_prompt", "negative_prompt", "source_image"],
+                ["text_any", "image"],
+                ["latent_seed"],
+                "Prompt meaning collides with SourceAnchor before Wan latent seed.",
+                "StrategyCandidate carrier + OutcomePrevious / SourceAnchor",
+                "Use this collision to detect prompt-image mismatch before any active math control.",
+            ),
+            make_collision(
+                "positive_negative_prompt_polarity",
+                ["positive_prompt", "negative_prompt", "clip_conditioning"],
+                ["text_positive", "text_negative"],
+                ["cfg_policy"],
+                "Positive and negative conditioning define the semantic boundary of StrategyCandidate.",
+                "StrategyCandidate polarity boundary",
+                "Keep positive and negative prompts separated; future scoring can flag semantic overlap.",
+            ),
+            make_collision(
+                "image_latent_noise_seed",
+                ["source_image", "wan_latent_seed", "seed_noise_field"],
+                ["image", "latent_seed"],
+                ["cfg_policy"],
+                "ImageSource becomes the latent/noise possibility field consumed by the sampler.",
+                "OutcomePrevious + PossibilityField -> StrategyCarrier",
+                "This is the safest place for seed/reproducibility evidence, not for prompt rewriting.",
+            ),
+            make_collision(
+                "high_low_sampler_strategy",
+                ["high_sampler_outcome", "low_sampler_input", "low_sampler_observed_behavior"],
+                ["high_sampler", "low_sampler"],
+                ["delta_control", "cfg_policy"],
+                "High output becomes low StrategyCarrier; low ObservedBehavior decides refinement stability.",
+                "OutcomeNext(high) = StrategyCarrier(low)",
+                "Delta scaling should be interpreted here as ObservedBehavior scaling, not generic motion tuning.",
+            ),
+            make_collision(
+                "tail_next_source",
+                ["selected_tail_frame", "trimmed_batch", "next_cascade_source"],
+                ["cascade", "pause"],
+                ["boundary", "motion", "tail_formula"],
+                "User-selected tail frame becomes the source anchor for the next cascade segment.",
+                "VisibleOutcome tail -> OutcomePrevious(next segment)",
+                "This is the main continuation control point for pause/resume and future prompt-per-segment work.",
+            ),
+            make_collision(
+                "previous_next_frame_motion",
+                ["previous_frame", "next_frame", "frame_motion_delta"],
+                ["motion"],
+                ["boundary", "cascade"],
+                "Adjacent visible frames expose continuity drift after decode and concatenation.",
+                "VisibleOutcome(t-1) + ObservedBehavior(frame motion) = VisibleOutcome(t+1)",
+                "Use this for visual/motion review after every manual test, not as a CompletionGate substitute.",
+            ),
+            make_collision(
+                "visible_video_outcome",
+                ["decoded_frames", "video_combine", "saved_video_path"],
+                ["video"],
+                ["motion", "cascade"],
+                "The generated frame batch becomes a saved visible video Outcome.",
+                "Final VisibleOutcome",
+                "Public tests must check the actual video in addition to report PASS/BLOCKED status.",
+            ),
+        ]
+
+        math_mode_values = set()
+        mode_stage_allowlist = (
+            "EventMathDeltaControl",
+            "EventMathControlSummary",
+            "EventMathSamplerPathPolicy",
+            "EventStrategyCfgCoupling",
+            "EventUniversalMath_",
+        )
+        for rec in records:
+            raw_mode = rec.get("math_control_mode")
+            if raw_mode is None:
+                stage_name = str(rec.get("stage", "") or "")
+                if any(stage_name.startswith(prefix) for prefix in mode_stage_allowlist):
+                    raw_mode = rec.get("mode")
+            mode_value = str(raw_mode or "").strip().upper()
+            if mode_value:
+                math_mode_values.add(mode_value)
+        modes = sorted(math_mode_values)
+        carrier_coverage = {
+            "TEXT": bool(categories["text_any"]),
+            "IMAGE_SOURCE": bool(categories["image"]),
+            "LATENT_SEED": bool(categories["latent_seed"]),
+            "SAMPLER_HIGH": bool(categories["high_sampler"]),
+            "SAMPLER_LOW": bool(categories["low_sampler"]),
+            "DELTA_CONTROL": bool(categories["delta_control"]),
+            "CASCADE_ROUTE": bool(categories["cascade"]),
+            "PAUSE_RESUME": bool(categories["pause"]),
+            "FRAME_MOTION": bool(categories["motion"]),
+            "VISIBLE_VIDEO": bool(categories["video"]),
+        }
+        observed_count = sum(1 for item in collisions if item.get("status") == "observed")
+        partial_count = sum(1 for item in collisions if item.get("status") == "partial_evidence")
+        missing_count = sum(1 for item in collisions if item.get("status") == "missing_evidence")
+        scored_collisions = [
+            item for item in collisions
+            if isinstance(item.get("conflict_score"), (int, float)) or isinstance(item.get("drift_score"), (int, float))
+        ]
+        top_conflict = max(
+            collisions,
+            key=lambda item: safe_float(item.get("conflict_score"), -1.0),
+        ) if collisions else {}
+        drift_candidates = [item for item in collisions if safe_float(item.get("drift_score"), None) is not None]
+        top_drift = max(
+            drift_candidates,
+            key=lambda item: safe_float(item.get("drift_score"), -1.0),
+        ) if drift_candidates else {}
+        matrix = {
+            "stage": "EventStrategyMatrix",
+            "status": "recorded",
+            "matrix_version": "strategy_matrix_v2_scored_report_only",
+            "formula": "Strategy(t) is mapped as intersections between carriers; this record is evidence for future bounded guidance, not active control.",
+            "result_status": str(result_status or ""),
+            "saved_video_path": str(saved_video_path or ""),
+            "collision_count": len(collisions),
+            "observed_collision_count": observed_count,
+            "partial_collision_count": partial_count,
+            "missing_collision_count": missing_count,
+            "micro_formula_count": len([item for item in collisions if item.get("local_formula")]),
+            "scored_collision_count": len(scored_collisions),
+            "max_conflict_score": safe_float(top_conflict.get("conflict_score"), 0.0),
+            "top_conflict_collision": top_conflict.get("collision_id", ""),
+            "max_drift_score": safe_float(top_drift.get("drift_score"), None),
+            "top_drift_collision": top_drift.get("collision_id", ""),
+            "carrier_coverage": carrier_coverage,
+            "math_control_modes_seen": modes,
+            "collision_ids": [item.get("collision_id") for item in collisions],
+            "local_strategy_ids": [
+                (item.get("local_formula", {}) or {}).get("local_strategy_id")
+                for item in collisions
+                if isinstance(item.get("local_formula"), dict)
+            ],
+            "collision_formula_policy": "Each observed Strategy point may unfold its own local formula; this pass records the expansion surface only.",
+            "active_control_allowed": False,
+            "control_mode": "REPORT_ONLY",
+            "next_route": "Use observed collisions as evidence before enabling any Strategy-guided sampler or prompt/latent control.",
+        }
+        return matrix, collisions
+
+    def _event_strategy_guidance_proposal(self, strategy_matrix, vector_collisions):
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        collisions = [c for c in (vector_collisions or []) if isinstance(c, dict)]
+        proposals = []
+
+        def add(collision_id, kind, priority, message, test_route="", control_surface="report_only", evidence=None):
+            proposals.append({
+                "collision_id": str(collision_id or ""),
+                "kind": str(kind or "observe"),
+                "priority": str(priority or "low"),
+                "message": str(message or ""),
+                "test_route": str(test_route or ""),
+                "control_surface": str(control_surface or "report_only"),
+                "active_control_allowed": False,
+                "evidence": evidence or {},
+            })
+
+        for item in collisions:
+            cid = str(item.get("collision_id") or "")
+            status = str(item.get("status") or "")
+            conflict = safe_float(item.get("conflict_score"), 0.0) or 0.0
+            drift = safe_float(item.get("drift_score"), None)
+            basis = item.get("score_basis", {}) if isinstance(item.get("score_basis"), dict) else {}
+            proposal_count_before = len(proposals)
+
+            if status in ("missing_evidence", "partial_evidence"):
+                add(
+                    cid,
+                    "collect_evidence",
+                    "medium",
+                    "This Strategy collision does not yet have enough evidence for guidance.",
+                    "Run a focused fixed-seed smoke that exposes the missing carrier before changing math controls.",
+                    evidence={"status": status, "conflict_score": conflict},
+                )
+                continue
+
+            if cid == "previous_next_frame_motion" and drift is not None:
+                priority = "high" if drift >= 0.55 else "medium" if drift >= 0.35 else "low"
+                add(
+                    cid,
+                    "motion_stability_review",
+                    priority,
+                    "Frame-motion collision is measurable; use it to decide whether a delta candidate improves motion or only adds volatility.",
+                    "Compare fixed-seed baseline against one bounded low/high delta candidate and inspect the mp4, not only report metrics.",
+                    evidence={"drift_score": drift, "score_basis": basis},
+                )
+
+            if cid == "high_low_sampler_strategy" and drift is not None:
+                add(
+                    cid,
+                    "bounded_delta_candidate",
+                    "medium" if drift >= 0.35 else "low",
+                    "High-to-low sampler seam has measurable delta pressure; this is the safest collision for bounded LATENT_DELTA_SCALE research.",
+                    "Keep public defaults at 1.0/1.0; test low=1.0013 or high=0.992 + low=1.0013 only as explicit research.",
+                    control_surface="LATENT_DELTA_SCALE_RESEARCH",
+                    evidence={"drift_score": drift, "score_basis": basis},
+                )
+
+            if cid == "tail_next_source":
+                tail = basis.get("tail_formula", {}) if isinstance(basis.get("tail_formula", {}), dict) else {}
+                best_candidate = tail.get("best_candidate_index")
+                best_mirror = tail.get("best_mirror_break")
+                if best_candidate is not None:
+                    add(
+                        cid,
+                        "tail_formula_advisor",
+                        "medium",
+                        "Tail formula can propose a candidate, but it must remain a gold hint unless the user explicitly enables recommendation behavior.",
+                        f"Compare manual Tail choices against formula candidate {best_candidate}; do not let the proposal silently override green manual choice.",
+                        control_surface="manual_or_proposal_only",
+                        evidence={"best_candidate_index": best_candidate, "best_mirror_break": best_mirror},
+                    )
+
+            if conflict >= 0.5 and len(proposals) == proposal_count_before:
+                add(
+                    cid,
+                    "collision_review",
+                    "high",
+                    "This observed Strategy collision is measurable and high-pressure; review it before promoting any active control.",
+                    "Keep the next test fixed-seed and change one variable only.",
+                    evidence={"status": status, "conflict_score": conflict, "drift_score": drift, "score_basis": basis},
+                )
+
+        if not proposals:
+            add(
+                "strategy_matrix",
+                "continue_observation",
+                "low",
+                "No high-risk collision was detected in the current evidence map.",
+                "Continue with neutral or one-variable fixed-seed tests; active control remains gated.",
+            )
+
+        top_conflict = strategy_matrix.get("top_conflict_collision", "") if isinstance(strategy_matrix, dict) else ""
+        top_drift = strategy_matrix.get("top_drift_collision", "") if isinstance(strategy_matrix, dict) else ""
+        return {
+            "stage": "EventStrategyGuidanceProposal",
+            "status": "proposal_only",
+            "proposal_version": "strategy_guidance_v1_report_only",
+            "formula": "Strategy Matrix scores become test proposals; they do not modify generation.",
+            "active_control_allowed": False,
+            "control_mode": "REPORT_ONLY",
+            "top_conflict_collision": top_conflict,
+            "top_drift_collision": top_drift,
+            "proposal_count": len(proposals),
+            "proposals": proposals,
+            "public_default_policy": "Keep public defaults high_delta_strength=1.0 and low_delta_strength=1.0 until fixed-seed visual evidence proves a bounded preset.",
+        }
 
     def _event_core_cascade_progress(self, execution_records, result_status="", saved_video_path=""):
         records = [r for r in (execution_records or []) if isinstance(r, dict)]
@@ -800,6 +1477,13 @@ class SingularityTelemetryMixin:
             "runtime_monitor_count": body.get("runtime_monitor_count", 0),
             "local_sstate_count": len(body.get("local_sstates", []) or []),
             "event_conflict_count": len(body.get("event_conflicts", []) or []),
+            "strategy_matrix_status": (body.get("strategy_matrix", {}) or {}).get("status", "not_recorded") if isinstance(body.get("strategy_matrix", {}), dict) else "not_recorded",
+            "vector_collision_count": len(body.get("vector_collision_records", []) or []),
+            "vector_collision_observed_count": (body.get("strategy_matrix", {}) or {}).get("observed_collision_count", 0) if isinstance(body.get("strategy_matrix", {}), dict) else 0,
+            "local_micro_formula_count": (body.get("strategy_matrix", {}) or {}).get("micro_formula_count", 0) if isinstance(body.get("strategy_matrix", {}), dict) else 0,
+            "strategy_guidance_proposal_count": (body.get("strategy_guidance_proposal", {}) or {}).get("proposal_count", 0) if isinstance(body.get("strategy_guidance_proposal", {}), dict) else 0,
+            "top_conflict_collision": (body.get("strategy_matrix", {}) or {}).get("top_conflict_collision", "") if isinstance(body.get("strategy_matrix", {}), dict) else "",
+            "top_drift_collision": (body.get("strategy_matrix", {}) or {}).get("top_drift_collision", "") if isinstance(body.get("strategy_matrix", {}), dict) else "",
             "required_exact_missing": checks.get("required_exact_missing", []),
             "required_prefix_missing": checks.get("required_prefix_missing", []),
             "video_stage_missing": checks.get("video_stage_missing", []),
@@ -877,6 +1561,47 @@ class SingularityTelemetryMixin:
             "sstates": local_sstates,
             "formula": "Stage-level states are labeled by formula role rather than only technical stage name.",
         })
+        strategy_matrix, vector_collisions = self._event_strategy_matrix_from_records(
+            execution_records,
+            result_status=result_status,
+            saved_video_path=saved_video_path,
+        )
+        body["strategy_matrix"] = strategy_matrix
+        body["vector_collision_records"] = vector_collisions
+        local_micro_formula_records = []
+        for collision in vector_collisions:
+            local_formula = collision.get("local_formula") if isinstance(collision, dict) else None
+            if not isinstance(local_formula, dict):
+                continue
+            collision_id = str(collision.get("collision_id") or "unknown")
+            local_micro_formula_records.append({
+                "stage": f"EventLocalMicroFormula_{collision_id}",
+                "status": str(collision.get("status") or "recorded"),
+                "collision_id": collision_id,
+                "local_strategy_id": local_formula.get("local_strategy_id"),
+                "scope": local_formula.get("scope"),
+                "canonical_formula": local_formula.get("canonical_formula"),
+                "left_side": local_formula.get("left_side"),
+                "strategy_point": local_formula.get("strategy_point"),
+                "right_side": local_formula.get("right_side"),
+                "collision_math": local_formula.get("collision_math"),
+                "intervention": local_formula.get("intervention"),
+                "expansion_state": local_formula.get("expansion_state"),
+                "carriers": collision.get("carriers"),
+                "conflict_score": collision.get("conflict_score"),
+                "drift_score": collision.get("drift_score"),
+                "active_control_allowed": False,
+                "control_mode": "REPORT_ONLY",
+                "formula": "A local Strategy point unfolds the canonical equality at this carrier collision; report-only evidence, not generation control.",
+            })
+        body["local_micro_formula_records"] = local_micro_formula_records
+        strategy_guidance = self._event_strategy_guidance_proposal(strategy_matrix, vector_collisions)
+        strategy_matrix["guidance_proposal_count"] = int(strategy_guidance.get("proposal_count", 0) or 0)
+        body["strategy_guidance_proposal"] = strategy_guidance
+        execution_records.extend(vector_collisions)
+        execution_records.extend(local_micro_formula_records)
+        execution_records.append(strategy_guidance)
+        execution_records.append(strategy_matrix)
         if body.get("runtime_monitor_summary"):
             execution_records.append({
                 "stage": "EventRuntimeMonitorSummary",
