@@ -57,9 +57,9 @@ Optional input:
 
 In a Wan High/Low setup, `primary_model` is usually the high-noise / structure model and `secondary_model` is usually the low-noise / refinement model. If `secondary_model` is not connected, the node can fall back to the primary model for the second stage.
 
-## Public r60 Defaults
+## Public r61 Defaults
 
-The r60 public build starts clean:
+The r61 public build starts clean:
 
 ```text
 source_image_file = none
@@ -83,6 +83,17 @@ formula recommendation = hidden and disabled
 ```
 
 If `704 x 1280` is too heavy for your GPU, reduce the size before rendering. A lighter test size such as `416 x 608` is useful for fast debugging.
+
+## r61 Pause UI Hotfix
+
+r61 fixes an r60 public-alpha issue where the backend could pause at the cascade boundary, but the detached Source / Tail / Result panel might not appear in modern ComfyUI Desktop.
+
+The node now has two ways to detect a paused cascade:
+
+- the normal ComfyUI websocket event;
+- a status-polling fallback that checks the node pause state directly.
+
+This means the `Resume Cascade / Continue` panel should recover even if the frontend misses the first pause event.
 
 ## Quick Start
 
@@ -124,7 +135,7 @@ What you want the video to show.
 
 `negative_prompt`
 
-What you want the video to avoid. r60 includes a simple base negative prompt by default so a new node is not filled with a test scene.
+What you want the video to avoid. r61 includes a simple base negative prompt by default so a new node is not filled with a test scene.
 
 `cascade_count`
 
@@ -162,15 +173,15 @@ At `16 fps`:
 
 `width` and `height`
 
-The generation resolution. The r60 default is a 720-class vertical setting (`704 x 1280`). Lower it if you need faster tests or have limited VRAM.
+The generation resolution. The r61 default is a 720-class vertical setting (`704 x 1280`). Lower it if you need faster tests or have limited VRAM.
 
 `seed`
 
-The random seed. r60 defaults to `123` so comparisons can start from a stable baseline.
+The random seed. r61 defaults to `123` so comparisons can start from a stable baseline.
 
 `image_crop`
 
-Controls source-image crop behavior. r60 defaults to `center`.
+Controls source-image crop behavior. r61 defaults to `center`.
 
 ## Math Controls
 
@@ -194,7 +205,7 @@ LATENT_DELTA_SCALE = controlled delta-strength research path
 DEEP_STEP_DELTA_CONTROL = experimental deep research mode, high risk
 ```
 
-r60 public default is `OBSERVE_ONLY`.
+r61 public default is `OBSERVE_ONLY`.
 
 `high_delta_strength`
 
@@ -250,9 +261,9 @@ When `save_report = true`, Singularity writes a markdown report with evidence su
 
 Important: `CompletionGate = PASS` means the structural route completed and a final video exists. It does not mean the video is visually perfect. Always inspect the video.
 
-## r60 UI Fixes
+## r61 UI Fixes
 
-r60 focuses heavily on ComfyUI Desktop / modern frontend behavior:
+r61 focuses heavily on ComfyUI Desktop / modern frontend behavior:
 
 - the detached pause panel no longer stacks over normal modal dialogs;
 - the panel also hides when internal workflow panels overlap it;
@@ -301,3 +312,4 @@ Then inspect both the final video and the report.
 ## Short Description
 
 Singularity is a Wan I2V cascade continuation node for ComfyUI. It pauses between cascade stages, lets you choose the continuation frame, resumes the same run, stitches the final video, and writes diagnostics so you can understand what happened instead of guessing.
+

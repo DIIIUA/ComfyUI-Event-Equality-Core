@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-singularity"
 description = "Singularity: Wan I2V cascade frame selection, same-run continuation, stitched video output, UI-safe pause panel, and runtime diagnostics for ComfyUI."
-version = "0.1.1-r60"
+version = "0.1.1-r61"
 license = { text = "MIT" }
 dependencies = []
 
@@ -9,5 +9,6 @@ dependencies = []
 PublisherId = "diiiua"
 DisplayName = "Singularity"
 Icon = ""
+
 
 

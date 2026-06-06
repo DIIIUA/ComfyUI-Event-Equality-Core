@@ -72,8 +72,6 @@ const COMFY_OCCLUDING_SURFACE_SELECTORS = [
     "[class*='Sidebar']",
     "[class*='side-panel']",
     "[class*='SidePanel']",
-    "[class*='panel']",
-    "[class*='Panel']",
 ];
 
 const LATENT_PREVIEW = {
@@ -86,6 +84,8 @@ const PAUSE_EVENT = "singularity_cascade_paused";
 const CONTINUE_ROUTE = "/singularity/cascade/continue/";
 const CANCEL_ROUTE = "/singularity/cascade/cancel/";
 const CANCEL_ALL_ROUTE = "/singularity/cascade/cancel";
+const STATUS_ROUTE = "/singularity/cascade/status/";
+const STATUS_POLL_MS = 1200;
 const PROMPT_WIDGET_NAMES = new Set(["positive_prompt", "negative_prompt"]);
 const PUBLIC_HIDDEN_WIDGET_NAMES = new Set([
     "use_formula_recommendation",
@@ -319,6 +319,7 @@ function clearRunMedia(node, keepSource = true) {
     node._SingularityPausePreviewVideoCache = null;
     node._singularityPrivateImgs = [];
     node._singularityMediaOverlayRenderedKey = "";
+    node._singularityPauseStatusKey = "";
     if (!keepSource) {
         node._singularitySourceImageUrl = "";
     }
@@ -1010,11 +1011,89 @@ function showPauseState(node, detail) {
     else app.graph?.setDirtyCanvas?.(true, true);
 }
 
+function pauseStatusKey(state) {
+    if (!state || typeof state !== "object") return "";
+    return [
+        String(state.status || ""),
+        String(state.segment_index ?? ""),
+        String(state.updated_at ?? ""),
+        String(state.default_resume_frame_index ?? state.resume_frame_index ?? ""),
+        JSON.stringify(state.resume_candidates || []),
+        JSON.stringify((state.pause_frames || []).map((item) => [
+            item?.filename || "",
+            item?.subfolder || "",
+            item?.type || "",
+            item?.resume_index ?? "",
+        ])),
+        String(state.preview_video?.filename || state.stitched_preview?.filename || ""),
+    ].join("|");
+}
+
+function pauseDetailFromStatusPayload(payload, node) {
+    const state = payload?.state || {};
+    if (!state || typeof state !== "object") return null;
+    const status = String(state.status || "");
+    if (status !== "paused") return { status };
+    return {
+        status,
+        node_id: String(payload?.node_id ?? node?.id ?? ""),
+        segment_index: Number(state.segment_index ?? 1),
+        pause_frames: state.pause_frames || [],
+        resume_candidates: state.resume_candidates || [],
+        default_resume_frame_index: Number(state.resume_frame_index ?? state.default_resume_frame_index ?? -1),
+        preview_video: state.preview_video || state.stitched_preview || null,
+        stitched_preview: state.preview_video || state.stitched_preview || null,
+        __status_key: pauseStatusKey(state),
+    };
+}
+
+async function pollPauseStatusForNode(node) {
+    if (!node || !isSingularityNode(node) || node.id === undefined || node.id === null) return;
+    if (node._singularityContinuePending) return;
+    try {
+        const response = await api.fetchApi(STATUS_ROUTE + encodeURIComponent(String(node.id)), {
+            method: "GET",
+            cache: "no-store",
+        });
+        if (!response?.ok) return;
+        const payload = await response.json();
+        const detail = pauseDetailFromStatusPayload(payload, node);
+        if (!detail) return;
+        if (detail.status === "paused") {
+            if (!node._singularityPaused || node._singularityPauseStatusKey !== detail.__status_key) {
+                node._singularityPauseStatusKey = detail.__status_key;
+                console.log("[Singularity UI] pause state recovered by status polling", detail);
+                showPauseState(node, detail);
+            } else {
+                positionPauseOverlay(node);
+            }
+        } else if (detail.status === "cancelled") {
+            resetPausedRunUi(node, true);
+        }
+    } catch (error) {
+        console.warn("[Singularity UI] pause status polling failed", error);
+    }
+}
+
+function pollPauseStatusesOnce() {
+    for (const node of getSingularityNodes()) {
+        pollPauseStatusForNode(node);
+    }
+}
+
+function installPauseStatusPoller() {
+    if (api._singularityPauseStatusPollerInstalled) return;
+    api._singularityPauseStatusPollerInstalled = true;
+    window.setInterval(pollPauseStatusesOnce, STATUS_POLL_MS);
+    pollPauseStatusesOnce();
+}
+
 function clearPauseState(node) {
     if (!node || !isSingularityNode(node)) return;
     const keepTailFrames = Boolean(node._SingularityResultVideoCache?.video);
     node._singularityPaused = false;
     node._singularityContinuePending = false;
+    node._singularityPauseStatusKey = "";
     if (node._SingularityResultVideoCache?.video) {
         node._SingularityPausePreviewVideoCache = null;
     }
@@ -1119,6 +1198,7 @@ app.registerExtension({
 
     setup() {
         installApiInterruptGuard();
+        installPauseStatusPoller();
         api.addEventListener(PAUSE_EVENT, ({ detail }) => {
             const nodeId = String(detail?.node_id ?? "");
             const node = app.graph?.getNodeById?.(nodeId) || app.graph?.getNodeById?.(Number(nodeId));
@@ -1134,6 +1214,7 @@ app.registerExtension({
                 }
             }
             cleanupStalePauseOverlays(null);
+            pollPauseStatusesOnce();
         });
         for (const eventName of ["execution_interrupted", "execution_error"]) {
             api.addEventListener(eventName, () => {

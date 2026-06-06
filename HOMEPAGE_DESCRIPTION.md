@@ -54,12 +54,15 @@ Wan extension workflows can become messy very quickly:
 
 Singularity turns that into a controlled loop inside one node. You still make the creative decision, but the node handles the pause point, the chosen frame, continuation, final stitching, and report evidence.
 
-## r60 Public Update
+## r61 Public Update
 
-This r60 public alpha focuses on making the cascade frame-selection UI usable in modern ComfyUI Desktop and safer for public testing.
+This r61 public alpha focuses on making the cascade frame-selection UI usable in modern ComfyUI Desktop and safer for public testing.
 
-New in r60:
+Important hotfix: r61 fixes a public r60 issue where the backend could pause correctly but the Source / Tail / Result panel might not appear. The frontend now has a status-polling fallback, so the pause panel can recover even if the normal websocket pause event is missed.
 
+New in r61:
+
+- Pause UI recovery through `/singularity/cascade/status/{node_id}`.
 - Better detached Source / Tail / Result panel behavior.
 - Panel no longer appears over normal ComfyUI modal dialogs.
 - Panel hides when internal workflow panels overlap it.
@@ -75,7 +78,7 @@ New in r60:
 
 ## Public Default Settings
 
-The default r60 node is meant to be a clean starter:
+The default r61 node is meant to be a clean starter:
 
 ```text
 cascade_count = 2
@@ -160,3 +163,4 @@ Pick a source image, write a clear prompt, generate, choose a tail frame when th
 ## Short Summary
 
 Singularity is a Wan I2V cascade continuation node for ComfyUI. It pauses between cascade stages, lets you choose the continuation frame, resumes the same run, stitches the final video, and writes diagnostics so you can understand the result instead of guessing.
+

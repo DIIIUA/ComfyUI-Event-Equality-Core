@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r60"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R60 Cascade UI Public Alpha"
-EVENT_HORIZON_BODY_VERSION = "0.1-r60"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r61"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R61 Pause UI Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r61"
 
 
 def _event_json_safe(value, depth=0):
@@ -2109,6 +2109,7 @@ class SingularityTelemetryMixin:
             }
         except Exception as e:
             return {"status": "failed", "error": str(e), "observer_only": True}
+
 
 
 

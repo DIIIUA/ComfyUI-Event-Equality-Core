@@ -1,14 +1,24 @@
 # Singularity - Public Changelog
 
-## 0.1.1-r60 Public Alpha Desktop Cascade UI Fix
+## 0.1.1-r61 Public Alpha Desktop Cascade UI Fix
 
 Status: public alpha update for ComfyUI Desktop / modern frontend cascade continuation.
 
-The main r60 goal is to make the manual cascade frame-selection workflow safer for public users: cleaner defaults, less UI overlap, preserved native image upload, and a public interface that does not expose research controls as normal user switches.
+The main r61 goal is to fix a public r60 regression where the backend could pause correctly but the detached Source / Tail / Result panel might not appear in modern ComfyUI Desktop.
+
+### Emergency Hotfix
+
+- Added a status-polling fallback through `/singularity/cascade/status/{node_id}`.
+- The pause UI no longer depends only on one websocket event.
+- If ComfyUI Desktop drops or misses the pause event, the frontend can recover the paused state, show the tail frames, and enable `Resume Cascade / Continue`.
+- Narrowed the overlay occlusion rules so generic ComfyUI panel containers do not hide the pause UI accidentally.
+- Kept the public manual green tail selection route. Formula recommendation remains hidden and disabled.
+
+The broader r61/r60 goal remains to make the manual cascade frame-selection workflow safer for public users: cleaner defaults, less UI overlap, preserved native image upload, and a public interface that does not expose research controls as normal user switches.
 
 ### Short Summary
 
-- Updated runtime/package version from `0.1.1-r59` to `0.1.1-r60`.
+- Updated runtime/package version to `0.1.1-r61`.
 - Improved the detached Source / Tail 1 / Tail 2 / Tail 3 / Result pause panel.
 - The pause panel now hides behind normal ComfyUI modal/dialog surfaces instead of drawing over them.
 - The pause panel also hides when internal workflow panels or drawers overlap it.
@@ -39,11 +49,11 @@ high_delta_strength = 1.0
 low_delta_strength = 1.0
 ```
 
-This means r60 starts as a safer baseline. Users who want to test delta behavior can intentionally switch to `LATENT_DELTA_SCALE`.
+This means r61 starts as a safer baseline. Users who want to test delta behavior can intentionally switch to `LATENT_DELTA_SCALE`.
 
 ### UI Notes
 
-r60 specifically targets the ComfyUI Desktop behavior seen after the modern frontend update. The pause panel is still detached under the node, but it now treats modals, manager windows, workflow panels, sidebars, and drawers as blocking surfaces when they cover the panel area.
+r61 specifically targets the ComfyUI Desktop behavior seen after the modern frontend update. The pause panel is still detached under the node, but it now treats modals, manager windows, workflow panels, sidebars, and drawers as blocking surfaces when they cover the panel area.
 
 ### Compatibility Notes
 
@@ -754,6 +764,7 @@ Kept:
 - pyproject;
 - version file;
 - formula integrity note.
+
 
 
 

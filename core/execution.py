@@ -108,9 +108,9 @@ except Exception:
     web = None
     InterruptProcessingException = RuntimeError
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r60"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R60 Cascade UI Public Alpha"
-EVENT_HORIZON_BODY_VERSION = "0.1-r60"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r61"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R61 Pause UI Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r61"
 _SINGULARITY_PAUSE_STATES = {}
 
 
@@ -3054,6 +3054,7 @@ class SingularityExecutionMixin:
             return {"ui": video_ui_payload, "result": result_tuple}
 
         return result_tuple
+
 
 
 
