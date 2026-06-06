@@ -57,9 +57,9 @@ Optional input:
 
 In a Wan High/Low setup, `primary_model` is usually the high-noise / structure model and `secondary_model` is usually the low-noise / refinement model. If `secondary_model` is not connected, the node can fall back to the primary model for the second stage.
 
-## Public r61 Defaults
+## Public r62 Defaults
 
-The r61 public build starts clean:
+The r62 public build starts clean:
 
 ```text
 source_image_file = none
@@ -79,14 +79,14 @@ image_crop = center
 save_video = true
 save_report = true
 sampler_trace_mode = OFF
-formula recommendation = hidden and disabled
+formula recommendation = visible, experimental, and off by default
 ```
 
 If `704 x 1280` is too heavy for your GPU, reduce the size before rendering. A lighter test size such as `416 x 608` is useful for fast debugging.
 
-## r61 Pause UI Hotfix
+## r62 Pause UI Hotfix
 
-r61 fixes an r60 public-alpha issue where the backend could pause at the cascade boundary, but the detached Source / Tail / Result panel might not appear in modern ComfyUI Desktop.
+r62 fixes an r60 public-alpha issue where the backend could pause at the cascade boundary, but the detached Source / Tail / Result panel might not appear in modern ComfyUI Desktop.
 
 The node now has two ways to detect a paused cascade:
 
@@ -94,6 +94,8 @@ The node now has two ways to detect a paused cascade:
 - a status-polling fallback that checks the node pause state directly.
 
 This means the `Resume Cascade / Continue` panel should recover even if the frontend misses the first pause event.
+
+The Source / Tail / Result media panel is also rendered immediately for the node. You should see the panel before starting a long cascade; during a pause, the same panel fills with tail candidates and enables continuation.
 
 ## Quick Start
 
@@ -135,7 +137,7 @@ What you want the video to show.
 
 `negative_prompt`
 
-What you want the video to avoid. r61 includes a simple base negative prompt by default so a new node is not filled with a test scene.
+What you want the video to avoid. r62 includes a simple base negative prompt by default so a new node is not filled with a test scene.
 
 `cascade_count`
 
@@ -173,15 +175,15 @@ At `16 fps`:
 
 `width` and `height`
 
-The generation resolution. The r61 default is a 720-class vertical setting (`704 x 1280`). Lower it if you need faster tests or have limited VRAM.
+The generation resolution. The r62 default is a 720-class vertical setting (`704 x 1280`). Lower it if you need faster tests or have limited VRAM.
 
 `seed`
 
-The random seed. r61 defaults to `123` so comparisons can start from a stable baseline.
+The random seed. r62 defaults to `123` so comparisons can start from a stable baseline.
 
 `image_crop`
 
-Controls source-image crop behavior. r61 defaults to `center`.
+Controls source-image crop behavior. r62 defaults to `center`.
 
 ## Math Controls
 
@@ -205,7 +207,7 @@ LATENT_DELTA_SCALE = controlled delta-strength research path
 DEEP_STEP_DELTA_CONTROL = experimental deep research mode, high risk
 ```
 
-r61 public default is `OBSERVE_ONLY`.
+r62 public default is `OBSERVE_ONLY`.
 
 `high_delta_strength`
 
@@ -261,16 +263,16 @@ When `save_report = true`, Singularity writes a markdown report with evidence su
 
 Important: `CompletionGate = PASS` means the structural route completed and a final video exists. It does not mean the video is visually perfect. Always inspect the video.
 
-## r61 UI Fixes
+## r62 UI Fixes
 
-r61 focuses heavily on ComfyUI Desktop / modern frontend behavior:
+r62 focuses heavily on ComfyUI Desktop / modern frontend behavior:
 
-- the detached pause panel no longer stacks over normal modal dialogs;
-- the panel also hides when internal workflow panels overlap it;
+- the detached Source / Tail / Result panel appears before generation starts;
+- the panel uses the stable high overlay layer so the ComfyUI canvas does not hide it;
 - stale panels are removed when a new run starts, a source changes, or a paused run is cancelled;
 - the native ComfyUI image upload button is kept;
 - oversized preview noise is kept under control;
-- the research formula-recommendation toggle is hidden and disabled for public use;
+- the research formula-recommendation toggle is visible again but off by default;
 - defaults are reset for a clean public node.
 
 ## Current Limits

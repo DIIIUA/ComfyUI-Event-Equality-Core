@@ -1,29 +1,30 @@
 # Singularity - Public Changelog
 
-## 0.1.1-r61 Public Alpha Desktop Cascade UI Fix
+## 0.1.1-r62 Public Alpha Desktop Cascade UI Fix
 
 Status: public alpha update for ComfyUI Desktop / modern frontend cascade continuation.
 
-The main r61 goal is to fix a public r60 regression where the backend could pause correctly but the detached Source / Tail / Result panel might not appear in modern ComfyUI Desktop.
+The main r62 goal is to fix a public r60 regression where the backend could pause correctly but the detached Source / Tail / Result panel might not appear in modern ComfyUI Desktop.
 
 ### Emergency Hotfix
 
 - Added a status-polling fallback through `/singularity/cascade/status/{node_id}`.
 - The pause UI no longer depends only on one websocket event.
 - If ComfyUI Desktop drops or misses the pause event, the frontend can recover the paused state, show the tail frames, and enable `Resume Cascade / Continue`.
-- Narrowed the overlay occlusion rules so generic ComfyUI panel containers do not hide the pause UI accidentally.
-- Kept the public manual green tail selection route. Formula recommendation remains hidden and disabled.
+- Restored the always-on media panel behavior: Source / Tail / Result is rendered immediately for the node and no longer waits for the first cascade pause before appearing.
+- Restored the stable high overlay layer so the panel is not hidden behind the modern ComfyUI canvas.
+- Kept the public manual green tail selection route. Formula recommendation is visible again as an experimental proposal toggle, but remains off by default.
 
-The broader r61/r60 goal remains to make the manual cascade frame-selection workflow safer for public users: cleaner defaults, less UI overlap, preserved native image upload, and a public interface that does not expose research controls as normal user switches.
+The broader r62/r60 goal remains to make the manual cascade frame-selection workflow safer for public users: cleaner defaults, less UI overlap, preserved native image upload, and research controls that are clearly off by default.
 
 ### Short Summary
 
-- Updated runtime/package version to `0.1.1-r61`.
+- Updated runtime/package version to `0.1.1-r62`.
 - Improved the detached Source / Tail 1 / Tail 2 / Tail 3 / Result pause panel.
-- The pause panel now hides behind normal ComfyUI modal/dialog surfaces instead of drawing over them.
-- The pause panel also hides when internal workflow panels or drawers overlap it.
+- The detached media panel is now visible before generation starts, so users can verify that the UI extension loaded before waiting through a long cascade.
+- The panel uses the stable high overlay layer again; this is intentionally prioritized over experimental occlusion hiding for the emergency public hotfix.
 - Kept the native ComfyUI `source_image_file` upload button.
-- Hid and disabled the public UI for `use_formula_recommendation`; the internal argument remains for old workflow compatibility, but public users no longer see it as a normal option.
+- Restored the public UI for `use_formula_recommendation` after the Desktop pause regression investigation; it stays `false` by default and manual green tail selection remains primary.
 - Reset public defaults for a clean starter node:
   - `source_image_file = none`
   - `positive_prompt = empty`
@@ -49,15 +50,15 @@ high_delta_strength = 1.0
 low_delta_strength = 1.0
 ```
 
-This means r61 starts as a safer baseline. Users who want to test delta behavior can intentionally switch to `LATENT_DELTA_SCALE`.
+This means r62 starts as a safer baseline. Users who want to test delta behavior can intentionally switch to `LATENT_DELTA_SCALE`.
 
 ### UI Notes
 
-r61 specifically targets the ComfyUI Desktop behavior seen after the modern frontend update. The pause panel is still detached under the node, but it now treats modals, manager windows, workflow panels, sidebars, and drawers as blocking surfaces when they cover the panel area.
+r62 specifically targets the ComfyUI Desktop behavior seen after the modern frontend update. The pause panel is still detached under the node, but it is now rendered as an always-on media surface with high overlay priority. This makes the UI visible before the first cascade and prevents a missed pause panel from trapping the workflow.
 
 ### Compatibility Notes
 
-Old workflows that already contain `use_formula_recommendation` should not fail merely because the public UI hides it. The field remains accepted by the Python signature, but new public nodes force the visible user route to manual green tail selection.
+Old workflows that already contain `use_formula_recommendation` should keep loading. The field remains accepted by the Python signature and visible in the node, but new public nodes default to manual green tail selection.
 
 ### Still Public Alpha
 

@@ -39,7 +39,7 @@ This gives you direct control over the continuation point instead of letting the
 - Continues the same running workflow.
 - Saves one final stitched video.
 - Saves markdown reports with runtime, cascade, motion, and delta diagnostics.
-- Keeps a clean public interface with research-only formula recommendation hidden and disabled.
+- Keeps a clean public interface with research-only formula recommendation visible but off by default.
 
 ## Why This Is Useful
 
@@ -54,18 +54,18 @@ Wan extension workflows can become messy very quickly:
 
 Singularity turns that into a controlled loop inside one node. You still make the creative decision, but the node handles the pause point, the chosen frame, continuation, final stitching, and report evidence.
 
-## r61 Public Update
+## r62 Public Update
 
-This r61 public alpha focuses on making the cascade frame-selection UI usable in modern ComfyUI Desktop and safer for public testing.
+This r62 public alpha focuses on making the cascade frame-selection UI usable in modern ComfyUI Desktop and safer for public testing.
 
-Important hotfix: r61 fixes a public r60 issue where the backend could pause correctly but the Source / Tail / Result panel might not appear. The frontend now has a status-polling fallback, so the pause panel can recover even if the normal websocket pause event is missed.
+Important hotfix: r62 fixes a public r60 issue where the backend could pause correctly but the Source / Tail / Result panel might not appear. The panel now renders immediately as an always-on media surface, and the frontend also has a status-polling fallback so the pause panel can recover even if the normal websocket pause event is missed.
 
-New in r61:
+New in r62:
 
 - Pause UI recovery through `/singularity/cascade/status/{node_id}`.
 - Better detached Source / Tail / Result panel behavior.
-- Panel no longer appears over normal ComfyUI modal dialogs.
-- Panel hides when internal workflow panels overlap it.
+- The panel appears before the first cascade, so users can see that the UI is loaded before waiting through a long render.
+- Restored high-priority overlay behavior from the stable UI path.
 - Stale panels are cleaned up on new runs, source changes, cancelled pauses, and errors.
 - Native ComfyUI image upload button is preserved.
 - Oversized preview/noise behavior is kept under control.
@@ -74,11 +74,11 @@ New in r61:
 - Source image starts as `none`.
 - `OBSERVE_ONLY` is now the public default math mode.
 - Delta strengths stay neutral at `1.0 / 1.0`.
-- Formula recommendation is hidden and disabled for public use.
+- Formula recommendation is visible again for compatibility and testing, but it is off by default.
 
 ## Public Default Settings
 
-The default r61 node is meant to be a clean starter:
+The default r62 node is meant to be a clean starter:
 
 ```text
 cascade_count = 2

@@ -108,9 +108,9 @@ except Exception:
     web = None
     InterruptProcessingException = RuntimeError
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r61"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R61 Pause UI Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r61"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r62"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R62 Pause UI Recovery Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r62"
 _SINGULARITY_PAUSE_STATES = {}
 
 

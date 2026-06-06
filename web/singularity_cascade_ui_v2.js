@@ -28,7 +28,6 @@ const PAUSE_OVERLAY = {
     tileHeight: 260,
     buttonHeight: 38,
     nodeWidthScale: 1.35,
-    zIndex: 120,
 };
 
 const COMFY_GLOBAL_BLOCKING_OVERLAY_SELECTORS = [
@@ -64,8 +63,6 @@ const COMFY_OCCLUDING_SURFACE_SELECTORS = [
     ".workflows-sidebar",
     ".workflow-browser",
     ".workflow-explorer",
-    "[class*='workflow']",
-    "[class*='Workflow']",
     "[class*='drawer']",
     "[class*='Drawer']",
     "[class*='sidebar']",
@@ -87,9 +84,7 @@ const CANCEL_ALL_ROUTE = "/singularity/cascade/cancel";
 const STATUS_ROUTE = "/singularity/cascade/status/";
 const STATUS_POLL_MS = 1200;
 const PROMPT_WIDGET_NAMES = new Set(["positive_prompt", "negative_prompt"]);
-const PUBLIC_HIDDEN_WIDGET_NAMES = new Set([
-    "use_formula_recommendation",
-]);
+const PUBLIC_HIDDEN_WIDGET_NAMES = new Set([]);
 const SUPPRESSED_MEDIA_WIDGET_NAMES = new Set([
     "$$canvas-image-preview",
     "vhslatentpreview",
@@ -109,11 +104,20 @@ const GROUPS = [
     { id: "SAMPLING", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step", "math_control_mode", "high_delta_strength", "low_delta_strength"] },
     { id: "DECODE", color: "#059669", bg: "rgba(5, 150, 105, 0.09)", names: ["decode_tile_size", "decode_overlap", "decode_temporal_size", "decode_temporal_overlap", "image_upscale_method", "image_crop"] },
     { id: "POST GEN", color: "#dc2626", bg: "rgba(220, 38, 38, 0.09)", names: ["save_video", "video_format", "save_report", "save_prefix"] },
-    { id: "TAIL 3", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["selected_tail_index"] },
+    { id: "TAIL 3", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["use_formula_recommendation", "selected_tail_index"] },
 ];
 
 function isSingularityNode(node) {
-    return CLEAN_NODE_NAMES.has(node?.comfyClass) || CLEAN_NODE_NAMES.has(node?.type);
+    const candidates = [
+        node?.comfyClass,
+        node?.type,
+        node?.title,
+        node?.constructor?.comfyClass,
+        node?.constructor?.type,
+        node?.constructor?.name,
+        node?.properties?.["Node name for S&R"],
+    ];
+    return candidates.some((value) => CLEAN_NODE_NAMES.has(String(value || "")));
 }
 
 function findWidget(node, name) {
@@ -634,7 +638,7 @@ function hasBlockingComfyOverlay(overlay) {
     for (const selector of COMFY_GLOBAL_BLOCKING_OVERLAY_SELECTORS) {
         const elements = document.querySelectorAll(selector);
         for (const el of elements) {
-            if (isVisibleBlockingElement(el, overlay, overlayRect, false)) return true;
+            if (isVisibleBlockingElement(el, overlay, overlayRect, true)) return true;
         }
     }
     for (const selector of COMFY_OCCLUDING_SURFACE_SELECTORS) {
@@ -649,12 +653,11 @@ function hasBlockingComfyOverlay(overlay) {
 function updatePauseOverlayVisibility(node) {
     const overlay = node?._singularityPauseOverlay;
     if (!overlay) return false;
-    const blocked = hasBlockingComfyOverlay(overlay);
-    overlay.dataset.comfyBlocked = blocked ? "true" : "false";
-    overlay.style.visibility = blocked ? "hidden" : "visible";
-    overlay.style.pointerEvents = blocked ? "none" : "auto";
-    overlay.style.zIndex = String(PAUSE_OVERLAY.zIndex);
-    return blocked;
+    overlay.dataset.comfyBlocked = "false";
+    overlay.style.visibility = "visible";
+    overlay.style.pointerEvents = "auto";
+    overlay.style.zIndex = "10000";
+    return false;
 }
 
 function positionPauseOverlay(node) {
@@ -681,13 +684,7 @@ function positionPauseOverlay(node) {
 function startPauseOverlayTicker(node) {
     if (!node || node._singularityPauseOverlayTicker) return;
     const tick = () => {
-        const active = Boolean(
-            getSourceImageUrl(node) ||
-            node._singularityPaused ||
-            node._singularityPauseImgs?.length ||
-            node._SingularityResultVideoCache?.video ||
-            node._SingularityPausePreviewVideoCache?.video
-        );
+        const active = Boolean(node);
         if (!active || !node._singularityPauseOverlay) {
             removePauseOverlay(node);
             return;
@@ -771,7 +768,7 @@ function ensurePauseOverlay(node) {
     overlay.dataset.nodeId = String(node.id ?? "");
     setElementStyle(overlay, {
         position: "fixed",
-        zIndex: String(PAUSE_OVERLAY.zIndex),
+        zIndex: "10000",
         pointerEvents: "auto",
         boxSizing: "border-box",
         padding: `${PAUSE_OVERLAY.pad}px`,
@@ -865,10 +862,7 @@ function appendMediaTile(grid, options) {
 
 function renderPauseOverlay(node, force = false) {
     const sourceUrl = getSourceImageUrl(node);
-    const active = Boolean(
-        node &&
-        (sourceUrl || node._singularityPaused || node._singularityPauseImgs?.length || node._SingularityResultVideoCache?.video || node._SingularityPausePreviewVideoCache?.video)
-    );
+    const active = Boolean(node);
     if (!active) {
         removePauseOverlay(node);
         return;
@@ -1308,6 +1302,7 @@ app.registerExtension({
 
             // Force bounded size and prevent the native preview from stretching the node indefinitely.
             this.setSize([Math.max(this.size ? this.size[0] : 0, UI.minWidth), Math.max(UI.minHeight, Math.min(this.size ? this.size[1] : UI.minHeight, UI.maxHeight))]);
+            renderPauseOverlay(this, true);
             if (this.setDirtyCanvas) this.setDirtyCanvas(true, true);
             return r;
         };
@@ -1340,6 +1335,7 @@ app.registerExtension({
 
             // Force size on configure too (min safety for bottom bar)
             this.setSize([Math.max(this.size[0], UI.minWidth), Math.max(UI.minHeight, Math.min(this.size[1], UI.maxHeight))]);
+            renderPauseOverlay(this, true);
             if (this.setDirtyCanvas) this.setDirtyCanvas(true, true);
             return r;
         };
