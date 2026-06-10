@@ -54,31 +54,27 @@ Wan extension workflows can become messy very quickly:
 
 Singularity turns that into a controlled loop inside one node. You still make the creative decision, but the node handles the pause point, the chosen frame, continuation, final stitching, and report evidence.
 
-## r62 Public Update
+## r91 Public Stabilization Update
 
-This r62 public alpha focuses on making the cascade frame-selection UI usable in modern ComfyUI Desktop and safer for public testing.
+This r91 public stabilization update focuses on making the node cleaner, easier to install, and safer to test in modern ComfyUI Desktop.
 
-Important hotfix: r62 fixes a public r60 issue where the backend could pause correctly but the Source / Tail / Result panel might not appear. The panel now renders immediately as an always-on media surface, and the frontend also has a status-polling fallback so the pause panel can recover even if the normal websocket pause event is missed.
+It keeps the earlier pause UI recovery work, adds the newer Strategy Control Surface reporting layer, and cleans the public node surface for fresh installs.
 
-New in r62:
+New in r91:
 
-- Pause UI recovery through `/singularity/cascade/status/{node_id}`.
-- Better detached Source / Tail / Result panel behavior.
-- The panel appears before the first cascade, so users can see that the UI is loaded before waiting through a long render.
-- Restored high-priority overlay behavior from the stable UI path.
-- Stale panels are cleaned up on new runs, source changes, cancelled pauses, and errors.
+- Visible title: `Singularity R91`.
+- Cleaner `math_control_mode` dropdown.
+- Public starter node has no bundled image and no positive prompt.
+- Built-in Wan-style Chinese negative prompt remains as the starter negative prompt.
+- Two-cascade public starter route remains the default.
 - Native ComfyUI image upload button is preserved.
-- Oversized preview/noise behavior is kept under control.
-- Public defaults are reset to a clean two-cascade test route.
-- Positive prompt starts empty.
-- Source image starts as `none`.
-- `OBSERVE_ONLY` is now the public default math mode.
-- Delta strengths stay neutral at `1.0 / 1.0`.
-- Formula recommendation is visible again for compatibility and testing, but it is off by default.
+- Detached Source / Tail / Result panel remains available for cascade continuation.
+- Reports now include the newer Strategy Control Surface / Strategy Matrix evidence.
+- Experimental math modes remain available, but they should be treated as research tools.
 
 ## Public Default Settings
 
-The default r62 node is meant to be a clean starter:
+The default r91 node is meant to be a clean starter:
 
 ```text
 cascade_count = 2
@@ -91,7 +87,7 @@ seed = 123
 math_control_mode = OBSERVE_ONLY
 high_delta_strength = 1.0
 low_delta_strength = 1.0
-image_crop = center
+image_crop = wan_native
 save_video = true
 save_report = true
 sampler_trace_mode = OFF
@@ -116,6 +112,8 @@ The math is not a magic quality button. It is a way to observe, compare, and car
 Use `OBSERVE_ONLY` for a clean baseline.
 
 Use `LATENT_DELTA_SCALE` only when intentionally testing delta behavior.
+
+Use `STRATEGY_PRESSURE_WINDOW` when intentionally testing bounded pressure-intent math. With `high_delta_strength = 1.0` and `low_delta_strength = 1.0`, it remains neutral.
 
 Avoid `DEEP_STEP_DELTA_CONTROL` unless you are doing research and accept that it can break output.
 

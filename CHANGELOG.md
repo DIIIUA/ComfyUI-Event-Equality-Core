@@ -1,5 +1,243 @@
 # Singularity - Public Changelog
 
+## 0.1.1-r91 - Public Stabilization
+
+Status: public stabilization release after the r90 Strategy Control Surface runtime gate.
+
+- Promotes the current public build to `0.1.1-r91`.
+- Updates the visible node title to `Singularity R91`.
+- Keeps the public node surface clean:
+  - `source_image_file = none`
+  - `positive_prompt = empty`
+  - built-in Wan-style Chinese negative prompt remains as the starter negative prompt
+  - two-cascade public starter route remains the default
+- Cleans the visible `math_control_mode` dropdown so users see only:
+  - `OBSERVE_ONLY`
+  - `LATENT_DELTA_SCALE`
+  - `STRATEGY_PRESSURE_WINDOW`
+  - `DEEP_STEP_DELTA_CONTROL`
+- Keeps backend compatibility for older workflows that saved lowercase or legacy mode values.
+- Confirms the pre-release smoke-test on ComfyUI Desktop immediately before the R91 version bump:
+  - tested runtime was the same code path at `0.1.1-r90-dev`
+  - `result_status = VIDEO`
+  - `EventCoreBodySummary = PASS`
+  - two cascades completed with pause/continue
+  - final video saved and stitched
+  - neutral `STRATEGY_PRESSURE_WINDOW` with `high=1.0`, `low=1.0` produced the same visible output as the neutral r90 baseline (`SSIM = 1.0`, `PSNR = infinite`)
+- Keeps r90 math behavior intact:
+  - `STRATEGY_PRESSURE_WINDOW` treats strength values as bounded pressure intent
+  - neutral `1.0 / 1.0` stays non-mutating
+  - prompt text remains clean
+  - CFG remains model-native
+  - deep sampler step replacement remains isolated to explicit research mode
+- This is a stabilization release, not a claim that the experimental math always improves output.
+
+## 0.1.1-r90 Dev - Strategy Control Surface
+
+Status: larger functional consolidation after r89 proved the bounded pressure-window route.
+
+- Adds `EventStrategyControlSurfacePlan`, a single runtime plan that decides how the active math mode is allowed to influence generation.
+- Adds `EventStrategyControlSurfaceApply_<branch>`, the single function-level application record for high/low latent transitions.
+- Consolidates active math policies:
+  - `OBSERVE_ONLY` = record without tensor mutation
+  - `LATENT_DELTA_SCALE` = raw branch delta-scale policy
+  - `STRATEGY_PRESSURE_WINDOW` = bounded pressure-intent policy
+  - `DEEP_STEP_DELTA_CONTROL` = deep research step-loop policy
+- Removes the separate r89 pressure-window helper as an independent decision point. The compatibility report records `EventStrategyPressureWindow_high` / `EventStrategyPressureWindow_low` are now emitted from the unified Strategy Control Surface.
+- `EventMathControlSummary` now includes the Strategy Control Surface version, status, policy, active flag, and branch policies.
+- Formula meaning: high/low sampler pressure no longer has its own local controller. Every active delta change asks the parent `S_global_event_route` control surface for one `effective_strength`.
+- Safety meaning: prompt text remains clean, CFG remains model-native outside explicit deep research, and sampler step replacement is still isolated to `DEEP_STEP_DELTA_CONTROL`.
+
+## 0.1.1-r89 Dev - Unified Pressure Window
+
+Status: development functional pass after the r88 Strategy-return pressure resolver.
+
+- Adds `STRATEGY_PRESSURE_WINDOW`, a unified active math mode for the next test round.
+- Keeps the native sampler path and CFG behavior; the new mode does not replace the denoising loop.
+- Reads `high_delta_strength` and `low_delta_strength` as pressure intent, then compresses that intent into a small bounded window around `1.0`.
+- Adds `EventStrategyPressureWindow_high` / `EventStrategyPressureWindow_low` records so reports show:
+  - requested branch strength
+  - high-to-low coupling multiplier
+  - compressed pressure intent
+  - max allowed window
+  - final effective strength
+- Extends the Strategy Matrix so the new pressure-window records count as delta/control evidence.
+- Formula meaning: local sampler pressure must return to `S_global_event_route` before it becomes active latent control. This is the first "one functional math surface" after the report-only resolver.
+- Safety meaning: prompt text stays clean, topology prose is not injected into the prompt, and extreme values like `0.5` / `1.5` become bounded research nudges rather than raw destructive multipliers.
+
+## 0.1.1-r88 Dev - Strategy Return Pressure Resolver
+
+Status: development topology pass after the r87 Continue payload gate passed.
+
+- Adds `EventStrategyReturnPressureResolver`, a report-only resolver that folds local pressure back into the global Strategy route before proposing the next math surface.
+- Reads existing evidence instead of forcing a new controller:
+  - `EventPromptCarrierContinuityCard`
+  - `EventLowBranchRelationPressureCard`
+  - `EventTailStrategyContinuityCard`
+  - `EventFrameSpikeAttributionCard`
+  - `EventObjectCarrierIdentityCard`
+  - `EventTopologyStrategyReturnMap`
+- Reports a single pressure vector:
+  - prompt carrier pressure
+  - high/low sampler pressure
+  - visible frame motion pressure
+  - late-segment spike pressure
+  - seam boundary pressure
+  - tail Strategy pressure
+  - object relation pressure
+  - source anchor pressure
+- Adds summary fields for:
+  - `strategy_return_resolver_status`
+  - `strategy_return_pressure`
+  - `strategy_return_primary_attribution`
+  - `strategy_return_next_control_surface`
+  - `strategy_return_active_control_allowed`
+- The resolver stays prompt-pure: it does not inject topology/math prose into CLIP/T5 text.
+- The resolver stays observer-only: it does not modify prompts, tensors, sampler steps, deltas, pause routing, or video frames.
+- Formula meaning: local high/low, frame-motion, tail, object, source, and prompt sub-strategies are allowed to unfold, but they must return to `S_global_event_route` before any active control is considered.
+
+## 0.1.1-r87 Dev - Continue Payload Guard
+
+Status: development hotfix after the first r86 prompt-purity runtime gate.
+
+- Keeps the r86 prompt-purity law: `TRANSFORM_PROMPT` still builds report/control-space maps and does not inject formula prose into CLIP/T5 text.
+- Adds a Continue payload guard for positive prompt truncation, not only negative prompt truncation.
+- If the Continue UI sends a prompt payload that looks like a missing or truncated version of the already-active prompt, the backend reuses the current clean StrategyCandidate instead of falsely creating `changed_runtime_strategy`.
+- Adds report fields for positive prompt payload hygiene:
+  - `positive_payload_missing`
+  - `positive_payload_truncated`
+  - `positive_prompt_payload_reused_previous_active`
+  - `positive_prompt_payload_mismatch_policy`
+- New same-prompt match bases can include:
+  - `positive_payload_missing_reuse`
+  - `positive_payload_truncated_reuse`
+  - `prompt_payload_truncated_reuse`
+- Formula meaning: a partial widget payload is not a new Strategy. Same user intent must keep the same prompt carrier across pause/continue before sampler math is judged.
+
+## 0.1.1-r86 Dev - Prompt Purity Lock
+
+Status: development correction after prompt-topology tests.
+
+- Added `EventPromptPurityLock`.
+- `TRANSFORM_PROMPT` no longer injects formula/topology prose into the CLIP prompt.
+- The model-facing positive prompt now stays as the clean user prompt, except when an older generated Strategy tail is detected and stripped as sanitation.
+- Added `semantic_density_context_map` to compare:
+  - meaning density,
+  - context density,
+  - density/context balance,
+  - object/topology pressure,
+  - and next safe control surfaces.
+- `EventPromptStrategyTranscodeApply` now reports `semantic_map_only` instead of active prompt rewrite.
+- Continue/runtime prompt updates follow the same law: changed prompts are encoded from clean user text, while math remains outside the text route.
+- Formula meaning: math, semantics, logic, and Strategy stay free, but they must not be converted into extra prompt words. The prompt is the StrategyCandidate carrier; density sorting belongs in report/control space.
+
+## 0.1.1-r85 Dev - Topology Strategy Return Map
+
+Status: development stabilization pass after the r84 pause/continue gate.
+
+- Added `EventTopologyStrategyReturnMap`, a report-only map that checks how local Strategy collision points return to the global route Strategy.
+- The map links prompt/source, prompt polarity, source-to-latent anchoring, high/low sampler pressure, object relation topology, tail continuation, visible frame motion, and final video outcome into one parent route.
+- `EventCoreBodySummary` now exposes:
+  - `topology_strategy_return_status`
+  - `topology_sync_score`
+  - `topology_unstable_route_count`
+  - `topology_watch_route_count`
+  - `topology_primary_pressure_axis`
+  - `topology_next_route`
+- The prompt strategy packet now includes `strategy_return_contract`, so prompt deconstruction declares the global/local topology before sampler evidence is read.
+- No tensors, prompts, sampler steps, or cascade routing are modified by this pass.
+- Formula meaning: local formulas may unfold at each carrier collision, but every local Strategy must return to the main StrategyCarrier before data is passed to the next sampler or cascade segment.
+
+## 0.1.1-r84 Dev - Cascade Continue Hotfix
+
+Status: urgent pause/resume runtime fix.
+
+- Fixed a regression in the r83 post-transform prompt-continuity path.
+- Continue reached the backend correctly, but the run could fail immediately after pause with `mode_matches` not initialized.
+- Moved the mode comparison before post-transform identity checks, so pause/continue can safely decide whether the next cascade reuses the same active StrategyCarrier or receives a changed prompt.
+- The visible ComfyUI title now reads `Singularity R84`.
+- Formula meaning: local prompt identity checks must return to the main cascade Strategy route; they must never break the route between the selected tail frame and the next segment.
+
+## 0.1.1-r83 Dev - Post-Transform Prompt Continuity
+
+Status: development fix found by the r82 relation cards.
+
+- r82 loaded correctly and generated a VIDEO/PASS report, but `EventPromptCarrierContinuityCard` exposed a hidden issue: Continue could still mark the prompt as `changed_runtime_strategy`.
+- Root cause: the backend compared the raw positive widget payload against the already-transformed active StrategyCarrier before checking whether the raw prompt would transform back into the same active carrier.
+- Added a post-transform positive identity preview:
+  - `positive_payload_transforms_to_current_active`
+  - `positive_strategy_identity_matches`
+  - `positive_payload_transform_preview_signature`
+- If the positive prompt resolves to the same active StrategyCarrier and the negative payload is missing/truncated, Continue can now reuse the previous active negative carrier instead of treating widget payload drift as a real Strategy change.
+- Added `EventGlobalStrategyReturnCard` so local prompt/source/low/object/tail/frame cards are explicitly subordinate to the primary route Strategy.
+- The global card records divergence flags when local sub-strategies do not return cleanly to the main StrategyCarrier path.
+- Formula meaning: unchanged user intent must preserve the same `Strategy(t)` across pause/continue, even when the UI payload carries raw text while the runtime holds a transformed carrier.
+
+## 0.1.1-r82 Dev - Evidence Hygiene + Relation Cards
+
+Status: development report/evidence fix before the next fixed-seed visual tests.
+
+- Aligned stale body/runtime constants across `nodes.py`, `core/execution.py`, `core/cascade.py`, `core/orchestrator.py`, and `core/telemetry.py`.
+- The visible ComfyUI title now reads `Singularity R82`.
+- Continue payloads now record whether positive and negative prompt fields were actually present.
+- If Continue sends the same positive Strategy identity but the negative prompt payload is missing or looks truncated, the backend reuses the current active negative Strategy carrier instead of falsely creating a changed runtime prompt route.
+- Added six local report-only relation pressure cards:
+  - `EventPromptCarrierContinuityCard`
+  - `EventLowBranchRelationPressureCard`
+  - `EventObjectCarrierIdentityCard`
+  - `EventTailStrategyContinuityCard`
+  - `EventFrameSpikeAttributionCard`
+  - `EventSourceAnchorPreservationCard`
+- `EventCoreBodySummary` now exposes the relation-card count and top card statuses.
+- Formula meaning: this release does not add new active sampler control. It gives the next report a cleaner explanation of where Strategy continuity, object relation pressure, low-branch pressure, and seam dynamics diverge.
+
+## 0.1.1-r81 Dev - Visible Node Version Label
+
+Status: development UX/version hygiene fix.
+
+- The visible ComfyUI node title now includes the current R-label, for example `Singularity R81`.
+- The internal ComfyUI node key remains `Singularity`, so existing workflows keep compatibility.
+- The Python display name is derived from `EVENT_HORIZON_RUNTIME_VERSION`.
+- The frontend extension also applies the visible title on node creation and workflow load, so older saved nodes are easier to visually verify after an update.
+
+## 0.1.1-r80 Dev - Compact Strategy Transform
+
+Status: development fix for prompt-transform duplication.
+
+- Prompt transform now compacts the user prompt before adding Strategy carrier language.
+- Negated/protective wording is folded into positive admissible behavior instead of being repeated as a second prohibition layer.
+- This keeps the active prompt closer to one StrategyCarrier: scene/action content plus one compact topology/continuity interpretation.
+- This is intended to reduce duplicated motion dynamics after cascade stitching.
+- Formula meaning: transformation should transcode the prompt into one readable event route, not stack a second independent explanation on top of the first one.
+
+## 0.1.1-r79 Dev - Prompt Identity Continuity
+
+Status: development fix for cascade prompt continuity.
+
+- Fixed the Continue prompt identity route.
+- The backend now compares the Continue payload against:
+  - the launch raw prompt,
+  - the launch active transformed prompt,
+  - the current active prompt,
+  - the last runtime raw prompt,
+  - and the last runtime active prompt.
+- If the prompt identity is the same, the next cascade reuses the current active StrategyCarrier instead of transforming the same prompt again.
+- If the user genuinely edits the prompt at a pause, the next cascade still receives a new local StrategyCarrier.
+- Reports now expose the match basis through fields such as `same_prompt_match_basis`, `prompt_continuity_reused`, and `prompt_continuity_policy`.
+- Formula meaning: a pause/continue boundary must not create a new `Strategy(t)` when the user intent did not change.
+
+## 0.1.1-r78 Dev - Wan Native Source Anchor
+
+Status: development fix for source-image topology.
+
+- Added `image_crop = wan_native`.
+- New default: Singularity passes the source image directly into official `WanImageToVideo`.
+- This avoids an extra external `ImageScale` resize/crop before Wan performs its own target-grid normalization.
+- Kept old explicit modes:
+  - `disabled` = pre-scale in Singularity without center crop.
+  - `center` = pre-scale and center-crop in Singularity.
+- Formula meaning: `width` / `height` remain the Wan latent/video grid, while `wan_native` preserves the source image as a SourceAnchor until Wan encodes it.
+
 ## 0.1.1-r62 Public Alpha Desktop Cascade UI Fix
 
 Status: public alpha update for ComfyUI Desktop / modern frontend cascade continuation.
@@ -35,7 +273,7 @@ The broader r62/r60 goal remains to make the manual cascade frame-selection work
   - `height = 1280`
   - `seed = 123`
   - `math_control_mode = OBSERVE_ONLY`
-  - `image_crop = center`
+  - `image_crop = wan_native`
 - Rewrote the README and homepage/CVTI description for normal users, with plain explanations of cascade continuation, drift, math modes, reports, and public-alpha limits.
 
 ### What Changed For Users
@@ -284,7 +522,7 @@ When to use it:
 
 ### `LATENT_DELTA_SCALE`
 
-The public default working mode.
+Legacy active research mode.
 
 What it does:
 
@@ -309,6 +547,36 @@ Outcome becomes StrategyCarrier for the next stage
 ```
 
 So this is not just a quality slider. It is a controlled change to the latent route that gets passed forward.
+
+### `STRATEGY_PRESSURE_WINDOW`
+
+Unified active research mode.
+
+What it does:
+
+- measures local high/low pressure as sampler-route evidence;
+- keeps the model-native sampler path;
+- keeps CFG native;
+- reads `high_delta_strength` and `low_delta_strength` as pressure intent;
+- compresses that intent into a small bounded window around `1.0`;
+- applies the bounded value through the same latent transition formula.
+
+Practical meaning:
+
+- use this when raw `LATENT_DELTA_SCALE` is too rough;
+- big test values are safe enough to study because they are compressed;
+- reports show the exact effective strength that was applied.
+
+Formula meaning:
+
+```text
+local sampler pressure
+-> Strategy return to S_global_event_route
+-> bounded pressure window
+-> latent transition control
+```
+
+This is the preferred next test surface for high/low visible-motion coupling.
 
 ### `DEEP_STEP_DELTA_CONTROL`
 

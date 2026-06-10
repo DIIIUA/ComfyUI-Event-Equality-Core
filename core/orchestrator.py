@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r62"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R62 Pause UI Recovery Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r62"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
+EVENT_HORIZON_BODY_VERSION = "0.1-r91"
 
 
 def _event_json_safe(value, depth=0):
@@ -703,6 +703,37 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
         if image is None:
             records.append({"stage": "EventImageScaleStart", "status": "skipped", "reason": "no image"})
             return None
+        crop_mode = str(crop or "wan_native")
+        crop_mode_normalized = crop_mode.lower()
+        if crop_mode_normalized in ("wan_native", "wan-native", "native", "passthrough", "pass_through"):
+            records.append({
+                "stage": "EventImageScaleStart",
+                "status": "passthrough_wan_native",
+                "width": width,
+                "height": height,
+                "method": str(method or "nearest-exact"),
+                "crop": crop_mode,
+                "formula": "SourceAnchor is preserved; WanImageToVideo owns target-grid center normalization.",
+            })
+            self._event_universal_stage_math(
+                records,
+                "EventImageScaleStart",
+                input_state=image,
+                output_state=image,
+                observed_behavior="source image passed through unchanged before WanImageToVideo native resize/crop",
+                formula_role="IMAGE SourceAnchor -> IMAGE preserved OutcomePrevious",
+                route_id="route_source_image",
+                next_requirement="WanImageToVideo will normalize SourceAnchor to the requested width/height latent grid",
+                control_mode="REPORT_ONLY",
+                metadata={
+                    "wan_width": int(width),
+                    "wan_height": int(height),
+                    "method": str(method or "nearest-exact"),
+                    "crop": crop_mode,
+                    "external_image_scale": False,
+                },
+            )
+            return image
         try:
             result = self._call_node_method(
                 "ImageScale",
@@ -711,7 +742,7 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
                 upscale_method=str(method or "nearest-exact"),
                 width=int(width),
                 height=int(height),
-                crop=str(crop or "disabled"),
+                crop=crop_mode_normalized if crop_mode_normalized in ("disabled", "center") else "disabled",
             )
             scaled = self._first_output(result, preferred_names=["image", "images", "IMAGE"], stage="EventImageScaleStart", records=records)
             records.append({"stage": "EventImageScaleStart", "status": "ok", "width": width, "height": height})
@@ -725,7 +756,7 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
                 route_id="route_source_image",
                 next_requirement="WanImageToVideo requires scaled image, width, height, frame count and conditioning",
                 control_mode="REPORT_ONLY",
-                metadata={"width": int(width), "height": int(height), "method": str(method or "nearest-exact"), "crop": str(crop or "disabled")},
+                metadata={"width": int(width), "height": int(height), "method": str(method or "nearest-exact"), "crop": crop_mode, "external_image_scale": True},
             )
             return scaled
         except Exception as e:

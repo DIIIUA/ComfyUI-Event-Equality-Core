@@ -9,6 +9,7 @@ const CLEAN_NODE_NAMES = new Set([
     "SingularityCascadeSimple",
 ]);
 const LEGACY_NODE_NAMES = new Set([]);
+const SINGULARITY_VISIBLE_NODE_TITLE = "Singularity R91";
 
 const UI = {
     minWidth: 720,
@@ -99,7 +100,7 @@ const SUPPRESSED_MEDIA_WIDGET_TYPES = new Set([
 
 const GROUPS = [
     { id: "SOURCE", color: "#1d4ed8", bg: "rgba(30, 64, 175, 0.12)", names: ["source_image_file"] },
-    { id: "PROMPT", color: "#7c3aed", bg: "rgba(91, 33, 182, 0.10)", names: ["positive_prompt", "negative_prompt", "temporal_texture_lock"] },
+    { id: "PROMPT", color: "#7c3aed", bg: "rgba(91, 33, 182, 0.10)", names: ["positive_prompt", "negative_prompt", "temporal_texture_lock", "prompt_transcode_mode"] },
     { id: "CASCADE", color: "#0891b2", bg: "rgba(8, 145, 178, 0.10)", names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed"] },
     { id: "SAMPLING", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step", "math_control_mode", "high_delta_strength", "low_delta_strength"] },
     { id: "DECODE", color: "#059669", bg: "rgba(5, 150, 105, 0.09)", names: ["decode_tile_size", "decode_overlap", "decode_temporal_size", "decode_temporal_overlap", "image_upscale_method", "image_crop"] },
@@ -130,6 +131,52 @@ function setWidgetValue(node, name, value) {
     widget.value = value;
     if (widget.callback) widget.callback(value);
     return true;
+}
+
+function applySingularityVisibleTitle(node, nodeData = null) {
+    if (!node) return;
+    const mappedTitle = String(nodeData?.display_name || nodeData?.displayName || "").trim();
+    const title = mappedTitle && mappedTitle !== "Singularity"
+        ? mappedTitle
+        : SINGULARITY_VISIBLE_NODE_TITLE;
+    if (title) node.title = title;
+}
+
+function normalizePromptTranscodeMode(value) {
+    const text = String(value ?? "").trim().toUpperCase();
+    if (text === "1" || text === "TRANSFORM_PROMPT" || text === "TRANSFORM_STRUCTURED_PROMPT" || text === "APPEND_TRANSCODE" || text === "APPEND_STRUCTURED_TRANSCODE") {
+        return "TRANSFORM_PROMPT";
+    }
+    return "REPORT_ONLY";
+}
+
+function normalizeMathControlMode(value) {
+    const text = String(value ?? "").trim().toUpperCase();
+    if (text === "LATENT_DELTA_SCALE") return "LATENT_DELTA_SCALE";
+    if (text === "STRATEGY_PRESSURE_WINDOW") return "STRATEGY_PRESSURE_WINDOW";
+    if (text === "DEEP_STEP_DELTA_CONTROL") return "DEEP_STEP_DELTA_CONTROL";
+    return "OBSERVE_ONLY";
+}
+
+function sanitizeMathControlWidget(node) {
+    const widget = findWidget(node, "math_control_mode");
+    if (!widget) return;
+    widget.options = widget.options || {};
+    widget.options.values = [
+        "OBSERVE_ONLY",
+        "LATENT_DELTA_SCALE",
+        "STRATEGY_PRESSURE_WINDOW",
+        "DEEP_STEP_DELTA_CONTROL",
+    ];
+    widget.value = normalizeMathControlMode(widget.value);
+}
+
+function sanitizePromptTranscodeWidget(node) {
+    const widget = findWidget(node, "prompt_transcode_mode");
+    if (!widget) return;
+    widget.options = widget.options || {};
+    widget.options.values = ["REPORT_ONLY", "TRANSFORM_PROMPT"];
+    widget.value = normalizePromptTranscodeMode(widget.value);
 }
 
 function clampNodeSize(node) {
@@ -168,6 +215,8 @@ function hidePublicOnlyWidgets(node) {
 
 function stabilizeNodeLayout(node) {
     hidePublicOnlyWidgets(node);
+    sanitizePromptTranscodeWidget(node);
+    sanitizeMathControlWidget(node);
     stabilizePromptWidgets(node);
     clampNodeSize(node);
 }
@@ -720,10 +769,24 @@ async function requestCascadeContinue(node) {
     renderPauseOverlay(node, true);
     if (node.setDirtyCanvas) node.setDirtyCanvas(true, true);
     try {
+        const positivePromptWidget = findWidget(node, "positive_prompt");
+        const negativePromptWidget = findWidget(node, "negative_prompt");
+        const transcodeModeWidget = findWidget(node, "prompt_transcode_mode");
+        const promptTranscodeMode = normalizePromptTranscodeMode(transcodeModeWidget?.value);
+        if (transcodeModeWidget) {
+            transcodeModeWidget.value = promptTranscodeMode;
+        }
         await api.fetchApi(CONTINUE_ROUTE + encodeURIComponent(String(node._singularityPauseNodeId || node.id)), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ resume_frame_index: resumeFrameIndex }),
+            body: JSON.stringify({
+                resume_frame_index: resumeFrameIndex,
+                prompt_payload_version: "cascade_continue_prompt_v1",
+                prompt_source: "node_widgets_at_continue_click",
+                positive_prompt: String(positivePromptWidget?.value ?? ""),
+                negative_prompt: String(negativePromptWidget?.value ?? ""),
+                prompt_transcode_mode: promptTranscodeMode,
+            }),
         });
     } catch (error) {
         console.error("[Singularity UI] Continue request failed", error);
@@ -1249,6 +1312,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const r = originalOnNodeCreated?.apply(this, arguments);
             console.log("[Singularity UI] onNodeCreated called for node", this);
+            applySingularityVisibleTitle(this, nodeData);
             
             // Stable min size for multiline prompts and native preview. The pause controls live in a DOM overlay below the node.
             if (!this.size) this.size = [720, UI.minHeight];
@@ -1311,6 +1375,7 @@ app.registerExtension({
         const originalOnConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             const r = originalOnConfigure ? originalOnConfigure.apply(this, arguments) : undefined;
+            applySingularityVisibleTitle(this, nodeData);
             if (!this.size) this.size = [UI.minWidth, UI.minHeight];
             if (this.size[0] < UI.minWidth) this.size[0] = UI.minWidth;
             if (this.size[1] < UI.minHeight) this.size[1] = UI.minHeight;

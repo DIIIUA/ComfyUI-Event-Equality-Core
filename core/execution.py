@@ -81,6 +81,7 @@ from .signal import make_event_signal
 from .relation import make_event_relation
 from .conflict import make_conflict
 from .event_sampler import EventSamplerCore, EventSamplerWindow, EventSamplerResult
+from .prompt_strategy import build_prompt_strategy_packet
 import os
 import sys
 
@@ -102,15 +103,18 @@ from ..adapters.wan.wan_adapter import apply_wan_adapter
 try:
     from server import PromptServer
     from aiohttp import web
-    from comfy.model_management import InterruptProcessingException
+    from comfy.model_management import InterruptProcessingException, throw_exception_if_processing_interrupted
 except Exception:
     PromptServer = None
     web = None
     InterruptProcessingException = RuntimeError
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r62"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R62 Pause UI Recovery Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r62"
+    def throw_exception_if_processing_interrupted():
+        return None
+
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
+EVENT_HORIZON_BODY_VERSION = "0.1-r91"
 _SINGULARITY_PAUSE_STATES = {}
 
 
@@ -142,6 +146,30 @@ def _singularity_parse_resume_index(value, default=-1):
         return int(default)
 
 
+def _singularity_prompt_payload(payload):
+    if not isinstance(payload, dict):
+        return {}
+    has_prompt_payload = (
+        payload.get("prompt_payload_version") == "cascade_continue_prompt_v1"
+        or "positive_prompt" in payload
+        or "negative_prompt" in payload
+        or "prompt_transcode_mode" in payload
+    )
+    if not has_prompt_payload:
+        return {}
+    update = {
+        "payload_version": str(payload.get("prompt_payload_version") or "cascade_continue_prompt_v1"),
+        "source": str(payload.get("prompt_source") or "node_widgets_at_continue_click"),
+        "positive_prompt_present": "positive_prompt" in payload,
+        "negative_prompt_present": "negative_prompt" in payload,
+        "positive_prompt": str(payload.get("positive_prompt", "")),
+        "negative_prompt": str(payload.get("negative_prompt", "")),
+    }
+    if "prompt_transcode_mode" in payload:
+        update["prompt_transcode_mode"] = str(payload.get("prompt_transcode_mode") or "")
+    return update
+
+
 if PromptServer is not None and web is not None:
     @PromptServer.instance.routes.post("/singularity/cascade/continue/{node_id}")
     async def _singularity_handle_cascade_continue(request):
@@ -154,15 +182,19 @@ if PromptServer is not None and web is not None:
             payload.get("resume_frame_index", -1),
             default=-1,
         )
+        prompt_update = _singularity_prompt_payload(payload)
         _SINGULARITY_PAUSE_STATES[node_id] = {
             "status": "continue",
             "resume_frame_index": resume_frame_index,
+            "prompt_update": prompt_update,
+            "prompt_update_present": bool(prompt_update),
             "updated_at": time.time(),
         }
         return web.json_response({
             "status": "ok",
             "node_id": node_id,
             "resume_frame_index": resume_frame_index,
+            "prompt_update_present": bool(prompt_update),
         })
 
     @PromptServer.instance.routes.post("/singularity/cascade/cancel/{node_id}")
@@ -809,7 +841,9 @@ class SingularityExecutionMixin:
             policy = "deep_research_bounded_cfg_projection"
         elif mode == "LATENT_DELTA_SCALE":
             policy = "latent_delta_scale_keeps_cfg_native"
-        elif mode not in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL"):
+        elif mode == "STRATEGY_PRESSURE_WINDOW":
+            policy = "strategy_pressure_window_keeps_cfg_native"
+        elif mode not in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL"):
             policy = "mode_keeps_cfg_native"
 
         records.append({
@@ -824,7 +858,7 @@ class SingularityExecutionMixin:
             "cfg_multiplier": multiplier,
             "adjusted_cfg": adjusted_cfg,
             "policy": policy,
-            "formula": "CFG is preserved in LATENT_DELTA_SCALE; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
+            "formula": "CFG is preserved in LATENT_DELTA_SCALE and STRATEGY_PRESSURE_WINDOW; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
         })
         return adjusted_cfg
 
@@ -1023,8 +1057,9 @@ class SingularityExecutionMixin:
                 "stage": f"SingularityCascadePause_{segment_index}_Fallback",
                 "status": "auto_continue_no_prompt_server",
                 "resume_frame_index": default_resume_index,
+                "prompt_update_present": False,
             })
-            return default_resume_index, pause_frames
+            return default_resume_index, pause_frames, {}
 
         existing_state = _SINGULARITY_PAUSE_STATES.get(node_key, {})
         if existing_state.get("status") != "continue":
@@ -1049,6 +1084,17 @@ class SingularityExecutionMixin:
         })
 
         while True:
+            try:
+                throw_exception_if_processing_interrupted()
+            except InterruptProcessingException:
+                _SINGULARITY_PAUSE_STATES.pop(node_key, None)
+                execution_records.append({
+                    "stage": f"SingularityCascadePause_{segment_index}_Interrupt",
+                    "status": "interrupted",
+                    "node_id": node_key,
+                    "formula": "ComfyUI interrupt cancels the same-run pause wait instead of leaving the workflow in a blocked pause state.",
+                })
+                raise
             state = _SINGULARITY_PAUSE_STATES.get(node_key, {})
             status = state.get("status")
             if status == "continue":
@@ -1058,14 +1104,22 @@ class SingularityExecutionMixin:
                 )
                 if resume_frame_index < 1:
                     resume_frame_index = default_resume_index
+                prompt_update = state.get("prompt_update", {})
+                if not isinstance(prompt_update, dict):
+                    prompt_update = {}
                 _SINGULARITY_PAUSE_STATES.pop(node_key, None)
                 execution_records.append({
                     "stage": f"SingularityCascadePause_{segment_index}_Continue",
                     "status": "continue",
                     "node_id": node_key,
                     "resume_frame_index": resume_frame_index,
+                    "prompt_update_present": bool(prompt_update),
+                    "prompt_payload_version": prompt_update.get("payload_version", "") if isinstance(prompt_update, dict) else "",
+                    "prompt_source": prompt_update.get("source", "") if isinstance(prompt_update, dict) else "",
+                    "positive_prompt_length": len(str(prompt_update.get("positive_prompt", ""))) if isinstance(prompt_update, dict) else 0,
+                    "negative_prompt_length": len(str(prompt_update.get("negative_prompt", ""))) if isinstance(prompt_update, dict) else 0,
                 })
-                return resume_frame_index, pause_frames
+                return resume_frame_index, pause_frames, prompt_update
             if status == "cancelled":
                 _SINGULARITY_PAUSE_STATES.pop(node_key, None)
                 execution_records.append({
@@ -1543,6 +1597,89 @@ class SingularityExecutionMixin:
             })
         return selected
 
+    def _record_segment_strategy_carrier(self, records, *, segment_index, positive_prompt, negative_prompt, context=None):
+        context = context if isinstance(context, dict) else {}
+
+        def text_signature(value):
+            return hashlib.sha256(str(value or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+        positive_text = str(positive_prompt or "")
+        negative_text = str(negative_prompt or "")
+        positive_signature = text_signature(positive_text)
+        negative_signature = text_signature(negative_text)
+        previous_positive_signature = str(context.get("last_active_positive_signature") or "")
+        previous_negative_signature = str(context.get("last_active_negative_signature") or "")
+        segment_index_i = int(segment_index or 1)
+        changed_positive = bool(previous_positive_signature and positive_signature != previous_positive_signature)
+        changed_negative = bool(previous_negative_signature and negative_signature != previous_negative_signature)
+        prompt_source = str(context.get("prompt_source") or ("launch_time" if segment_index_i == 1 else "previous_segment"))
+
+        record = {
+            "stage": "EventSegmentStrategyCarrierReview",
+            "status": "recorded",
+            "review_version": "segment_strategy_carrier_review_v1",
+            "segment_index": segment_index_i,
+            "prompt_source": prompt_source,
+            "prompt_transcode_mode": str(context.get("prompt_transcode_mode") or ""),
+            "active_positive_signature": positive_signature,
+            "active_negative_signature": negative_signature,
+            "previous_active_positive_signature": previous_positive_signature,
+            "previous_active_negative_signature": previous_negative_signature,
+            "positive_changed_from_previous_segment": changed_positive,
+            "negative_changed_from_previous_segment": changed_negative,
+            "changed_from_previous_segment": bool(changed_positive or changed_negative),
+            "positive_prompt_length": len(positive_text),
+            "negative_prompt_length": len(negative_text),
+            "last_runtime_prompt_update_applies_to_segment": context.get("last_runtime_prompt_update_applies_to_segment", None),
+            "formula": (
+                "Segment prompt text is the local StrategyCarrier before CLIP encoding; "
+                "this record proves whether a cascade continues the same carrier or receives a new runtime Strategy."
+            ),
+            "control_mode": "REPORT_ONLY",
+        }
+        records.append(record)
+
+        context["last_active_positive_signature"] = positive_signature
+        context["last_active_negative_signature"] = negative_signature
+        context["last_segment_index"] = segment_index_i
+        context["last_prompt_source"] = prompt_source
+        return record
+
+    def _encode_text_with_strategy_cache(self, clip, text, records, *, label, context=None, polarity="positive"):
+        context = context if isinstance(context, dict) else {}
+        text_value = str(text or "")
+        text_signature = hashlib.sha256(text_value.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        cache = context.setdefault("conditioning_cache", {})
+        cache_key = f"{str(polarity or 'text')}:{text_signature}"
+
+        if cache_key in cache:
+            records.append({
+                "stage": f"Event{label}",
+                "status": "reused_conditioning",
+                "cache_key": cache_key,
+                "text_signature": text_signature,
+                "text_length": len(text_value),
+                "formula": (
+                    "Same prompt StrategyCarrier reuses the already encoded conditioning; "
+                    "the cascade continuation does not ask T5/CLIP to reinterpret identical text."
+                ),
+                "control_mode": "REPORT_ONLY",
+            })
+            return cache[cache_key]
+
+        conditioning = self._encode_text(clip, text_value, records, label=label)
+        cache[cache_key] = conditioning
+        records.append({
+            "stage": f"Event{label}ConditioningCache",
+            "status": "stored",
+            "cache_key": cache_key,
+            "text_signature": text_signature,
+            "text_length": len(text_value),
+            "formula": "Prompt StrategyCarrier text encoded once into NumericStrategy conditioning for reuse when unchanged.",
+            "control_mode": "REPORT_ONLY",
+        })
+        return conditioning
+
     def _run_event_horizon_segment_core(
         self,
         *,
@@ -1580,6 +1717,7 @@ class SingularityExecutionMixin:
         stage_delay_seconds,
         records,
         barrier_records,
+        strategy_carrier_context=None,
     ):
         segment_label = f"cascade_{segment_index}"
         records.append({
@@ -1592,8 +1730,29 @@ class SingularityExecutionMixin:
 
         segment_positive_prompt = self._cascade_prompt_for_segment(positive_prompt, segment_index, records, kind="positive")
         segment_negative_prompt = self._cascade_prompt_for_segment(negative_prompt, segment_index, records, kind="negative")
-        positive = self._encode_text(clip, segment_positive_prompt, records, label=f'{segment_label}_TextEncodePositive')
-        negative = self._encode_text(clip, segment_negative_prompt, records, label=f'{segment_label}_TextEncodeNegative')
+        self._record_segment_strategy_carrier(
+            records,
+            segment_index=segment_index,
+            positive_prompt=segment_positive_prompt,
+            negative_prompt=segment_negative_prompt,
+            context=strategy_carrier_context,
+        )
+        positive = self._encode_text_with_strategy_cache(
+            clip,
+            segment_positive_prompt,
+            records,
+            label=f'{segment_label}_TextEncodePositive',
+            context=strategy_carrier_context,
+            polarity="positive",
+        )
+        negative = self._encode_text_with_strategy_cache(
+            clip,
+            segment_negative_prompt,
+            records,
+            label=f'{segment_label}_TextEncodeNegative',
+            context=strategy_carrier_context,
+            polarity="negative",
+        )
         self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_text_encode")
         scaled_image = self._scale_image(source_image, width, height, image_upscale_method, image_crop, records)
 
@@ -1762,6 +1921,7 @@ class SingularityExecutionMixin:
         image=None,
         mask=None,
         use_formula_recommendation=False,
+        prompt_transcode_mode="REPORT_ONLY",
         selected_tail_index=0,
     ):
         run_id = now_run_id(prefix="Singularity")
@@ -1857,19 +2017,22 @@ class SingularityExecutionMixin:
             getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
             getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
         )
+        strategy_control_plan = self._event_strategy_control_surface_plan(execution_records)
         execution_records.append({
             "stage": "EventMathControlSummary",
             "status": "recorded",
             "math_control_mode": getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
             "high_delta_strength_requested": getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
             "low_delta_strength_requested": getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+            "strategy_control_surface_version": strategy_control_plan.get("version", ""),
+            "strategy_control_surface_status": strategy_control_plan.get("status", ""),
+            "strategy_control_surface_policy": strategy_control_plan.get("policy", ""),
+            "strategy_control_surface_active_allowed": strategy_control_plan.get("active_control_allowed", False),
+            "strategy_control_surface_branch_policies": strategy_control_plan.get("branch_policies", {}),
             "sampler_trace_mode": getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"),
             "sampler_trace_max_steps": getattr(self, "_event_sampler_trace", {}).get("max_steps", 64),
             "active_generation_math_path": (
-                "semantic_overlay_native_sampler"
-                if str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")).upper() == "LATENT_DELTA_SCALE"
-                else "native_step_loop" if str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")).upper() == "DEEP_STEP_DELTA_CONTROL"
-                else "boundary_sampler_wrapper"
+                strategy_control_plan.get("active_generation_math_path", "observe_only")
             ),
             "strategy_carrier_coupling": "enabled_for_low_branch_without_step_replacement",
             "precision_step": 0.0001,
@@ -2063,6 +2226,693 @@ class SingularityExecutionMixin:
             "status": "recorded",
             **cascade_execution_plan,
         })
+        prompt_strategy_packet = build_prompt_strategy_packet(
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            source_image_file=source_image_file,
+            cascade_execution_plan=cascade_execution_plan,
+            math_controls={
+                "math_control_mode": getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
+                "high_delta_strength": getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
+                "low_delta_strength": getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+                "sampler_trace_mode": getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"),
+                "sampler_trace_max_steps": getattr(self, "_event_sampler_trace", {}).get("max_steps", 64),
+                "prompt_transcode_mode": prompt_transcode_mode,
+            },
+        )
+        packet.setdefault("metadata", {})["prompt_strategy_packet"] = prompt_strategy_packet
+        execution_records.append(prompt_strategy_packet)
+        prompt_transcode_mode_aliases = {
+            "0": "REPORT_ONLY",
+            "1": "TRANSFORM_PROMPT",
+            "2": "TRANSFORM_PROMPT",
+            "REPORT_ONLY": "REPORT_ONLY",
+            "TRANSFORM_PROMPT": "TRANSFORM_PROMPT",
+            "TRANSFORM_STRUCTURED_PROMPT": "TRANSFORM_PROMPT",
+            "APPEND_TRANSCODE": "TRANSFORM_PROMPT",
+            "APPEND_STRUCTURED_TRANSCODE": "TRANSFORM_PROMPT",
+        }
+        prompt_transcode_mode_raw = str(prompt_transcode_mode or "REPORT_ONLY").strip()
+        prompt_transcode_mode_n = prompt_transcode_mode_aliases.get(
+            prompt_transcode_mode_raw.upper(),
+            "REPORT_ONLY",
+        )
+        transcode = prompt_strategy_packet.get("model_language_transcode", {}) if isinstance(prompt_strategy_packet, dict) else {}
+        prompt_idempotence = prompt_strategy_packet.get("prompt_idempotence", {}) if isinstance(prompt_strategy_packet, dict) else {}
+        object_topology_map = prompt_strategy_packet.get("object_topology_map", {}) if isinstance(prompt_strategy_packet, dict) else {}
+        object_relation_ontology = prompt_strategy_packet.get("object_relation_ontology", {}) if isinstance(prompt_strategy_packet, dict) else {}
+        original_positive_text = str(positive_prompt or "")
+        original_negative_text = str(negative_prompt or "")
+        original_positive_signature = hashlib.sha256(original_positive_text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        original_negative_signature = hashlib.sha256(original_negative_text.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+        def sanitize_prompt_layer(base_text, clean_text, idempotence_action):
+            base_text = str(base_text or "")
+            clean_text = str(clean_text or "").strip()
+            if str(idempotence_action or "") != "stripped_generated_strategy_tail":
+                return base_text, False
+            if not clean_text:
+                return base_text, False
+            if clean_text == base_text.strip():
+                return base_text, False
+            return clean_text, True
+
+        positive_prompt_transformed = False
+        negative_prompt_transformed = False
+        positive_prompt_sanitized = False
+        negative_prompt_sanitized = False
+        if isinstance(prompt_idempotence, dict):
+            positive_prompt, positive_prompt_sanitized = sanitize_prompt_layer(
+                positive_prompt,
+                transcode.get("transformed_positive_prompt", "") if isinstance(transcode, dict) else "",
+                prompt_idempotence.get("idempotence_action", ""),
+            )
+
+        active_positive_signature = hashlib.sha256(str(positive_prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+        active_negative_signature = hashlib.sha256(str(negative_prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+        def _prompt_normalized_text_signature(text):
+            normalized = " ".join(str(text or "").split())
+            return hashlib.sha256(normalized.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+        active_positive_normalized_signature = _prompt_normalized_text_signature(positive_prompt)
+        active_negative_normalized_signature = _prompt_normalized_text_signature(negative_prompt)
+
+        semantic_density_context_map = (
+            prompt_strategy_packet.get("semantic_density_context_map", {})
+            if isinstance(prompt_strategy_packet, dict)
+            else {}
+        )
+        prompt_purity_lock_record = {
+            "stage": "EventPromptPurityLock",
+            "status": "locked",
+            "raw_prompt_transcode_mode": prompt_transcode_mode_raw,
+            "prompt_transcode_mode": prompt_transcode_mode_n,
+            "formula": "Prompt words stay as the user's clean StrategyCandidate; formula math is sorted in semantic density/context space instead of being injected into CLIP text.",
+            "prompt_purity_lock": True,
+            "clip_positive_uses_raw_prompt": not positive_prompt_sanitized,
+            "clip_positive_uses_sanitized_raw_prompt": bool(positive_prompt_sanitized),
+            "clip_negative_uses_raw_prompt": True,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "positive_prompt_transformed": False,
+            "negative_prompt_transformed": False,
+            "positive_prompt_sanitized": bool(positive_prompt_sanitized),
+            "negative_prompt_sanitized": bool(negative_prompt_sanitized),
+            "semantic_density_context_map": semantic_density_context_map if isinstance(semantic_density_context_map, dict) else {},
+            "model_facing_prompt_policy": "raw_user_prompt_or_sanitized_raw_prompt_only",
+            "control_mode": "SEMANTIC_DENSITY_MAP_ONLY" if prompt_transcode_mode_n != "REPORT_ONLY" else "REPORT_ONLY",
+            "active_control_allowed": False,
+        }
+        packet.setdefault("metadata", {})["prompt_purity_lock"] = prompt_purity_lock_record
+        execution_records.append(prompt_purity_lock_record)
+
+        transcode_apply_record = {
+            "stage": "EventPromptStrategyTranscodeApply",
+            "status": "semantic_map_only" if prompt_transcode_mode_n != "REPORT_ONLY" else "report_only",
+            "raw_prompt_transcode_mode": prompt_transcode_mode_raw,
+            "prompt_transcode_mode": prompt_transcode_mode_n,
+            "formula": "Prompt transcode is now a semantic density/context map. It may sort Strategy meaning in report/control space, but it must not become extra prompt text.",
+            "transcode_policy": "semantic_density_map_only_no_text_injection",
+            "transformation_policy": "prompt_purity_lock_semantic_map_only",
+            "prompt_purity_lock": True,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "prompt_idempotence_policy": transcode.get("idempotence_policy", "") if isinstance(transcode, dict) else "",
+            "existing_strategy_transform_detected": bool(prompt_idempotence.get("existing_strategy_transform_detected", False)) if isinstance(prompt_idempotence, dict) else False,
+            "prompt_idempotence_action": prompt_idempotence.get("idempotence_action", "") if isinstance(prompt_idempotence, dict) else "",
+            "detected_strategy_transform_marker": prompt_idempotence.get("detected_marker", "") if isinstance(prompt_idempotence, dict) else "",
+            "strategy_transform_stripped_character_count": prompt_idempotence.get("stripped_character_count", 0) if isinstance(prompt_idempotence, dict) else 0,
+            "sanitized_positive_signature": prompt_idempotence.get("sanitized_positive_signature", "") if isinstance(prompt_idempotence, dict) else "",
+            "free_math_policy": "Math, meaning, semantics, logic, and Strategy remain linked and free; Singularity does not define a fixed physics solver or convert the formula into prompt prose here.",
+            "object_topology_policy": "If an object carrier is detected, it is mapped as topology evidence and density pressure, not appended as instructions.",
+            "object_relation_ontology_policy": "If object/contact carriers are detected, their roles remain report/control-space carriers unless a future bounded tensor/weight route is explicitly enabled.",
+            "negative_transform_policy": transcode.get("negative_transform_policy", "") if isinstance(transcode, dict) else "",
+            "object_topology_status": object_topology_map.get("status") if isinstance(object_topology_map, dict) else "",
+            "object_relation_ontology_status": object_relation_ontology.get("status") if isinstance(object_relation_ontology, dict) else "",
+            "object_relation_strategy_point": object_relation_ontology.get("strategy_point") if isinstance(object_relation_ontology, dict) else "",
+            "object_relation_sentence_count": len(object_relation_ontology.get("positive_strategy_sentences", []) or []) if isinstance(object_relation_ontology, dict) else 0,
+            "rigid_object_count": object_topology_map.get("rigid_object_count", 0) if isinstance(object_topology_map, dict) else 0,
+            "rigidity_lock_recommended": bool(object_topology_map.get("rigidity_lock_recommended", False)) if isinstance(object_topology_map, dict) else False,
+            "contact_depth_axis_recommended": bool(object_topology_map.get("contact_depth_axis_recommended", False)) if isinstance(object_topology_map, dict) else False,
+            "contact_depth_axis_hint": object_topology_map.get("contact_depth_axis_hint", "") if isinstance(object_topology_map, dict) else "",
+            "rigidity_transform_applied": bool(
+                False
+            ),
+            "object_relation_ontology_applied": bool(
+                False
+            ),
+            "original_prompt_meaning_preserved": True,
+            "original_prompt_preserved": not positive_prompt_sanitized,
+            "positive_prompt_transformed": bool(positive_prompt_transformed),
+            "negative_prompt_transformed": bool(negative_prompt_transformed),
+            "positive_prompt_sanitized": bool(positive_prompt_sanitized),
+            "negative_prompt_sanitized": bool(negative_prompt_sanitized),
+            "positive_transcode_added": False,
+            "negative_transcode_added": False,
+            "original_positive_signature": original_positive_signature,
+            "active_positive_signature": active_positive_signature,
+            "original_negative_signature": original_negative_signature,
+            "active_negative_signature": active_negative_signature,
+            "active_positive_normalized_signature": active_positive_normalized_signature,
+            "active_negative_normalized_signature": active_negative_normalized_signature,
+            "active_control_allowed": False,
+            "control_mode": "SEMANTIC_DENSITY_MAP_ONLY" if prompt_transcode_mode_n != "REPORT_ONLY" else "REPORT_ONLY",
+            "semantic_density_context_map": semantic_density_context_map if isinstance(semantic_density_context_map, dict) else {},
+            "model_freedom_policy": "The model still receives one clean text-conditioning route; Singularity maps the Strategy outside prompt prose.",
+        }
+        packet.setdefault("metadata", {})["prompt_strategy_transcode_apply"] = transcode_apply_record
+        execution_records.append(transcode_apply_record)
+        segment_strategy_carrier_context = {
+            "prompt_source": "launch_time_sanitized_raw" if positive_prompt_sanitized else "launch_time_raw",
+            "prompt_transcode_mode": prompt_transcode_mode_n,
+            "launch_raw_positive_signature": original_positive_signature,
+            "launch_raw_negative_signature": original_negative_signature,
+            "launch_raw_positive_normalized_signature": _prompt_normalized_text_signature(original_positive_text),
+            "launch_raw_negative_normalized_signature": _prompt_normalized_text_signature(original_negative_text),
+            "launch_active_positive_signature": active_positive_signature,
+            "launch_active_negative_signature": active_negative_signature,
+            "launch_active_positive_normalized_signature": active_positive_normalized_signature,
+            "launch_active_negative_normalized_signature": active_negative_normalized_signature,
+            "current_active_positive_signature": active_positive_signature,
+            "current_active_negative_signature": active_negative_signature,
+            "current_active_positive_normalized_signature": active_positive_normalized_signature,
+            "current_active_negative_normalized_signature": active_negative_normalized_signature,
+            "current_positive_prompt_transformed": bool(positive_prompt_transformed),
+            "current_negative_prompt_transformed": bool(negative_prompt_transformed),
+            "current_positive_prompt_sanitized": bool(positive_prompt_sanitized),
+            "current_negative_prompt_sanitized": bool(negative_prompt_sanitized),
+            "launch_prompt_transcode_mode": prompt_transcode_mode_n,
+            "last_runtime_prompt_update_applies_to_segment": None,
+        }
+
+        def _prompt_text_signature(text):
+            return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+        def _normalize_prompt_mode_for_runtime(value):
+            raw = str(value or prompt_transcode_mode_n or "REPORT_ONLY").strip()
+            return prompt_transcode_mode_aliases.get(raw.upper(), prompt_transcode_mode_n)
+
+        def _transform_prompt_pair_for_runtime(raw_positive, raw_negative, mode_value, applies_to_segment, source):
+            mode_n = _normalize_prompt_mode_for_runtime(mode_value)
+            raw_positive = str(raw_positive or "")
+            raw_negative = str(raw_negative or "")
+            local_plan = dict(cascade_execution_plan)
+            local_plan["runtime_prompt_applies_to_segment"] = int(applies_to_segment)
+            local_plan["runtime_prompt_source"] = str(source or "node_widgets_at_continue_click")
+            local_packet = build_prompt_strategy_packet(
+                positive_prompt=raw_positive,
+                negative_prompt=raw_negative,
+                source_image_file=source_image_file,
+                cascade_execution_plan=local_plan,
+                math_controls={
+                    "math_control_mode": getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
+                    "high_delta_strength": getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
+                    "low_delta_strength": getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+                    "sampler_trace_mode": getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"),
+                    "sampler_trace_max_steps": getattr(self, "_event_sampler_trace", {}).get("max_steps", 64),
+                    "prompt_transcode_mode": mode_n,
+                },
+            )
+            local_transcode = local_packet.get("model_language_transcode", {}) if isinstance(local_packet, dict) else {}
+            local_idempotence = local_packet.get("prompt_idempotence", {}) if isinstance(local_packet, dict) else {}
+
+            def runtime_sanitize_layer(base_text, clean_text, idempotence_action):
+                base_text = str(base_text or "")
+                clean_text = str(clean_text or "").strip()
+                if str(idempotence_action or "") != "stripped_generated_strategy_tail":
+                    return base_text, False
+                if not clean_text:
+                    return base_text, False
+                if clean_text == base_text.strip():
+                    return base_text, False
+                return clean_text, True
+
+            active_positive = raw_positive
+            active_negative = raw_negative
+            positive_transformed = False
+            negative_transformed = False
+            positive_sanitized = False
+            negative_sanitized = False
+            if isinstance(local_idempotence, dict):
+                active_positive, positive_sanitized = runtime_sanitize_layer(
+                    raw_positive,
+                    local_transcode.get("transformed_positive_prompt", "") if isinstance(local_transcode, dict) else "",
+                    local_idempotence.get("idempotence_action", ""),
+                )
+            local_density_map = (
+                local_packet.get("semantic_density_context_map", {})
+                if isinstance(local_packet, dict)
+                else {}
+            )
+
+            return active_positive, active_negative, {
+                "prompt_transcode_mode": mode_n,
+                "positive_prompt_transformed": bool(positive_transformed),
+                "negative_prompt_transformed": bool(negative_transformed),
+                "positive_prompt_sanitized": bool(positive_sanitized),
+                "negative_prompt_sanitized": bool(negative_sanitized),
+                "prompt_purity_lock": True,
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "control_mode": "SEMANTIC_DENSITY_MAP_ONLY" if mode_n != "REPORT_ONLY" else "REPORT_ONLY",
+                "raw_positive_signature": _prompt_text_signature(raw_positive),
+                "raw_negative_signature": _prompt_text_signature(raw_negative),
+                "active_positive_signature": _prompt_text_signature(active_positive),
+                "active_negative_signature": _prompt_text_signature(active_negative),
+                "existing_strategy_transform_detected": bool(local_idempotence.get("existing_strategy_transform_detected", False)) if isinstance(local_idempotence, dict) else False,
+                "prompt_idempotence_action": local_idempotence.get("idempotence_action", "") if isinstance(local_idempotence, dict) else "",
+                "strategy_transform_stripped_character_count": local_idempotence.get("stripped_character_count", 0) if isinstance(local_idempotence, dict) else 0,
+                "semantic_density_context_map": local_density_map if isinstance(local_density_map, dict) else {},
+                "object_relation_ontology_status": (
+                    local_packet.get("object_relation_ontology", {}).get("status", "")
+                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_relation_ontology", {}), dict)
+                    else ""
+                ),
+                "object_topology_status": (
+                    local_packet.get("object_topology_map", {}).get("status", "")
+                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
+                    else ""
+                ),
+                "contact_depth_axis_recommended": (
+                    bool(local_packet.get("object_topology_map", {}).get("contact_depth_axis_recommended", False))
+                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
+                    else False
+                ),
+                "contact_depth_axis_hint": (
+                    local_packet.get("object_topology_map", {}).get("contact_depth_axis_hint", "")
+                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
+                    else ""
+                ),
+            }
+
+        def _apply_runtime_prompt_update(prompt_update, pause_segment_index, applies_to_segment):
+            nonlocal positive_prompt, negative_prompt
+            if not isinstance(prompt_update, dict) or not prompt_update:
+                execution_records.append({
+                    "stage": "EventCascadePromptRuntimeUpdate",
+                    "status": "no_prompt_payload",
+                    "pause_segment_index": int(pause_segment_index),
+                    "applies_to_segment": int(applies_to_segment),
+                    "formula": "No runtime prompt update was sent; the next cascade reuses the current StrategyCandidate text.",
+                })
+                return
+
+            old_positive_signature = _prompt_text_signature(positive_prompt)
+            old_negative_signature = _prompt_text_signature(negative_prompt)
+            old_positive_normalized_signature = _prompt_normalized_text_signature(positive_prompt)
+            old_negative_normalized_signature = _prompt_normalized_text_signature(negative_prompt)
+            raw_positive = str(prompt_update.get("positive_prompt", ""))
+            raw_negative = str(prompt_update.get("negative_prompt", ""))
+            positive_prompt_present = bool(prompt_update.get("positive_prompt_present", True))
+            negative_prompt_present = bool(prompt_update.get("negative_prompt_present", True))
+            mode_value = prompt_update.get("prompt_transcode_mode", prompt_transcode_mode_n)
+            source = prompt_update.get("source", "node_widgets_at_continue_click")
+            mode_n = _normalize_prompt_mode_for_runtime(mode_value)
+            raw_positive_signature = _prompt_text_signature(raw_positive)
+            raw_negative_signature = _prompt_text_signature(raw_negative)
+            raw_positive_normalized_signature = _prompt_normalized_text_signature(raw_positive)
+            raw_negative_normalized_signature = _prompt_normalized_text_signature(raw_negative)
+
+            def _canonical_prompt_text(text):
+                return " ".join(str(text or "").split())
+
+            def _stored_prompt_signature_matches(raw_sig, raw_norm_sig, signature_key, normalized_key):
+                stored_signature = str(segment_strategy_carrier_context.get(signature_key) or "")
+                stored_normalized = str(segment_strategy_carrier_context.get(normalized_key) or "")
+                return bool(
+                    (stored_signature and raw_sig == stored_signature)
+                    or (stored_normalized and raw_norm_sig == stored_normalized)
+                )
+
+            def _stored_prompt_pair_matches(positive_signature_key, positive_normalized_key, negative_signature_key, negative_normalized_key):
+                return bool(
+                    _stored_prompt_signature_matches(
+                        raw_positive_signature,
+                        raw_positive_normalized_signature,
+                        positive_signature_key,
+                        positive_normalized_key,
+                    )
+                    and _stored_prompt_signature_matches(
+                        raw_negative_signature,
+                        raw_negative_normalized_signature,
+                        negative_signature_key,
+                        negative_normalized_key,
+                    )
+                )
+
+            launch_positive_matches = (
+                raw_positive_signature == str(segment_strategy_carrier_context.get("launch_raw_positive_signature") or "")
+                or raw_positive_normalized_signature == str(segment_strategy_carrier_context.get("launch_raw_positive_normalized_signature") or "")
+            )
+            launch_negative_matches = (
+                raw_negative_signature == str(segment_strategy_carrier_context.get("launch_raw_negative_signature") or "")
+                or raw_negative_normalized_signature == str(segment_strategy_carrier_context.get("launch_raw_negative_normalized_signature") or "")
+            )
+            launch_raw_matches = bool(launch_positive_matches and launch_negative_matches)
+            launch_active_matches = _stored_prompt_pair_matches(
+                "launch_active_positive_signature",
+                "launch_active_positive_normalized_signature",
+                "launch_active_negative_signature",
+                "launch_active_negative_normalized_signature",
+            )
+            last_runtime_raw_matches = _stored_prompt_pair_matches(
+                "last_runtime_raw_positive_signature",
+                "last_runtime_raw_positive_normalized_signature",
+                "last_runtime_raw_negative_signature",
+                "last_runtime_raw_negative_normalized_signature",
+            )
+            last_runtime_active_matches = _stored_prompt_pair_matches(
+                "last_runtime_active_positive_signature",
+                "last_runtime_active_positive_normalized_signature",
+                "last_runtime_active_negative_signature",
+                "last_runtime_active_negative_normalized_signature",
+            )
+            stored_current_active_matches = _stored_prompt_pair_matches(
+                "current_active_positive_signature",
+                "current_active_positive_normalized_signature",
+                "current_active_negative_signature",
+                "current_active_negative_normalized_signature",
+            )
+            current_active_matches = bool(
+                (
+                    raw_positive_signature == old_positive_signature
+                    or raw_positive_normalized_signature == old_positive_normalized_signature
+                )
+                and (
+                    raw_negative_signature == old_negative_signature
+                    or raw_negative_normalized_signature == old_negative_normalized_signature
+                )
+            )
+            positive_identity_matches = bool(
+                launch_positive_matches
+                or _stored_prompt_signature_matches(
+                    raw_positive_signature,
+                    raw_positive_normalized_signature,
+                    "launch_active_positive_signature",
+                    "launch_active_positive_normalized_signature",
+                )
+                or _stored_prompt_signature_matches(
+                    raw_positive_signature,
+                    raw_positive_normalized_signature,
+                    "current_active_positive_signature",
+                    "current_active_positive_normalized_signature",
+                )
+                or raw_positive_signature == old_positive_signature
+                or raw_positive_normalized_signature == old_positive_normalized_signature
+            )
+            negative_identity_matches = bool(
+                launch_negative_matches
+                or _stored_prompt_signature_matches(
+                    raw_negative_signature,
+                    raw_negative_normalized_signature,
+                    "launch_active_negative_signature",
+                    "launch_active_negative_normalized_signature",
+                )
+                or _stored_prompt_signature_matches(
+                    raw_negative_signature,
+                    raw_negative_normalized_signature,
+                    "current_active_negative_signature",
+                    "current_active_negative_normalized_signature",
+                )
+                or raw_negative_signature == old_negative_signature
+                or raw_negative_normalized_signature == old_negative_normalized_signature
+            )
+            raw_negative_canonical = _canonical_prompt_text(raw_negative)
+            old_negative_canonical = _canonical_prompt_text(negative_prompt)
+            launch_negative_canonical = _canonical_prompt_text(original_negative_text)
+            negative_payload_missing = not negative_prompt_present or raw_negative_canonical == ""
+            negative_payload_truncated = bool(
+                raw_negative_canonical
+                and len(raw_negative_canonical) >= 64
+                and not negative_identity_matches
+                and (
+                    raw_negative_canonical in old_negative_canonical
+                    or raw_negative_canonical in launch_negative_canonical
+                    or old_negative_canonical in raw_negative_canonical
+                    or launch_negative_canonical in raw_negative_canonical
+                )
+            )
+            raw_positive_canonical = _canonical_prompt_text(raw_positive)
+            old_positive_canonical = _canonical_prompt_text(positive_prompt)
+            launch_positive_canonical = _canonical_prompt_text(original_positive_text)
+            positive_payload_missing = not positive_prompt_present or raw_positive_canonical == ""
+            positive_payload_truncated = bool(
+                raw_positive_canonical
+                and len(raw_positive_canonical) >= 64
+                and not positive_identity_matches
+                and (
+                    raw_positive_canonical in old_positive_canonical
+                    or raw_positive_canonical in launch_positive_canonical
+                    or old_positive_canonical in raw_positive_canonical
+                    or launch_positive_canonical in raw_positive_canonical
+                )
+            )
+            mode_matches = mode_n == str(segment_strategy_carrier_context.get("prompt_transcode_mode") or prompt_transcode_mode_n)
+            positive_payload_transforms_to_current_active = False
+            positive_payload_transform_preview_signature = ""
+            positive_payload_transform_preview_normalized_signature = ""
+            if mode_matches and not positive_identity_matches and raw_positive.strip():
+                try:
+                    preview_positive, _preview_negative, _preview_summary = _transform_prompt_pair_for_runtime(
+                        raw_positive,
+                        raw_negative,
+                        mode_value,
+                        applies_to_segment,
+                        source,
+                    )
+                    positive_payload_transform_preview_signature = _prompt_text_signature(preview_positive)
+                    positive_payload_transform_preview_normalized_signature = _prompt_normalized_text_signature(preview_positive)
+                    positive_payload_transforms_to_current_active = bool(
+                        positive_payload_transform_preview_signature == old_positive_signature
+                        or positive_payload_transform_preview_normalized_signature == old_positive_normalized_signature
+                        or _stored_prompt_signature_matches(
+                            positive_payload_transform_preview_signature,
+                            positive_payload_transform_preview_normalized_signature,
+                            "current_active_positive_signature",
+                            "current_active_positive_normalized_signature",
+                        )
+                        or _stored_prompt_signature_matches(
+                            positive_payload_transform_preview_signature,
+                            positive_payload_transform_preview_normalized_signature,
+                            "launch_active_positive_signature",
+                            "launch_active_positive_normalized_signature",
+                        )
+                    )
+                except Exception:
+                    positive_payload_transforms_to_current_active = False
+                    positive_payload_transform_preview_signature = ""
+                    positive_payload_transform_preview_normalized_signature = ""
+            positive_strategy_identity_matches = bool(
+                positive_identity_matches
+                or positive_payload_transforms_to_current_active
+                or (
+                    mode_matches
+                    and not positive_identity_matches
+                    and (positive_payload_missing or positive_payload_truncated)
+                )
+            )
+            negative_payload_reuse_previous_active = bool(
+                mode_n == str(segment_strategy_carrier_context.get("prompt_transcode_mode") or prompt_transcode_mode_n)
+                and positive_strategy_identity_matches
+                and not negative_identity_matches
+                and (negative_payload_missing or negative_payload_truncated)
+            )
+            positive_payload_reuse_previous_active = bool(
+                mode_n == str(segment_strategy_carrier_context.get("prompt_transcode_mode") or prompt_transcode_mode_n)
+                and not positive_identity_matches
+                and (positive_payload_missing or positive_payload_truncated)
+            )
+            negative_strategy_identity_matches = bool(
+                negative_identity_matches
+                or negative_payload_reuse_previous_active
+            )
+            same_prompt_match_basis = ""
+            if mode_matches:
+                for candidate_basis, candidate_matches in (
+                    ("launch_raw", launch_raw_matches),
+                    ("last_runtime_raw", last_runtime_raw_matches),
+                    ("current_active", current_active_matches),
+                    ("stored_current_active", stored_current_active_matches),
+                    ("launch_active", launch_active_matches),
+                    ("last_runtime_active", last_runtime_active_matches),
+                ):
+                    if candidate_matches:
+                        same_prompt_match_basis = candidate_basis
+                        break
+                if (
+                    not same_prompt_match_basis
+                    and positive_payload_reuse_previous_active
+                    and negative_strategy_identity_matches
+                ):
+                    if positive_payload_missing:
+                        same_prompt_match_basis = "positive_payload_missing_reuse"
+                    elif negative_payload_truncated:
+                        same_prompt_match_basis = "prompt_payload_truncated_reuse"
+                    else:
+                        same_prompt_match_basis = "positive_payload_truncated_reuse"
+                if not same_prompt_match_basis and negative_payload_reuse_previous_active:
+                    same_prompt_match_basis = (
+                        "negative_payload_missing_reuse"
+                        if negative_payload_missing
+                        else "negative_payload_truncated_reuse"
+                    )
+            same_prompt = bool(same_prompt_match_basis)
+
+            if same_prompt:
+                transform_summary = {
+                    "prompt_transcode_mode": mode_n,
+                    "positive_prompt_transformed": bool(segment_strategy_carrier_context.get("current_positive_prompt_transformed", positive_prompt_transformed)),
+                    "negative_prompt_transformed": bool(segment_strategy_carrier_context.get("current_negative_prompt_transformed", negative_prompt_transformed)),
+                    "positive_prompt_sanitized": bool(segment_strategy_carrier_context.get("current_positive_prompt_sanitized", positive_prompt_sanitized)),
+                    "negative_prompt_sanitized": bool(segment_strategy_carrier_context.get("current_negative_prompt_sanitized", negative_prompt_sanitized)),
+                    "prompt_purity_lock": True,
+                    "prompt_text_injection_allowed": False,
+                    "semantic_math_in_prompt_allowed": False,
+                    "control_mode": "SEMANTIC_DENSITY_MAP_ONLY" if mode_n != "REPORT_ONLY" else "REPORT_ONLY",
+                    "raw_positive_signature": raw_positive_signature,
+                    "raw_negative_signature": raw_negative_signature,
+                    "raw_positive_normalized_signature": raw_positive_normalized_signature,
+                    "raw_negative_normalized_signature": raw_negative_normalized_signature,
+                    "active_positive_signature": old_positive_signature,
+                    "active_negative_signature": old_negative_signature,
+                    "existing_strategy_transform_detected": False,
+                    "prompt_idempotence_action": "reuse_existing_active_strategy_carrier",
+                    "strategy_transform_stripped_character_count": 0,
+                    "object_relation_ontology_status": object_relation_ontology.get("status", "") if isinstance(object_relation_ontology, dict) else "",
+                    "object_topology_status": object_topology_map.get("status", "") if isinstance(object_topology_map, dict) else "",
+                    "contact_depth_axis_recommended": bool(object_topology_map.get("contact_depth_axis_recommended", False)) if isinstance(object_topology_map, dict) else False,
+                    "contact_depth_axis_hint": object_topology_map.get("contact_depth_axis_hint", "") if isinstance(object_topology_map, dict) else "",
+                    "prompt_continuity_reused": True,
+                    "prompt_continuity_policy": "same_prompt_identity_reuses_current_active_strategy_carrier",
+                    "same_prompt_match_basis": same_prompt_match_basis,
+                    "same_prompt_mode_matches": bool(mode_matches),
+                    "launch_raw_matches": bool(launch_raw_matches),
+                    "launch_active_matches": bool(launch_active_matches),
+                    "last_runtime_raw_matches": bool(last_runtime_raw_matches),
+                    "last_runtime_active_matches": bool(last_runtime_active_matches),
+                    "current_active_matches": bool(current_active_matches),
+                    "stored_current_active_matches": bool(stored_current_active_matches),
+                    "positive_identity_matches": bool(positive_identity_matches),
+                    "positive_payload_transforms_to_current_active": bool(positive_payload_transforms_to_current_active),
+                    "positive_strategy_identity_matches": bool(positive_strategy_identity_matches),
+                    "positive_payload_transform_preview_signature": positive_payload_transform_preview_signature,
+                    "positive_payload_transform_preview_normalized_signature": positive_payload_transform_preview_normalized_signature,
+                    "negative_identity_matches": bool(negative_identity_matches),
+                    "positive_prompt_present_in_continue_payload": bool(positive_prompt_present),
+                    "negative_prompt_present_in_continue_payload": bool(negative_prompt_present),
+                    "positive_payload_missing": bool(positive_payload_missing),
+                    "positive_payload_truncated": bool(positive_payload_truncated),
+                    "positive_prompt_payload_reused_previous_active": bool(positive_payload_reuse_previous_active),
+                    "positive_prompt_payload_mismatch_policy": (
+                        "reuse_previous_active_when_positive_payload_is_missing_or_truncated_and_negative_strategy_matches"
+                        if positive_payload_reuse_previous_active
+                        else "none"
+                    ),
+                    "negative_payload_missing": bool(negative_payload_missing),
+                    "negative_payload_truncated": bool(negative_payload_truncated),
+                    "negative_prompt_payload_reused_previous_active": bool(negative_payload_reuse_previous_active),
+                    "negative_prompt_payload_mismatch_policy": (
+                        "reuse_previous_active_when_positive_identity_matches_and_negative_payload_is_missing_or_truncated"
+                        if negative_payload_reuse_previous_active
+                        else "none"
+                    ),
+                }
+                next_positive = positive_prompt
+                next_negative = negative_prompt
+                route_policy = "same_prompt_identity_reuse_active_strategy_carrier"
+                update_status = "reused_active_strategy"
+                update_formula = (
+                    "Continue sent the same prompt identity; the next segment reuses the current clean StrategyCandidate "
+                    "and keeps semantic math outside the CLIP prompt text route."
+                )
+            else:
+                next_positive, next_negative, transform_summary = _transform_prompt_pair_for_runtime(
+                    raw_positive,
+                    raw_negative,
+                    mode_value,
+                    applies_to_segment,
+                    source,
+                )
+                transform_summary["prompt_continuity_reused"] = False
+                transform_summary["prompt_continuity_policy"] = "raw_prompt_changed_runtime_strategy_update"
+                transform_summary["raw_positive_normalized_signature"] = raw_positive_normalized_signature
+                transform_summary["raw_negative_normalized_signature"] = raw_negative_normalized_signature
+                transform_summary["same_prompt_match_basis"] = "changed"
+                transform_summary["same_prompt_mode_matches"] = bool(mode_matches)
+                transform_summary["launch_raw_matches"] = bool(launch_raw_matches)
+                transform_summary["launch_active_matches"] = bool(launch_active_matches)
+                transform_summary["last_runtime_raw_matches"] = bool(last_runtime_raw_matches)
+                transform_summary["last_runtime_active_matches"] = bool(last_runtime_active_matches)
+                transform_summary["current_active_matches"] = bool(current_active_matches)
+                transform_summary["stored_current_active_matches"] = bool(stored_current_active_matches)
+                transform_summary["positive_identity_matches"] = bool(positive_identity_matches)
+                transform_summary["positive_payload_transforms_to_current_active"] = bool(positive_payload_transforms_to_current_active)
+                transform_summary["positive_strategy_identity_matches"] = bool(positive_strategy_identity_matches)
+                transform_summary["positive_payload_transform_preview_signature"] = positive_payload_transform_preview_signature
+                transform_summary["positive_payload_transform_preview_normalized_signature"] = positive_payload_transform_preview_normalized_signature
+                transform_summary["negative_identity_matches"] = bool(negative_identity_matches)
+                transform_summary["positive_prompt_present_in_continue_payload"] = bool(positive_prompt_present)
+                transform_summary["negative_prompt_present_in_continue_payload"] = bool(negative_prompt_present)
+                transform_summary["positive_payload_missing"] = bool(positive_payload_missing)
+                transform_summary["positive_payload_truncated"] = bool(positive_payload_truncated)
+                transform_summary["positive_prompt_payload_reused_previous_active"] = False
+                transform_summary["positive_prompt_payload_mismatch_policy"] = "changed_runtime_strategy_update"
+                transform_summary["negative_payload_missing"] = bool(negative_payload_missing)
+                transform_summary["negative_payload_truncated"] = bool(negative_payload_truncated)
+                transform_summary["negative_prompt_payload_reused_previous_active"] = False
+                transform_summary["negative_prompt_payload_mismatch_policy"] = "changed_runtime_strategy_update"
+                route_policy = "runtime_prompt_payload_at_continue_click"
+                update_status = "applied"
+                update_formula = "Continue carried a changed per-cascade prompt Strategy; the next segment is encoded from the clean local prompt while semantic math remains a density/context map."
+
+            positive_prompt = next_positive
+            negative_prompt = next_negative
+            segment_strategy_carrier_context["prompt_source"] = (
+                "continue_same_prompt_reuse_active_strategy" if same_prompt else "continue_widget_payload"
+            )
+            segment_strategy_carrier_context["prompt_transcode_mode"] = transform_summary.get("prompt_transcode_mode", mode_value)
+            segment_strategy_carrier_context["last_runtime_prompt_update_applies_to_segment"] = int(applies_to_segment)
+            segment_strategy_carrier_context["last_runtime_prompt_update_active_positive_signature"] = transform_summary.get("active_positive_signature", "")
+            segment_strategy_carrier_context["last_runtime_prompt_update_active_negative_signature"] = transform_summary.get("active_negative_signature", "")
+            segment_strategy_carrier_context["last_runtime_raw_positive_signature"] = raw_positive_signature
+            segment_strategy_carrier_context["last_runtime_raw_negative_signature"] = raw_negative_signature
+            segment_strategy_carrier_context["last_runtime_raw_positive_normalized_signature"] = raw_positive_normalized_signature
+            segment_strategy_carrier_context["last_runtime_raw_negative_normalized_signature"] = raw_negative_normalized_signature
+            segment_strategy_carrier_context["last_runtime_active_positive_signature"] = transform_summary.get("active_positive_signature", "")
+            segment_strategy_carrier_context["last_runtime_active_negative_signature"] = transform_summary.get("active_negative_signature", "")
+            segment_strategy_carrier_context["last_runtime_active_positive_normalized_signature"] = _prompt_normalized_text_signature(next_positive)
+            segment_strategy_carrier_context["last_runtime_active_negative_normalized_signature"] = _prompt_normalized_text_signature(next_negative)
+            segment_strategy_carrier_context["current_active_positive_signature"] = transform_summary.get("active_positive_signature", "")
+            segment_strategy_carrier_context["current_active_negative_signature"] = transform_summary.get("active_negative_signature", "")
+            segment_strategy_carrier_context["current_active_positive_normalized_signature"] = _prompt_normalized_text_signature(next_positive)
+            segment_strategy_carrier_context["current_active_negative_normalized_signature"] = _prompt_normalized_text_signature(next_negative)
+            segment_strategy_carrier_context["current_positive_prompt_transformed"] = bool(transform_summary.get("positive_prompt_transformed", False))
+            segment_strategy_carrier_context["current_negative_prompt_transformed"] = bool(transform_summary.get("negative_prompt_transformed", False))
+            segment_strategy_carrier_context["current_positive_prompt_sanitized"] = bool(transform_summary.get("positive_prompt_sanitized", False))
+            segment_strategy_carrier_context["current_negative_prompt_sanitized"] = bool(transform_summary.get("negative_prompt_sanitized", False))
+
+            update_record = {
+                "stage": "EventCascadePromptRuntimeUpdate",
+                "status": update_status,
+                "pause_segment_index": int(pause_segment_index),
+                "applies_to_segment": int(applies_to_segment),
+                "payload_version": str(prompt_update.get("payload_version", "")),
+                "source": str(source),
+                "formula": update_formula,
+                "route_policy": route_policy,
+                "old_active_positive_signature": old_positive_signature,
+                "old_active_negative_signature": old_negative_signature,
+                **transform_summary,
+                "positive_prompt_changed_from_previous_active": bool(transform_summary.get("active_positive_signature") != old_positive_signature),
+                "negative_prompt_changed_from_previous_active": bool(transform_summary.get("active_negative_signature") != old_negative_signature),
+                "positive_prompt_length": len(str(next_positive or "")),
+                "negative_prompt_length": len(str(next_negative or "")),
+                "active_control_allowed": True,
+                "control_mode": "CASCADE_LOCAL_PROMPT_STRATEGY",
+            }
+            packet.setdefault("metadata", {})["last_runtime_prompt_update"] = update_record
+            execution_records.append(update_record)
 
         conflict_ids = []
         relation_ids = []
@@ -2135,7 +2985,7 @@ class SingularityExecutionMixin:
             "preferred_image_dir": r"D:\AI NSFW\PIC",
             "preview_policy": "source preview only; result last-frame only when continuation is enabled",
             "event_strategy_note": "optional future control field; currently stored in Event Program report, not required for animation",
-            "cascade_prompt_schedule_policy": "If prompt markers are present, each cascade segment receives its own StrategyCandidate text; otherwise the single prompt is reused unchanged.",
+            "cascade_prompt_schedule_policy": "If prompt markers are present, each cascade segment can receive its own StrategyCandidate text; during a pause, Continue can also send current prompt widgets as the next segment Strategy.",
             "execution_mode": execution_mode,
             "branch_mode_requested": branch_mode,
             "branch_mode_active": active_branch_mode,
@@ -2241,8 +3091,29 @@ class SingularityExecutionMixin:
 
                 segment_positive_prompt = self._cascade_prompt_for_segment(positive_prompt, 1, execution_records, kind="positive")
                 segment_negative_prompt = self._cascade_prompt_for_segment(negative_prompt, 1, execution_records, kind="negative")
-                positive = self._encode_text(clip, segment_positive_prompt, execution_records, label='TextEncodePositive')
-                negative = self._encode_text(clip, segment_negative_prompt, execution_records, label='TextEncodeNegative')
+                self._record_segment_strategy_carrier(
+                    execution_records,
+                    segment_index=1,
+                    positive_prompt=segment_positive_prompt,
+                    negative_prompt=segment_negative_prompt,
+                    context=segment_strategy_carrier_context,
+                )
+                positive = self._encode_text_with_strategy_cache(
+                    clip,
+                    segment_positive_prompt,
+                    execution_records,
+                    label='TextEncodePositive',
+                    context=segment_strategy_carrier_context,
+                    polarity="positive",
+                )
+                negative = self._encode_text_with_strategy_cache(
+                    clip,
+                    segment_negative_prompt,
+                    execution_records,
+                    label='TextEncodeNegative',
+                    context=segment_strategy_carrier_context,
+                    polarity="negative",
+                )
                 execution_records.append({"stage": "EventTextEncode", "status": "ok", "formula": "prompt + CLIP behavior = S_text = conditioning"})
                 self._stage_delay(stage_delay_seconds, execution_records, "after_text_encode")
 
@@ -2563,7 +3434,7 @@ class SingularityExecutionMixin:
 
                 # Handle pause at cascade 1
                 if pause_after_cascade_1 and start_segment == 2:
-                    resume_frame_index, _pause_frames = self._wait_for_cascade_continue(
+                    resume_frame_index, _pause_frames, prompt_update = self._wait_for_cascade_continue(
                         pause_node_id,
                         generated_frames,
                         1,
@@ -2581,6 +3452,7 @@ class SingularityExecutionMixin:
 
                     segment_batches = [generated_frames]
                     current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                    _apply_runtime_prompt_update(prompt_update, 1, start_segment)
                     pause_after_cascade_1 = False
                     self._pause_flag_triggered = False
                     if requested_cascade_count < start_segment:
@@ -2598,7 +3470,7 @@ class SingularityExecutionMixin:
                         "resume_frame_index": int(resume_frame_index),
                         "latent_temporal_target_t": int(target_t),
                         "start_segment": start_segment,
-                        "formula": "same-run pause selected a MirrorCut frame and continued the cascade without queueing a new prompt",
+                        "formula": "same-run pause selected a MirrorCut frame and can carry a fresh prompt Strategy for the next cascade segment",
                     })
                     print(f"[RAW] PAUSE AFTER CASCADE 1 CONTINUED in same prompt from frame {resume_frame_index}.")
 
@@ -2648,6 +3520,7 @@ class SingularityExecutionMixin:
                             records=execution_records,
 
                             barrier_records=branch_barrier_records,
+                            strategy_carrier_context=segment_strategy_carrier_context,
                         )
                         if segment_index > 1:
                             next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
@@ -2665,7 +3538,7 @@ class SingularityExecutionMixin:
                                 execution_records,
                                 segment_index,
                             )
-                            resume_frame_index, _pause_frames = self._wait_for_cascade_continue(
+                            resume_frame_index, _pause_frames, prompt_update = self._wait_for_cascade_continue(
                                 pause_node_id,
                                 next_frames,
                                 segment_index,
@@ -2682,6 +3555,7 @@ class SingularityExecutionMixin:
                             )
                             segment_batches[-1] = next_frames
                             current_cascade_image = self._last_frame_image(next_frames, width, height)
+                            _apply_runtime_prompt_update(prompt_update, segment_index, int(segment_index) + 1)
                             self._pause_flag_triggered = False
                             execution_records.append({
                                 "stage": "SingularityCascadeResume",
@@ -2691,12 +3565,18 @@ class SingularityExecutionMixin:
                                 "resume_frame_index": int(resume_frame_index),
                                 "latent_temporal_target_t": int(target_t),
                                 "start_segment": int(segment_index) + 1,
-                                "formula": "same-run pause selected a MirrorCut frame, trimmed the decoded frame batch, and continued the cascade without saving an intermediate video",
+                                "formula": "same-run pause selected a MirrorCut frame, trimmed the decoded frame batch, and continued with an optional local prompt Strategy for the next segment",
                             })
                             print(f"[RAW] PAUSE AFTER CASCADE {segment_index} CONTINUED in same prompt from frame {resume_frame_index}.")
 
                     generated_frames = self._concat_frame_batches(segment_batches, execution_records)
                     self._frame_motion_math(generated_frames, execution_records, "EventMath_concatenated_frame_motion")
+                    self._cascade_seam_motion_review(
+                        segment_batches,
+                        generated_frames,
+                        execution_records,
+                        frames_per_cascade=int(frames),
+                    )
                     completed_segments = len(segment_batches)
                     execution_records.append({
                         "stage": "SingularityCascadeEnd",
@@ -2861,7 +3741,12 @@ class SingularityExecutionMixin:
         if continuation_scores:
             system_best_for_continuation = continuation_scores.index(max(continuation_scores))
 
-        manual_sel = int(selected_tail_index) if selected_tail_index is not None else -1
+        try:
+            manual_sel = int(float(str(selected_tail_index).strip())) if selected_tail_index is not None else -1
+        except Exception:
+            manual_sel = -1
+        if manual_sel not in (-1, 0, 1, 2):
+            manual_sel = -1
         if use_formula_recommendation:
             initial_selected_index = formula_best_index
         else:

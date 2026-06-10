@@ -102,9 +102,75 @@ from .utils.tensor_stats import compute_tensor_delta, extract_latent_samples, sa
 from .utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from .adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r62"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R62 Pause UI Recovery Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r62"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
+EVENT_HORIZON_BODY_VERSION = "0.1-r91"
+
+
+def _event_horizon_release_label(version):
+    match = re.search(r"r(\d+)", str(version or ""), flags=re.IGNORECASE)
+    return f"R{match.group(1)}" if match else ""
+
+
+EVENT_HORIZON_RELEASE_LABEL = _event_horizon_release_label(EVENT_HORIZON_RUNTIME_VERSION)
+EVENT_HORIZON_NODE_DISPLAY_NAME = (
+    f"Singularity {EVENT_HORIZON_RELEASE_LABEL}"
+    if EVENT_HORIZON_RELEASE_LABEL
+    else "Singularity"
+)
+
+_PROMPT_TRANSCODE_MODE_OPTIONS = [
+    "REPORT_ONLY",
+    "TRANSFORM_PROMPT",
+]
+_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS = _PROMPT_TRANSCODE_MODE_OPTIONS
+_PROMPT_TRANSCODE_MODE_ALIASES = {
+    0: "REPORT_ONLY",
+    1: "TRANSFORM_PROMPT",
+    2: "TRANSFORM_PROMPT",
+    "0": "REPORT_ONLY",
+    "1": "TRANSFORM_PROMPT",
+    "2": "TRANSFORM_PROMPT",
+    "REPORT_ONLY": "REPORT_ONLY",
+    "TRANSFORM_PROMPT": "TRANSFORM_PROMPT",
+    "TRANSFORM_STRUCTURED_PROMPT": "TRANSFORM_PROMPT",
+    "APPEND_TRANSCODE": "TRANSFORM_PROMPT",
+    "APPEND_STRUCTURED_TRANSCODE": "TRANSFORM_PROMPT",
+    "report_only": "REPORT_ONLY",
+    "transform_prompt": "TRANSFORM_PROMPT",
+    "transform_structured_prompt": "TRANSFORM_PROMPT",
+    "append_transcode": "TRANSFORM_PROMPT",
+    "append_structured_transcode": "TRANSFORM_PROMPT",
+}
+
+
+def _normalize_prompt_transcode_mode_value(value, default="REPORT_ONLY"):
+    if value is None:
+        return str(default)
+    if value in _PROMPT_TRANSCODE_MODE_ALIASES:
+        return _PROMPT_TRANSCODE_MODE_ALIASES[value]
+    text = str(value).strip()
+    if text in _PROMPT_TRANSCODE_MODE_ALIASES:
+        return _PROMPT_TRANSCODE_MODE_ALIASES[text]
+    upper = text.upper()
+    if upper in _PROMPT_TRANSCODE_MODE_ALIASES:
+        return _PROMPT_TRANSCODE_MODE_ALIASES[upper]
+    return str(default)
+
+
+def _normalize_selected_tail_index_value(value, default=-1):
+    if value is None:
+        return int(default)
+    try:
+        text = str(value).strip()
+        if not text:
+            return int(default)
+        index = int(float(text))
+    except Exception:
+        return int(default)
+    if index in (-1, 0, 1, 2):
+        return index
+    return int(default)
 
 
 def _event_json_safe(value, depth=0):
@@ -2645,7 +2711,16 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 "secondary_end_step": ("INT", {"default": 4, "min": 0, "max": 10000}),
 
                 # Keep combo UX, but include lowercase legacy tokens so stale workflows do not hard-fail before normalization.
-                "math_control_mode": (["OBSERVE_ONLY", "LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "observe_only", "latent_delta_scale", "deep_step_delta_control"], {"default": "OBSERVE_ONLY"}),
+                "math_control_mode": ([
+                    "OBSERVE_ONLY",
+                    "LATENT_DELTA_SCALE",
+                    "STRATEGY_PRESSURE_WINDOW",
+                    "DEEP_STEP_DELTA_CONTROL",
+                    "observe_only",
+                    "latent_delta_scale",
+                    "strategy_pressure_window",
+                    "deep_step_delta_control",
+                ], {"default": "OBSERVE_ONLY"}),
                 "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
                 "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
 
@@ -2656,7 +2731,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 "decode_temporal_overlap": ("INT", {"default": 12, "min": 0, "max": 65535}),
 
                 "image_upscale_method": (["nearest-exact", "nearest", "bilinear", "area", "bicubic", "lanczos"], {"default": "nearest-exact"}),
-                "image_crop": (["disabled", "center"], {"default": "center"}),
+                "image_crop": (["wan_native", "disabled", "center"], {"default": "wan_native"}),
 
                 "save_video": ("BOOLEAN", {"default": True}),
                 "video_format": (["video/h264-mp4", "video/h265-mp4", "image/webp", "image/gif"], {"default": "video/h264-mp4"}),
@@ -2667,15 +2742,16 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
 
                 # Tail frame selection UI layer control (always manual green outline primary)
                 "use_formula_recommendation": ("BOOLEAN", {"default": False}),
+                "prompt_transcode_mode": (_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS, {"default": "REPORT_ONLY"}),
             },
             "optional": {
                 "secondary_model": ("MODEL",),
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
                 # Synced from Tail 3 bar clicks (green outline). Explicit param (no **kwargs).
-                # Placed in optional so adding it doesn't break existing workflows' widgets_values (old saves won't have the INT value).
-                # Default 0. The bar (not this widget) is the primary UI for manual choice.
-                "selected_tail_index": ("INT", {"default": 0, "min": 0, "max": 2, "step": 1}),
+                # Soft transport field: Comfy Desktop can shift stale workflow widget values into it.
+                # Runtime normalization clamps real JS choices to -1/0/1/2.
+                "selected_tail_index": ("STRING", {"default": "-1"}),
             },
             "hidden": {
                 "id": "UNIQUE_ID",
@@ -2687,6 +2763,13 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
     FUNCTION = "run"
     CATEGORY = "Singularity/Singularity"
     OUTPUT_NODE = True
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, prompt_transcode_mode=None):
+        # Comfy Desktop can preserve combo values as numeric indices in workflows.
+        # Keep validation open for this field only; runtime normalization records the exact fallback/alias.
+        _normalize_prompt_transcode_mode_value(prompt_transcode_mode)
+        return True
 
     @staticmethod
     def _append_input_adjustment(adjustments, field, original, normalized, reason):
@@ -2787,6 +2870,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         save_prefix,
         sampler_trace_mode,
         sampler_trace_max_steps,
+        prompt_transcode_mode="REPORT_ONLY",
     ):
         adjustments = []
         allowed_samplers, allowed_schedulers = self._get_ksampler_allowed_values()
@@ -2942,7 +3026,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         math_control_mode_n = clamp_enum(
             "math_control_mode",
             math_control_mode,
-            {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL"},
+            {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL"},
             "OBSERVE_ONLY",
             casefold=True,
         )
@@ -2985,7 +3069,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             {"nearest-exact", "nearest", "bilinear", "area", "bicubic", "lanczos"},
             "nearest-exact",
         )
-        image_crop_n = clamp_enum("image_crop", image_crop, {"disabled", "center"}, "center")
+        image_crop_n = clamp_enum("image_crop", image_crop, {"wan_native", "disabled", "center"}, "wan_native")
         video_format_n = clamp_enum(
             "video_format",
             video_format,
@@ -3000,6 +3084,15 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             casefold=True,
         )
         sampler_trace_max_steps_n = clamp_int("sampler_trace_max_steps", sampler_trace_max_steps, 64, 1, 65535)
+        prompt_transcode_mode_n = _normalize_prompt_transcode_mode_value(prompt_transcode_mode)
+        if str(prompt_transcode_mode) != prompt_transcode_mode_n:
+            self._append_input_adjustment(
+                adjustments,
+                "prompt_transcode_mode",
+                prompt_transcode_mode,
+                prompt_transcode_mode_n,
+                "combo_index_or_legacy_alias_normalized",
+            )
 
         save_prefix_n = self._sanitize_save_prefix_text(save_prefix)
         if save_prefix_n != str(save_prefix or "").strip():
@@ -3044,6 +3137,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "save_prefix": save_prefix_n,
             "sampler_trace_mode": sampler_trace_mode_n,
             "sampler_trace_max_steps": sampler_trace_max_steps_n,
+            "prompt_transcode_mode": prompt_transcode_mode_n,
             "branch_mode": "DUAL_HIGH_LOW" if dual_branch else "SINGLE",
             "cascade_mode": "SOLO_1" if cascade_count_n <= 1 else f"CASCADE_{cascade_count_n}",
         }
@@ -3112,10 +3206,15 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         image=None,
         mask=None,
         use_formula_recommendation=False,
+        prompt_transcode_mode="REPORT_ONLY",
         selected_tail_index=0,
         id=None,
     ):
         self._event_strategy_coupling = {"low_strength_multiplier": 1.0}
+        self._event_strategy_control_surface_plan_signature = ""
+        self._event_strategy_control_surface_plan_state = None
+        self._event_strategy_control_surface_last = None
+        self._event_strategy_pressure_window_last = None
         self._singularity_node_id = id
         normalization = self._normalize_clean_inputs(
             secondary_model=secondary_model,
@@ -3151,6 +3250,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             save_prefix=save_prefix,
             sampler_trace_mode=sampler_trace_mode,
             sampler_trace_max_steps=sampler_trace_max_steps,
+            prompt_transcode_mode=prompt_transcode_mode,
         )
         normalized = normalization.get("normalized", {})
         self._event_input_normalization = normalization
@@ -3178,11 +3278,13 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         decode_temporal_size = int(normalized.get("decode_temporal_size", 32))
         decode_temporal_overlap = int(normalized.get("decode_temporal_overlap", 12))
         image_upscale_method = str(normalized.get("image_upscale_method", "nearest-exact"))
-        image_crop = str(normalized.get("image_crop", "center"))
+        image_crop = str(normalized.get("image_crop", "wan_native"))
         video_format = str(normalized.get("video_format", "video/h264-mp4"))
         save_prefix = str(normalized.get("save_prefix", "Singularity"))
         sampler_trace_mode = str(normalized.get("sampler_trace_mode", "OFF"))
         sampler_trace_max_steps = int(normalized.get("sampler_trace_max_steps", 64))
+        prompt_transcode_mode = str(normalized.get("prompt_transcode_mode", "REPORT_ONLY"))
+        selected_tail_index_n = _normalize_selected_tail_index_value(selected_tail_index, default=-1)
         branch_mode = str(normalized.get("branch_mode", "SINGLE"))
         cascade_mode = str(normalized.get("cascade_mode", "SOLO_1"))
 
@@ -3214,12 +3316,18 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "math_control_mode": str(math_control_mode or "OBSERVE_ONLY"),
             "high_delta_strength": float(high_delta_strength),
             "low_delta_strength": float(low_delta_strength),
-            "active_math_sampler_path": "semantic_overlay_native_sampler_when_latent_delta_scale",
+            "active_math_sampler_path": (
+                "unified_strategy_pressure_window"
+                if str(math_control_mode or "OBSERVE_ONLY").upper() == "STRATEGY_PRESSURE_WINDOW"
+                else "semantic_overlay_native_sampler_when_latent_delta_scale"
+            ),
             "high_low_strategy_carrier_coupling": True,
             "precision_step": 0.0001,
             "precision_round": 0.0001,
             "sampler_trace_mode": str(sampler_trace_mode or "OFF").upper(),
             "sampler_trace_max_steps": int(sampler_trace_max_steps or 64),
+            "prompt_transcode_mode": str(prompt_transcode_mode or "REPORT_ONLY").upper(),
+            "selected_tail_index": int(selected_tail_index_n),
         }
         self._event_sampler_trace = {
             "mode": str(sampler_trace_mode or "OFF").upper(),
@@ -3279,7 +3387,8 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             pause_after_cascade_3=pause_after_cascade_3,
             pause_after_cascade_4=pause_after_cascade_4,
             use_formula_recommendation=bool(use_formula_recommendation),
-            selected_tail_index=int(selected_tail_index or 0),
+            prompt_transcode_mode=prompt_transcode_mode,
+            selected_tail_index=int(selected_tail_index_n),
             output_folder_mode="DEFAULT",
             output_folder="default",
             custom_output_folder="",
@@ -3297,7 +3406,7 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Singularity": "Singularity",
+    "Singularity": EVENT_HORIZON_NODE_DISPLAY_NAME,
 }
 
 

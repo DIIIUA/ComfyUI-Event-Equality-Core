@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r62"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R62 Pause UI Recovery Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r62"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
+EVENT_HORIZON_BODY_VERSION = "0.1-r91"
 
 
 def _event_json_safe(value, depth=0):
@@ -271,6 +271,14 @@ class SingularityTelemetryMixin:
         stage_math = [s for s in stages if s.startswith("EventUniversalMath_")]
         boundary_math = [s for s in stages if s.startswith("EventUniversalBoundary_")]
         math_tensor = [s for s in stages if s.startswith("EventMath_")]
+        strategy_control_plans = [
+            r for r in records
+            if str(r.get("stage", "") or "") == "EventStrategyControlSurfacePlan"
+        ]
+        strategy_control_apply_records = [
+            r for r in records
+            if str(r.get("stage", "") or "").startswith("EventStrategyControlSurfaceApply_")
+        ]
 
         body["collection_disabled"] = False
         body["collection_mode"] = "runtime_record_derived_minimal"
@@ -280,6 +288,9 @@ class SingularityTelemetryMixin:
         body["s_wire_count"] = int(body.get("s_wire_count", 0) or 0)
         body["live_route_count"] = int(body.get("live_route_count", 0) or 0)
         body["runtime_monitor_count"] = int(body.get("runtime_monitor_count", 0) or 0)
+        if strategy_control_plans:
+            body["strategy_control_surface_plan"] = strategy_control_plans[-1]
+        body["strategy_control_surface_apply_records"] = strategy_control_apply_records
         return packet
 
     def _event_strategy_matrix_from_records(self, execution_records, result_status="", saved_video_path=""):
@@ -288,6 +299,23 @@ class SingularityTelemetryMixin:
         This is deliberately observer-only: it creates evidence records, never sampler control.
         """
         records = [r for r in (execution_records or []) if isinstance(r, dict)]
+
+        def _flatten_record_text(value, depth=0):
+            if depth > 3:
+                return ""
+            if value is None:
+                return ""
+            if isinstance(value, (str, int, float, bool)):
+                return str(value)
+            if isinstance(value, dict):
+                parts = []
+                for key, item in value.items():
+                    parts.append(str(key))
+                    parts.append(_flatten_record_text(item, depth + 1))
+                return " ".join(parts)
+            if isinstance(value, (list, tuple)):
+                return " ".join(_flatten_record_text(item, depth + 1) for item in value[:24])
+            return str(type(value).__name__)
 
         def stage_text(record):
             parts = [
@@ -299,6 +327,15 @@ class SingularityTelemetryMixin:
                 str(record.get("route_id", "") or ""),
                 str(record.get("branch_name", "") or ""),
                 str(record.get("branch", "") or ""),
+                str(record.get("compiler_version", "") or ""),
+                str(record.get("transcoder_version", "") or ""),
+                str(record.get("object_topology_status", "") or ""),
+                str(record.get("object_relation_ontology_status", "") or ""),
+                str(record.get("object_relation_strategy_point", "") or ""),
+                _flatten_record_text(record.get("strategy_graph")),
+                _flatten_record_text(record.get("object_topology_map")),
+                _flatten_record_text(record.get("object_relation_ontology")),
+                _flatten_record_text(record.get("model_language_transcode")),
             ]
             return " ".join(parts).lower()
 
@@ -314,18 +351,20 @@ class SingularityTelemetryMixin:
         categories = {
             "text_positive": hits("eventtextencodepositive", "textencodepositive"),
             "text_negative": hits("eventtextencodenegative", "textencodenegative"),
-            "text": hits("eventtextencode", "text encode", "conditioning"),
+            "text": hits("eventtextencode", "text encode", "conditioning", "eventpromptstrategycompiler", "eventpromptstrategytranscode", "prompt strategy", "prompt transcode"),
             "image": hits("eventimagescalestart", "image scale", "source image", "eventimagescale"),
             "latent_seed": hits("eventwanimagetovideoseed", "wan_i2v_latent_seed", "wan image to video"),
             "high_sampler": hits("eventsamplerhigh", "samplerhigh", "branch_name high", "branch high"),
             "low_sampler": hits("eventsamplerlow", "samplerlow", "branch_name low", "branch low"),
-            "delta_control": hits("eventmathdeltacontrol", "latent_delta_scale", "delta control"),
+            "delta_control": hits("eventmathdeltacontrol", "eventstrategypressurewindow", "eventstrategycontrolsurface", "latent_delta_scale", "strategy_pressure_window", "delta control"),
             "cfg_policy": hits("eventstrategycfg", "eventmathsamplerpathpolicy", "cfg_policy"),
             "motion": hits("eventmath_decoded_frame_motion", "eventmath_concatenated_frame_motion", "frame_motion"),
             "cascade": hits("singularitycascadebegin", "singularitycascadesegmentend", "singularitycascadeend"),
             "pause": hits("singularitycascadepause", "singularitycascaderesume", "mirrorcut"),
             "boundary": hits("eventuniversalboundary", "cascadeboundary", "cascade boundary"),
             "tail_formula": hits("formula_tail_mirror_break", "tailframesselect", "admissible_continuation"),
+            "object_topology": hits("eventobjecttopologycarrier", "object_topology", "objecttopologycarrier", "rigid_object", "rigidity_lock"),
+            "object_relation": hits("eventobjectrelationontology", "object_relation_ontology", "object_contact_strategy", "carrier_roles", "contact_boundary_carrier", "rigid_physical_carrier"),
             "video": hits("eventvideocombine", "videosave", "saved_video_path"),
         }
         categories["text_any"] = sorted(set(categories["text_positive"] + categories["text_negative"] + categories["text"]))
@@ -361,6 +400,10 @@ class SingularityTelemetryMixin:
             "frame_delta_reversal_ratio",
             "frame_delta_jerk_ratio",
             "frame_motion_stability_score",
+            "object_relation_sentence_count",
+            "rigid_object_count",
+            "topology_pressure_score",
+            "contact_pressure_score",
         )
 
         def numeric_snapshots(stage_hits):
@@ -508,6 +551,20 @@ class SingularityTelemetryMixin:
                     drift_score = 1.0
                     basis["reason"] = "final visible video Outcome is missing"
 
+            elif collision_id == "object_relation_ontology":
+                sentence_count = latest_snapshot_value(snapshots, "object_relation_sentence_count", None)
+                rigid_count = latest_snapshot_value(snapshots, "rigid_object_count", None)
+                if sentence_count is not None:
+                    basis["metrics_used"].append("object_relation_sentence_count")
+                    basis["object_relation_sentence_count"] = sentence_count
+                if rigid_count is not None:
+                    basis["metrics_used"].append("rigid_object_count")
+                    basis["rigid_object_count"] = rigid_count
+                if status == "observed":
+                    conflict_score = max(conflict_score, 0.0)
+                    drift_score = None
+                    basis["reason"] = "ontology carrier is present; visible carrier/contact scoring is not implemented yet"
+
             dynamic_recommendation = ""
             if drift_score is not None and drift_score >= 0.55:
                 dynamic_recommendation = "High drift evidence: keep this collision report-only and run a fixed-seed A/B before enabling any bounded control."
@@ -559,8 +616,18 @@ class SingularityTelemetryMixin:
                 "right_observed_behavior": ["low_delta", "low sampler refinement", "delta strength/coupling behavior"],
                 "right_outcome": ["latent_after_low", "decode-ready latent"],
                 "collision_math": ["high_low_delta_ratio", "low_refinement_pressure", "strategy_carrier_stability"],
-                "intervention_surface": ["LATENT_DELTA_SCALE", "bounded coupling multiplier", "deep-step research only after evidence"],
+                "intervention_surface": ["STRATEGY_PRESSURE_WINDOW", "LATENT_DELTA_SCALE", "bounded coupling multiplier", "deep-step research only after evidence"],
                 "public_safe_control": "bounded_latent_delta_research",
+            },
+            "object_relation_ontology": {
+                "left_outcome": ["source image object layout", "ObjectTopologyCarrier", "prompt relation map"],
+                "left_observed_behavior": ["positive Strategy transform", "object/contact/motion relation pressure"],
+                "strategy_point": "Object identity, contact boundary, and relative motion must describe the same event.",
+                "right_observed_behavior": ["sampler response to object relation", "high-low refinement pressure", "visible contact motion"],
+                "right_outcome": ["visible carrier identity", "readable contact boundary", "continued object relation"],
+                "collision_math": ["carrier_persistence_score", "contact_boundary_continuity_score", "topology_seam_score", "object_relation_drift_score"],
+                "intervention_surface": ["ObjectRelationReview", "future ROI/contact scorer", "conditioning relation weighting", "high-low route attribution"],
+                "public_safe_control": "report_only_visual_scoring",
             },
             "tail_next_source": {
                 "left_outcome": ["visible_tail_frame", "trimmed current segment"],
@@ -739,6 +806,15 @@ class SingularityTelemetryMixin:
                 "Delta scaling should be interpreted here as ObservedBehavior scaling, not generic motion tuning.",
             ),
             make_collision(
+                "object_relation_ontology",
+                ["rigid_physical_carrier", "soft_contact_carrier", "contact_boundary_carrier", "relative_motion_path"],
+                ["object_topology", "object_relation"],
+                ["text_any", "image", "high_sampler", "low_sampler", "motion", "boundary"],
+                "Object carrier identity collides with contact/motion behavior and must survive into visible frames.",
+                "Object relation Strategy point / carrier identity + contact boundary",
+                "This is the missing bridge between prompt ontology and visible/sampler evidence; add ObjectRelationReview before stronger control.",
+            ),
+            make_collision(
                 "tail_next_source",
                 ["selected_tail_frame", "trimmed_batch", "next_cascade_source"],
                 ["cascade", "pause"],
@@ -772,6 +848,8 @@ class SingularityTelemetryMixin:
             "EventMathDeltaControl",
             "EventMathControlSummary",
             "EventMathSamplerPathPolicy",
+            "EventStrategyPressureWindow",
+            "EventStrategyControlSurface",
             "EventStrategyCfgCoupling",
             "EventUniversalMath_",
         )
@@ -792,6 +870,8 @@ class SingularityTelemetryMixin:
             "SAMPLER_HIGH": bool(categories["high_sampler"]),
             "SAMPLER_LOW": bool(categories["low_sampler"]),
             "DELTA_CONTROL": bool(categories["delta_control"]),
+            "OBJECT_TOPOLOGY": bool(categories["object_topology"]),
+            "OBJECT_RELATION_ONTOLOGY": bool(categories["object_relation"]),
             "CASCADE_ROUTE": bool(categories["cascade"]),
             "PAUSE_RESUME": bool(categories["pause"]),
             "FRAME_MOTION": bool(categories["motion"]),
@@ -816,7 +896,7 @@ class SingularityTelemetryMixin:
         matrix = {
             "stage": "EventStrategyMatrix",
             "status": "recorded",
-            "matrix_version": "strategy_matrix_v2_scored_report_only",
+            "matrix_version": "strategy_matrix_v4_object_relation_review_report_only",
             "formula": "Strategy(t) is mapped as intersections between carriers; this record is evidence for future bounded guidance, not active control.",
             "result_status": str(result_status or ""),
             "saved_video_path": str(saved_video_path or ""),
@@ -844,6 +924,340 @@ class SingularityTelemetryMixin:
             "next_route": "Use observed collisions as evidence before enabling any Strategy-guided sampler or prompt/latent control.",
         }
         return matrix, collisions
+
+    def _event_object_relation_review_from_records(self, execution_records, strategy_matrix=None, vector_collisions=None):
+        """
+        Report-only review of the object/contact Strategy point.
+        This reads already-recorded prompt, sampler, boundary, and frame-motion evidence.
+        It never modifies conditioning, tensors, samplers, or routing.
+        """
+        records = [r for r in (execution_records or []) if isinstance(r, dict)]
+        vector_collisions = [c for c in (vector_collisions or []) if isinstance(c, dict)]
+
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            value = safe_float(value, 0.0)
+            return max(0.0, min(1.0, value))
+
+        def first_record(stage_name):
+            for rec in records:
+                if str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        def latest_record(stage_name):
+            for rec in reversed(records):
+                if str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        prompt_apply = latest_record("EventPromptStrategyTranscodeApply")
+        relation_collision = {}
+        motion_collision = {}
+        high_low_collision = {}
+        tail_collision = {}
+        for item in vector_collisions:
+            cid = str(item.get("collision_id") or "")
+            if cid == "object_relation_ontology":
+                relation_collision = item
+            elif cid == "previous_next_frame_motion":
+                motion_collision = item
+            elif cid == "high_low_sampler_strategy":
+                high_low_collision = item
+            elif cid == "tail_next_source":
+                tail_collision = item
+
+        relation_active = bool(
+            prompt_apply.get("object_relation_ontology_applied")
+            or prompt_apply.get("object_relation_ontology_status") == "active"
+            or relation_collision.get("status") == "observed"
+        )
+
+        motion_candidates = []
+        for idx, rec in enumerate(records):
+            stage = str(rec.get("stage", "") or "")
+            if stage in ("EventMath_concatenated_frame_motion", "EventMath_decoded_frame_motion") or stage.endswith("_frame_motion"):
+                if str(rec.get("status", "") or "") == "ok":
+                    motion_candidates.append((idx, rec))
+
+        def motion_rank(item):
+            idx, rec = item
+            stage = str(rec.get("stage", "") or "")
+            if stage == "EventMath_concatenated_frame_motion":
+                rank = 4
+            elif stage == "EventMath_decoded_frame_motion":
+                rank = 3
+            elif stage.startswith("EventMath_cascade_"):
+                rank = 2
+            else:
+                rank = 1
+            return (rank, idx)
+
+        motion_record = sorted(motion_candidates, key=motion_rank)[-1][1] if motion_candidates else {}
+        motion_available = bool(motion_record)
+
+        stability = safe_float(motion_record.get("frame_motion_stability_score"), None)
+        spike = safe_float(motion_record.get("frame_delta_spike_ratio"), 1.0)
+        reversal = safe_float(motion_record.get("frame_delta_reversal_ratio"), 0.0)
+        jerk = safe_float(motion_record.get("frame_delta_jerk_ratio"), 0.0)
+        cv_ratio = safe_float(motion_record.get("frame_delta_norm_cv_ratio"), 0.0)
+        motion_abs_mean = safe_float(motion_record.get("frame_delta_abs_mean"), None)
+        cascade_seam_review = latest_record("EventCascadeSeamMotionReview")
+        cascade_seam_status = str(cascade_seam_review.get("status", "") if isinstance(cascade_seam_review, dict) else "")
+        cascade_post_seam_score = safe_float(
+            cascade_seam_review.get("post_seam_acceleration_score") if isinstance(cascade_seam_review, dict) else None,
+            None,
+        )
+        cascade_post_seam_attribution = str(
+            cascade_seam_review.get("attribution", "") if isinstance(cascade_seam_review, dict) else ""
+        )
+        cascade_max_post_segment_ratio = safe_float(
+            cascade_seam_review.get("max_post_segment_to_previous_segment_mean_ratio") if isinstance(cascade_seam_review, dict) else None,
+            None,
+        )
+        cascade_max_boundary_ratio = safe_float(
+            cascade_seam_review.get("max_boundary_to_previous_segment_mean_ratio") if isinstance(cascade_seam_review, dict) else None,
+            None,
+        )
+
+        boundary_records = [
+            rec for rec in records
+            if str(rec.get("stage", "") or "") == "EventMathCascadeBoundary"
+            and str(rec.get("status", "") or "") == "ok"
+        ]
+        boundary_abs_values = [
+            safe_float(rec.get("boundary_delta_abs_mean"), None)
+            for rec in boundary_records
+        ]
+        boundary_abs_values = [v for v in boundary_abs_values if v is not None]
+        max_boundary_abs_mean = max(boundary_abs_values) if boundary_abs_values else None
+        seam_to_motion_abs_ratio = None
+        if motion_abs_mean is not None and motion_abs_mean > 0 and max_boundary_abs_mean is not None:
+            seam_to_motion_abs_ratio = float(max_boundary_abs_mean / (motion_abs_mean + 1e-12))
+
+        high_low_pressure = max(
+            clamp01(high_low_collision.get("conflict_score", 0.0)),
+            clamp01(high_low_collision.get("drift_score", 0.0)),
+        ) if high_low_collision else 0.0
+        tail_pressure = max(
+            clamp01(tail_collision.get("conflict_score", 0.0)),
+            clamp01(tail_collision.get("drift_score", 0.0)),
+        ) if tail_collision else 0.0
+
+        scores_available = relation_active and motion_available
+        carrier_persistence_score = None
+        contact_boundary_continuity_score = None
+        topology_seam_score = None
+        object_relation_drift_score = None
+        attribution = "not_scored"
+        pressure_terms = {}
+
+        if scores_available:
+            motion_stability = clamp01(stability if stability is not None else 0.5)
+            spike_pressure = clamp01(((spike if spike is not None else 1.0) - 1.0) / 1.5)
+            reversal_pressure = clamp01(reversal if reversal is not None else 0.0)
+            jerk_pressure = clamp01(jerk if jerk is not None else 0.0)
+            cv_pressure = clamp01(cv_ratio if cv_ratio is not None else 0.0)
+            seam_pressure = (
+                clamp01((float(seam_to_motion_abs_ratio) - 1.0) / 1.5)
+                if seam_to_motion_abs_ratio is not None
+                else 0.0
+            )
+            post_seam_acceleration_pressure = clamp01(cascade_post_seam_score if cascade_post_seam_score is not None else 0.0)
+
+            carrier_persistence_score = clamp01(
+                0.50 * motion_stability
+                + 0.18 * (1.0 - spike_pressure)
+                + 0.14 * (1.0 - jerk_pressure)
+                + 0.10 * (1.0 - reversal_pressure)
+                + 0.08 * (1.0 - cv_pressure)
+            )
+            contact_boundary_continuity_score = clamp01(
+                0.40 * motion_stability
+                + 0.20 * (1.0 - seam_pressure)
+                + 0.18 * (1.0 - spike_pressure)
+                + 0.12 * (1.0 - jerk_pressure)
+                + 0.10 * (1.0 - reversal_pressure)
+            )
+            if cascade_seam_status == "reviewed":
+                contact_boundary_continuity_score = clamp01(
+                    contact_boundary_continuity_score * (1.0 - 0.18 * post_seam_acceleration_pressure)
+                )
+            topology_seam_score = clamp01(1.0 - seam_pressure) if seam_to_motion_abs_ratio is not None else None
+
+            score_terms = [carrier_persistence_score, contact_boundary_continuity_score]
+            if topology_seam_score is not None:
+                score_terms.append(topology_seam_score)
+            relation_coherence = sum(score_terms) / max(1, len(score_terms))
+            sampler_tail_pressure = max(high_low_pressure, tail_pressure)
+            object_relation_drift_score = clamp01(
+                0.70 * (1.0 - relation_coherence)
+                + 0.20 * sampler_tail_pressure
+                + 0.10 * max(spike_pressure, jerk_pressure, reversal_pressure, post_seam_acceleration_pressure)
+            )
+
+            pressure_terms = {
+                "motion_stability": motion_stability,
+                "spike_pressure": spike_pressure,
+                "reversal_pressure": reversal_pressure,
+                "jerk_pressure": jerk_pressure,
+                "cv_pressure": cv_pressure,
+                "seam_pressure": seam_pressure,
+                "post_seam_acceleration_pressure": post_seam_acceleration_pressure,
+                "high_low_pressure": high_low_pressure,
+                "tail_pressure": tail_pressure,
+            }
+
+            pressure_map = {
+                "cascade_boundary_pressure": seam_pressure,
+                "post_seam_acceleration_pressure": post_seam_acceleration_pressure,
+                "visible_motion_pressure": max(spike_pressure, jerk_pressure, reversal_pressure),
+                "high_low_sampler_pressure": high_low_pressure,
+                "tail_resume_pressure": tail_pressure,
+            }
+            attribution = max(pressure_map, key=pressure_map.get)
+            if pressure_map.get(attribution, 0.0) < 0.25:
+                attribution = "no_single_dominant_pressure"
+
+        if not relation_active:
+            status = "inactive_no_object_relation_ontology"
+            next_action = "Verify the report-only semantic density/object-relation map before scoring object/contact continuity; do not inject formula text into the prompt."
+        elif not motion_available:
+            status = "awaiting_visible_motion_evidence"
+            next_action = "Run a completed VIDEO pass so ObjectRelationReview can read frame-motion evidence."
+        else:
+            status = "reviewed"
+            next_action = "Compare fixed-seed A/B videos and inspect whether carrier identity and contact boundary match the scores."
+
+        review = {
+            "stage": "EventObjectRelationReview",
+            "status": status,
+            "review_version": "object_relation_review_v1_report_only",
+            "formula": "Object identity + contact boundary = Strategy(relation) = visible carrier outcome + motion behavior.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "object_relation_ontology_active": bool(relation_active),
+            "object_relation_sentence_count": prompt_apply.get("object_relation_sentence_count", 0),
+            "rigid_object_count": prompt_apply.get("rigid_object_count", 0),
+            "prompt_transform_applied": bool(prompt_apply.get("positive_prompt_transformed")),
+            "negative_prompt_transformed": bool(prompt_apply.get("negative_prompt_transformed")),
+            "motion_stage": str(motion_record.get("stage", "") if isinstance(motion_record, dict) else ""),
+            "motion_profile": str(motion_record.get("frame_motion_profile", "") if isinstance(motion_record, dict) else ""),
+            "frame_motion_stability_score": stability,
+            "frame_delta_spike_ratio": spike,
+            "frame_delta_reversal_ratio": reversal,
+            "frame_delta_jerk_ratio": jerk,
+            "frame_delta_norm_cv_ratio": cv_ratio,
+            "boundary_count": len(boundary_records),
+            "max_boundary_delta_abs_mean": max_boundary_abs_mean,
+            "seam_to_motion_abs_ratio": seam_to_motion_abs_ratio,
+            "cascade_seam_review_status": cascade_seam_status,
+            "cascade_post_seam_acceleration_score": cascade_post_seam_score,
+            "cascade_post_seam_attribution": cascade_post_seam_attribution,
+            "cascade_max_post_segment_to_previous_segment_mean_ratio": cascade_max_post_segment_ratio,
+            "cascade_max_boundary_to_previous_segment_mean_ratio": cascade_max_boundary_ratio,
+            "carrier_persistence_score": carrier_persistence_score,
+            "contact_boundary_continuity_score": contact_boundary_continuity_score,
+            "topology_seam_score": topology_seam_score,
+            "object_relation_drift_score": object_relation_drift_score,
+            "attribution": attribution,
+            "pressure_terms": pressure_terms,
+            "score_policy": "Proxy scores from global motion and cascade boundary records; no ROI/contact detector yet.",
+            "next_metric_route": [
+                "carrier_persistence_score -> future object mask / feature-region tracker",
+                "contact_boundary_continuity_score -> future contact ROI continuity scorer",
+                "topology_seam_score -> cascade boundary relation continuity",
+                "object_relation_drift_score -> gate for any future bounded object-relation guidance",
+            ],
+            "next_action": next_action,
+        }
+        return review
+
+    def _event_apply_object_relation_review(self, object_relation_review, strategy_matrix, vector_collisions):
+        if not isinstance(object_relation_review, dict):
+            return strategy_matrix, vector_collisions
+        strategy_matrix = strategy_matrix if isinstance(strategy_matrix, dict) else {}
+        vector_collisions = [c for c in (vector_collisions or []) if isinstance(c, dict)]
+
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        drift = safe_float(object_relation_review.get("object_relation_drift_score"), None)
+        carrier = safe_float(object_relation_review.get("carrier_persistence_score"), None)
+        contact = safe_float(object_relation_review.get("contact_boundary_continuity_score"), None)
+        seam = safe_float(object_relation_review.get("topology_seam_score"), None)
+
+        strategy_matrix["object_relation_review_status"] = object_relation_review.get("status", "")
+        strategy_matrix["object_relation_review_version"] = object_relation_review.get("review_version", "")
+        strategy_matrix["object_relation_drift_score"] = drift
+        strategy_matrix["carrier_persistence_score"] = carrier
+        strategy_matrix["contact_boundary_continuity_score"] = contact
+        strategy_matrix["topology_seam_score"] = seam
+        if drift is not None:
+            current_max = safe_float(strategy_matrix.get("max_drift_score"), None)
+            if current_max is None or drift >= current_max:
+                strategy_matrix["max_drift_score"] = drift
+                strategy_matrix["top_drift_collision"] = "object_relation_ontology"
+
+        for item in vector_collisions:
+            if str(item.get("collision_id") or "") != "object_relation_ontology":
+                continue
+            basis = item.get("score_basis", {}) if isinstance(item.get("score_basis"), dict) else {}
+            basis["object_relation_review"] = {
+                "review_version": object_relation_review.get("review_version", ""),
+                "status": object_relation_review.get("status", ""),
+                "carrier_persistence_score": carrier,
+                "contact_boundary_continuity_score": contact,
+                "topology_seam_score": seam,
+                "object_relation_drift_score": drift,
+                "cascade_seam_review_status": object_relation_review.get("cascade_seam_review_status", ""),
+                "cascade_post_seam_acceleration_score": object_relation_review.get("cascade_post_seam_acceleration_score", None),
+                "cascade_post_seam_attribution": object_relation_review.get("cascade_post_seam_attribution", ""),
+                "cascade_max_post_segment_to_previous_segment_mean_ratio": object_relation_review.get("cascade_max_post_segment_to_previous_segment_mean_ratio", None),
+                "cascade_max_boundary_to_previous_segment_mean_ratio": object_relation_review.get("cascade_max_boundary_to_previous_segment_mean_ratio", None),
+                "attribution": object_relation_review.get("attribution", ""),
+                "pressure_terms": object_relation_review.get("pressure_terms", {}),
+            }
+            metrics = basis.setdefault("metrics_used", [])
+            if isinstance(metrics, list):
+                for key in (
+                    "carrier_persistence_score",
+                    "contact_boundary_continuity_score",
+                    "topology_seam_score",
+                    "object_relation_drift_score",
+                ):
+                    if key not in metrics:
+                        metrics.append(key)
+            item["score_basis"] = basis
+            if drift is not None:
+                item["drift_score"] = drift
+                item["conflict_score"] = max(
+                    safe_float(item.get("conflict_score"), 0.0) or 0.0,
+                    drift,
+                )
+                item["recommendation"] = (
+                    "ObjectRelationReview is now measured. Keep this report-only and compare fixed-seed videos before any active guidance."
+                )
+            local_formula = item.get("local_formula", {}) if isinstance(item.get("local_formula"), dict) else {}
+            collision_math = local_formula.get("collision_math", {}) if isinstance(local_formula.get("collision_math"), dict) else {}
+            collision_math["measured_now"] = True
+            collision_math["object_relation_review"] = basis.get("object_relation_review", {})
+            collision_math["score_basis"] = basis
+            local_formula["collision_math"] = collision_math
+            item["local_formula"] = local_formula
+            break
+
+        return strategy_matrix, vector_collisions
 
     def _event_strategy_guidance_proposal(self, strategy_matrix, vector_collisions):
         def safe_float(value, default=None):
@@ -886,6 +1300,39 @@ class SingularityTelemetryMixin:
                     evidence={"status": status, "conflict_score": conflict},
                 )
                 continue
+
+            if cid == "object_relation_ontology":
+                review = basis.get("object_relation_review", {}) if isinstance(basis.get("object_relation_review", {}), dict) else {}
+                review_status = str(review.get("status") or "")
+                review_drift = safe_float(review.get("object_relation_drift_score"), None)
+                seam_acceleration = safe_float(review.get("cascade_post_seam_acceleration_score"), None)
+                seam_attribution = str(review.get("cascade_post_seam_attribution") or "")
+                priority = "high"
+                message = "Object relation ontology is active, but visible carrier/contact continuity is not scored yet."
+                if review_status == "reviewed":
+                    if review_drift is not None and review_drift < 0.25:
+                        priority = "low"
+                    elif review_drift is not None and review_drift < 0.45:
+                        priority = "medium"
+                    message = "ObjectRelationReview measured carrier/contact continuity as report-only evidence."
+                    if seam_acceleration is not None and seam_acceleration >= 0.35:
+                        priority = "high"
+                        message = "Cascade seam review detected post-seam motion pressure; compare prompt-per-segment Strategy before damping."
+                add(
+                    cid,
+                    "object_relation_review",
+                    priority,
+                    message,
+                    "Compare fixed-seed runs by carrier identity, contact boundary continuity, seam-local relation drift, and high-low attribution.",
+                    control_surface="report_only_visual_scoring",
+                    evidence={
+                        "status": status,
+                        "score_basis": basis,
+                        "object_relation_review": review,
+                        "cascade_post_seam_acceleration_score": seam_acceleration,
+                        "cascade_post_seam_attribution": seam_attribution,
+                    },
+                )
 
             if cid == "previous_next_frame_motion" and drift is not None:
                 priority = "high" if drift >= 0.55 else "medium" if drift >= 0.35 else "low"
@@ -948,7 +1395,7 @@ class SingularityTelemetryMixin:
         return {
             "stage": "EventStrategyGuidanceProposal",
             "status": "proposal_only",
-            "proposal_version": "strategy_guidance_v1_report_only",
+            "proposal_version": "strategy_guidance_v2_object_relation_review",
             "formula": "Strategy Matrix scores become test proposals; they do not modify generation.",
             "active_control_allowed": False,
             "control_mode": "REPORT_ONLY",
@@ -957,6 +1404,817 @@ class SingularityTelemetryMixin:
             "proposal_count": len(proposals),
             "proposals": proposals,
             "public_default_policy": "Keep public defaults high_delta_strength=1.0 and low_delta_strength=1.0 until fixed-seed visual evidence proves a bounded preset.",
+        }
+
+    def _event_relation_pressure_cards_from_records(
+        self,
+        execution_records,
+        strategy_matrix=None,
+        object_relation_review=None,
+        vector_collisions=None,
+    ):
+        """
+        Compact report-only cards for the current Strategy pressure map.
+        These records turn scattered evidence into readable diagnostics and never
+        modify prompts, tensors, sampler state, or cascade routing.
+        """
+        records = [r for r in (execution_records or []) if isinstance(r, dict)]
+        strategy_matrix = strategy_matrix if isinstance(strategy_matrix, dict) else {}
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+        vector_collisions = [c for c in (vector_collisions or []) if isinstance(c, dict)]
+
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            value = safe_float(value, 0.0)
+            return max(0.0, min(1.0, value))
+
+        def latest_record(stage_name):
+            for rec in reversed(records):
+                if str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        def first_record(stage_name):
+            for rec in records:
+                if str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        def records_by_stage(stage_name):
+            return [rec for rec in records if str(rec.get("stage", "") or "") == stage_name]
+
+        def records_by_prefix(prefix):
+            return [rec for rec in records if str(rec.get("stage", "") or "").startswith(prefix)]
+
+        def collision_by_id(collision_id):
+            for item in vector_collisions:
+                if str(item.get("collision_id") or "") == collision_id:
+                    return item
+            return {}
+
+        def compact_record_refs(stage_names):
+            out = []
+            for stage in stage_names:
+                if stage and stage not in out:
+                    out.append(stage)
+            return out[:12]
+
+        def status_from_pressure(value, prefix):
+            value = clamp01(value)
+            if value >= 0.55:
+                return f"{prefix}_high"
+            if value >= 0.30:
+                return f"{prefix}_watch"
+            return f"{prefix}_nominal"
+
+        prompt_updates = records_by_stage("EventCascadePromptRuntimeUpdate")
+        reused_updates = [
+            rec for rec in prompt_updates
+            if bool(rec.get("prompt_continuity_reused"))
+            or str(rec.get("status") or "") == "reused_active_strategy"
+        ]
+        changed_updates = [
+            rec for rec in prompt_updates
+            if str(rec.get("status") or "") == "applied"
+            and not bool(rec.get("prompt_continuity_reused"))
+        ]
+        protected_negative_updates = [
+            rec for rec in prompt_updates
+            if bool(rec.get("negative_prompt_payload_reused_previous_active"))
+        ]
+        negative_payload_drift = [
+            rec for rec in prompt_updates
+            if bool(rec.get("negative_payload_missing"))
+            or bool(rec.get("negative_payload_truncated"))
+            or bool(rec.get("negative_prompt_changed_from_previous_active"))
+        ]
+        if not prompt_updates:
+            prompt_status = "no_runtime_prompt_update"
+        elif changed_updates:
+            prompt_status = "changed_runtime_strategy"
+        elif protected_negative_updates:
+            prompt_status = "protected_negative_payload_drift"
+        else:
+            prompt_status = "clean_same_strategy"
+
+        prompt_card = {
+            "stage": "EventPromptCarrierContinuityCard",
+            "status": prompt_status,
+            "card_version": "relation_pressure_cards_v1",
+            "formula": "Prompt carriers across pause/continue should preserve Strategy unless the user changes them.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "update_count": len(prompt_updates),
+            "reused_update_count": len(reused_updates),
+            "changed_update_count": len(changed_updates),
+            "protected_negative_payload_reuse_count": len(protected_negative_updates),
+            "negative_payload_drift_count": len(negative_payload_drift),
+            "last_same_prompt_match_basis": str(prompt_updates[-1].get("same_prompt_match_basis", "") if prompt_updates else ""),
+            "last_prompt_continuity_policy": str(prompt_updates[-1].get("prompt_continuity_policy", "") if prompt_updates else ""),
+            "last_positive_identity_matches": bool(prompt_updates[-1].get("positive_identity_matches", False)) if prompt_updates else False,
+            "last_positive_payload_transforms_to_current_active": bool(prompt_updates[-1].get("positive_payload_transforms_to_current_active", False)) if prompt_updates else False,
+            "last_positive_strategy_identity_matches": bool(prompt_updates[-1].get("positive_strategy_identity_matches", False)) if prompt_updates else False,
+            "last_negative_identity_matches": bool(prompt_updates[-1].get("negative_identity_matches", False)) if prompt_updates else False,
+            "evidence_stages": compact_record_refs([str(rec.get("stage", "") or "") for rec in prompt_updates]),
+            "next_action": (
+                "If the user did not change prompt text, any changed_runtime_strategy result should be treated as prompt payload drift before tuning math."
+                if prompt_status == "changed_runtime_strategy"
+                else "Prompt continuity is usable for the next fixed-seed comparison."
+            ),
+        }
+
+        low_trace_values = []
+        low_trace_stages = []
+        for rec in records_by_prefix("EventSamplerStepTraceSummary_"):
+            stage = str(rec.get("stage", "") or "")
+            branch = str(rec.get("branch", rec.get("branch_name", "")) or "").lower()
+            if "low" not in stage.lower() and "low" not in branch:
+                continue
+            for key in ("trace_vs_window_relative_delta", "relative_delta"):
+                value = safe_float(rec.get(key), None)
+                if value is not None:
+                    low_trace_values.append(value)
+                    low_trace_stages.append(stage)
+        for rec in records_by_prefix("EventMath_"):
+            stage = str(rec.get("stage", "") or "")
+            if "step_trace_vs_window_output" not in stage.lower() or "low" not in stage.lower():
+                continue
+            value = safe_float(rec.get("relative_delta"), None)
+            if value is not None:
+                low_trace_values.append(value)
+                low_trace_stages.append(stage)
+
+        high_low_collision = collision_by_id("high_low_sampler_strategy")
+        high_low_pressure = max(
+            clamp01(high_low_collision.get("conflict_score", 0.0)),
+            clamp01(high_low_collision.get("drift_score", 0.0)),
+            clamp01((object_relation_review.get("pressure_terms", {}) or {}).get("high_low_pressure", 0.0))
+            if isinstance(object_relation_review.get("pressure_terms", {}), dict)
+            else 0.0,
+        )
+        max_low_trace_relative_delta = max(low_trace_values) if low_trace_values else None
+        low_trace_pressure = clamp01(((max_low_trace_relative_delta or 1.0) - 1.0) / 1.0)
+        low_pressure = max(high_low_pressure, low_trace_pressure)
+        low_card = {
+            "stage": "EventLowBranchRelationPressureCard",
+            "status": status_from_pressure(low_pressure, "low_pressure"),
+            "card_version": "relation_pressure_cards_v1",
+            "formula": "OutcomeNext(high) becomes StrategyCarrier(low); low ObservedBehavior must refine it without breaking relation identity.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "high_low_pressure": high_low_pressure,
+            "low_trace_pressure": low_trace_pressure,
+            "max_low_trace_relative_delta": max_low_trace_relative_delta,
+            "low_trace_sample_count": len(low_trace_values),
+            "top_drift_collision": strategy_matrix.get("top_drift_collision", ""),
+            "evidence_stages": compact_record_refs(low_trace_stages + [str(high_low_collision.get("stage", "") or "")]),
+            "next_action": "Inspect low-branch pressure before changing low_delta_strength; this card does not recommend active control by itself.",
+        }
+
+        carrier = safe_float(object_relation_review.get("carrier_persistence_score"), None)
+        contact = safe_float(object_relation_review.get("contact_boundary_continuity_score"), None)
+        seam = safe_float(object_relation_review.get("topology_seam_score"), None)
+        drift = safe_float(object_relation_review.get("object_relation_drift_score"), None)
+        review_status = str(object_relation_review.get("status") or "not_recorded")
+        if review_status != "reviewed":
+            object_status = review_status
+        elif (drift is not None and drift >= 0.45) or (carrier is not None and carrier < 0.45) or (contact is not None and contact < 0.45):
+            object_status = "object_identity_watch"
+        elif (drift is not None and drift < 0.25) and (carrier is not None and carrier >= 0.65) and (contact is not None and contact >= 0.65):
+            object_status = "object_identity_stable"
+        else:
+            object_status = "object_identity_measured"
+        object_card = {
+            "stage": "EventObjectCarrierIdentityCard",
+            "status": object_status,
+            "card_version": "relation_pressure_cards_v1",
+            "formula": "Object carrier identity + contact boundary should remain one readable Strategy relation across visible frames.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "object_relation_review_status": review_status,
+            "carrier_persistence_score": carrier,
+            "contact_boundary_continuity_score": contact,
+            "topology_seam_score": seam,
+            "object_relation_drift_score": drift,
+            "object_relation_attribution": object_relation_review.get("attribution", ""),
+            "score_policy": object_relation_review.get("score_policy", ""),
+            "next_action": "Use this as a visual checklist: carrier identity, boundary continuity, and seam topology must agree before stronger math.",
+        }
+
+        seam_review = latest_record("EventCascadeSeamMotionReview")
+        tail_collision = collision_by_id("tail_next_source")
+        tail_pressure = max(
+            clamp01(tail_collision.get("conflict_score", 0.0)),
+            clamp01(tail_collision.get("drift_score", 0.0)),
+            clamp01((object_relation_review.get("pressure_terms", {}) or {}).get("tail_pressure", 0.0))
+            if isinstance(object_relation_review.get("pressure_terms", {}), dict)
+            else 0.0,
+        )
+        post_seam_score = safe_float(seam_review.get("post_seam_acceleration_score"), None) if isinstance(seam_review, dict) else None
+        seam_pressure_terms = seam_review.get("pressure_terms", {}) if isinstance(seam_review.get("pressure_terms", {}), dict) else {}
+        tail_status = (
+            "tail_not_applicable_single_segment"
+            if str(seam_review.get("status", "") or "") == "not_applicable"
+            else status_from_pressure(max(tail_pressure, clamp01(post_seam_score or 0.0)), "tail_strategy")
+        )
+        tail_card = {
+            "stage": "EventTailStrategyContinuityCard",
+            "status": tail_status,
+            "card_version": "relation_pressure_cards_v1",
+            "formula": "Selected visible tail becomes OutcomePrevious for the next segment; seam behavior must stay attached to the same Strategy.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "tail_pressure": tail_pressure,
+            "cascade_seam_review_status": seam_review.get("status", "") if isinstance(seam_review, dict) else "",
+            "observed_segments": seam_review.get("observed_segments", None) if isinstance(seam_review, dict) else None,
+            "segment_frame_counts": seam_review.get("segment_frame_counts", []) if isinstance(seam_review, dict) else [],
+            "post_seam_acceleration_score": post_seam_score,
+            "post_seam_attribution": seam_review.get("attribution", "") if isinstance(seam_review, dict) else "",
+            "seam_pressure_terms": seam_pressure_terms,
+            "next_action": "If post-seam acceleration repeats, compare prompt-per-segment identity before adding any motion damping.",
+        }
+
+        motion_candidates = []
+        for rec in records:
+            stage = str(rec.get("stage", "") or "")
+            if stage in ("EventMath_concatenated_frame_motion", "EventMath_decoded_frame_motion") or stage.endswith("_frame_motion"):
+                motion_candidates.append(rec)
+        motion_record = motion_candidates[-1] if motion_candidates else {}
+        stability = safe_float(motion_record.get("frame_motion_stability_score"), None)
+        spike = safe_float(motion_record.get("frame_delta_spike_ratio"), None)
+        reversal = safe_float(motion_record.get("frame_delta_reversal_ratio"), None)
+        jerk = safe_float(motion_record.get("frame_delta_jerk_ratio"), None)
+        spike_pressure = clamp01(((spike if spike is not None else 1.0) - 1.0) / 1.5)
+        jerk_pressure = clamp01(jerk or 0.0)
+        reversal_pressure = clamp01(reversal or 0.0)
+        instability_pressure = clamp01(1.0 - (stability if stability is not None else 1.0))
+        frame_pressure = max(spike_pressure, jerk_pressure, reversal_pressure, instability_pressure, clamp01(post_seam_score or 0.0))
+        frame_card = {
+            "stage": "EventFrameSpikeAttributionCard",
+            "status": status_from_pressure(frame_pressure, "frame_spike"),
+            "card_version": "relation_pressure_cards_v1",
+            "formula": "Visible frame-to-frame motion exposes whether Strategy continuity becomes smooth motion or unstable spike behavior.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "motion_stage": str(motion_record.get("stage", "") or ""),
+            "motion_profile": str(motion_record.get("frame_motion_profile", "") or ""),
+            "frame_motion_stability_score": stability,
+            "frame_delta_spike_ratio": spike,
+            "frame_delta_reversal_ratio": reversal,
+            "frame_delta_jerk_ratio": jerk,
+            "frame_pressure": frame_pressure,
+            "object_relation_attribution": object_relation_review.get("attribution", ""),
+            "cascade_post_seam_attribution": seam_review.get("attribution", "") if isinstance(seam_review, dict) else "",
+            "next_action": "Analyze the mp4 alongside this card; a numeric spike is only useful when tied to visible behavior.",
+        }
+
+        input_normalization = latest_record("EventInputNormalization")
+        image_scale = latest_record("EventUniversalMath_EventImageScaleStart")
+        source_upload = latest_record("source_image_upload")
+        if not source_upload:
+            source_upload = first_record("EventSourceImageUpload")
+        normalized_values = input_normalization.get("normalized_values", {}) if isinstance(input_normalization.get("normalized_values", {}), dict) else {}
+        image_crop = normalized_values.get("image_crop", image_scale.get("image_crop", ""))
+        image_upscale_method = normalized_values.get("image_upscale_method", image_scale.get("image_upscale_method", ""))
+        width = normalized_values.get("width", image_scale.get("width", ""))
+        height = normalized_values.get("height", image_scale.get("height", ""))
+        source_present = bool(image_scale or source_upload or normalized_values)
+        if not source_present:
+            source_status = "source_anchor_missing_evidence"
+        elif str(image_crop or "").lower() == "disabled":
+            source_status = "source_anchor_crop_disabled"
+        else:
+            source_status = "source_anchor_recorded"
+        source_card = {
+            "stage": "EventSourceAnchorPreservationCard",
+            "status": source_status,
+            "card_version": "relation_pressure_cards_v1",
+            "formula": "Source image is OutcomePrevious / SourceAnchor; scale and crop choices define what the sampler is asked to preserve.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "source_image_present": source_present,
+            "image_crop": image_crop,
+            "image_upscale_method": image_upscale_method,
+            "width": width,
+            "height": height,
+            "input_adjustment_count": input_normalization.get("adjustment_count", 0) if isinstance(input_normalization, dict) else 0,
+            "formula_role": "OutcomePrevious / SourceAnchor",
+            "evidence_stages": compact_record_refs([
+                str(input_normalization.get("stage", "") or ""),
+                str(image_scale.get("stage", "") or ""),
+                str(source_upload.get("stage", "") or ""),
+            ]),
+            "next_action": "Keep source/crop/size fixed while comparing math; otherwise visual drift cannot be attributed cleanly.",
+        }
+
+        local_cards = [prompt_card, low_card, object_card, tail_card, frame_card, source_card]
+        sub_strategy_statuses = {
+            str(card.get("stage", "") or ""): str(card.get("status", "") or "")
+            for card in local_cards
+            if isinstance(card, dict)
+        }
+        divergence_flags = []
+        if prompt_status == "changed_runtime_strategy":
+            divergence_flags.append("prompt_carrier_did_not_return_to_current_strategy")
+        if str(low_card.get("status", "") or "").endswith("_high"):
+            divergence_flags.append("low_branch_pressure_high")
+        if str(frame_card.get("status", "") or "").endswith("_high"):
+            divergence_flags.append("visible_frame_spike_high")
+        if str(object_card.get("status", "") or "") == "object_identity_watch":
+            divergence_flags.append("object_relation_identity_watch")
+        if str(tail_card.get("status", "") or "").endswith("_high"):
+            divergence_flags.append("tail_strategy_pressure_high")
+        if str(source_card.get("status", "") or "") == "source_anchor_missing_evidence":
+            divergence_flags.append("source_anchor_missing")
+
+        if divergence_flags:
+            global_status = "global_strategy_return_watch"
+        elif all(str(status or "").endswith("_nominal") or str(status or "").endswith("_stable") or str(status or "") in (
+            "clean_same_strategy",
+            "protected_negative_payload_drift",
+            "object_identity_measured",
+            "source_anchor_recorded",
+            "source_anchor_crop_disabled",
+        ) for status in sub_strategy_statuses.values()):
+            global_status = "global_strategy_return_nominal"
+        else:
+            global_status = "global_strategy_return_measured"
+
+        global_strategy_card = {
+            "stage": "EventGlobalStrategyReturnCard",
+            "status": global_status,
+            "card_version": "relation_pressure_cards_v2_global_return",
+            "formula": "All local Strategy points must return to the primary Strategy before any data is passed to the next sampler/node/segment.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "primary_strategy": "Preserve one event identity, reweight local carriers only as evidence permits, and pass the resulting StrategyCarrier to the next route stage.",
+            "primary_strategy_role": "global Strategy(t) / route-level accountability",
+            "sub_strategy_return_policy": "Local prompt/source/low/object/tail/frame strategies are subordinate evidence routes, not independent math controllers.",
+            "sub_strategy_statuses": sub_strategy_statuses,
+            "divergence_flag_count": len(divergence_flags),
+            "divergence_flags": divergence_flags,
+            "top_conflict_collision": strategy_matrix.get("top_conflict_collision", ""),
+            "top_drift_collision": strategy_matrix.get("top_drift_collision", ""),
+            "next_action": (
+                "Resolve divergence flags before promoting any local card into active control."
+                if divergence_flags
+                else "Local cards returned to the global Strategy map; continue fixed-seed evidence collection."
+            ),
+        }
+
+        return local_cards + [global_strategy_card]
+
+    def _event_topology_strategy_return_map(
+        self,
+        strategy_matrix=None,
+        relation_pressure_cards=None,
+        vector_collisions=None,
+        object_relation_review=None,
+    ):
+        """
+        Report-only topology synchronizer.
+
+        Local Strategy formulas are allowed to unfold at every carrier collision,
+        but this map checks whether each local route returns to the global route
+        Strategy before the next sampler/segment receives data. It does not
+        change prompts, tensors, sampler state, or cascade routing.
+        """
+        strategy_matrix = strategy_matrix if isinstance(strategy_matrix, dict) else {}
+        relation_pressure_cards = [
+            c for c in (relation_pressure_cards or [])
+            if isinstance(c, dict)
+        ]
+        vector_collisions = [
+            c for c in (vector_collisions or [])
+            if isinstance(c, dict)
+        ]
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            value = safe_float(value, 0.0)
+            return max(0.0, min(1.0, value))
+
+        def card_by_stage(stage_name):
+            for card in relation_pressure_cards:
+                if str(card.get("stage", "") or "") == stage_name:
+                    return card
+            return {}
+
+        def pressure_from_status(status):
+            status = str(status or "")
+            if status in ("", "not_recorded"):
+                return 0.25
+            if any(token in status for token in ("missing", "failed", "blocked", "cancelled")):
+                return 1.0
+            if status.endswith("_high") or status in ("changed_runtime_strategy", "object_identity_watch"):
+                return 0.78
+            if status.endswith("_watch") or status in ("protected_negative_payload_drift", "object_identity_measured", "source_anchor_crop_disabled"):
+                return 0.38
+            if status.endswith("_nominal") or status.endswith("_stable") or status in ("clean_same_strategy", "source_anchor_recorded"):
+                return 0.12
+            return 0.25
+
+        route_contracts = {
+            "prompt_image_anchor": {
+                "parent_route": "S_global_prompt_source_anchor",
+                "return_requirement": "Prompt meaning and source anchor must resolve into one StrategyCandidate before latent seeding.",
+                "card_stage": "EventPromptCarrierContinuityCard",
+                "secondary_card_stage": "EventSourceAnchorPreservationCard",
+            },
+            "positive_negative_prompt_polarity": {
+                "parent_route": "S_global_prompt_corridor",
+                "return_requirement": "Positive and negative carriers must form one semantic corridor, not two competing instructions.",
+                "card_stage": "EventPromptCarrierContinuityCard",
+            },
+            "image_latent_noise_seed": {
+                "parent_route": "S_global_source_to_latent_anchor",
+                "return_requirement": "SourceAnchor must survive scaling, crop policy, and latent seed initialization.",
+                "card_stage": "EventSourceAnchorPreservationCard",
+            },
+            "high_low_sampler_strategy": {
+                "parent_route": "S_global_sampler_route",
+                "return_requirement": "OutcomeNext(high) must remain the StrategyCarrier that low sampler refines.",
+                "card_stage": "EventLowBranchRelationPressureCard",
+            },
+            "object_relation_ontology": {
+                "parent_route": "S_global_object_relation",
+                "return_requirement": "Object identity, contact boundary, and relative motion must stay one relation.",
+                "card_stage": "EventObjectCarrierIdentityCard",
+            },
+            "tail_next_source": {
+                "parent_route": "S_global_cascade_continuation",
+                "return_requirement": "Selected tail frame must become OutcomePrevious(next segment) without hidden scene reset.",
+                "card_stage": "EventTailStrategyContinuityCard",
+            },
+            "previous_next_frame_motion": {
+                "parent_route": "S_global_visible_motion",
+                "return_requirement": "Adjacent visible frames must allow motion while preserving event identity.",
+                "card_stage": "EventFrameSpikeAttributionCard",
+            },
+            "visible_video_outcome": {
+                "parent_route": "S_global_visible_outcome",
+                "return_requirement": "Decoded frames and final save must become the visible Outcome inspected by the user.",
+                "card_stage": "EventGlobalStrategyReturnCard",
+            },
+        }
+
+        collision_by_id = {
+            str(item.get("collision_id") or ""): item
+            for item in vector_collisions
+            if str(item.get("collision_id") or "")
+        }
+
+        pressure_terms = object_relation_review.get("pressure_terms", {})
+        if not isinstance(pressure_terms, dict):
+            pressure_terms = {}
+        seam_attribution = str(object_relation_review.get("cascade_post_seam_attribution", "") or "")
+        seam_score = clamp01(object_relation_review.get("cascade_post_seam_acceleration_score", 0.0))
+        object_drift = clamp01(object_relation_review.get("object_relation_drift_score", 0.0))
+
+        local_routes = []
+        for collision_id, contract in route_contracts.items():
+            collision = collision_by_id.get(collision_id, {})
+            local_formula = collision.get("local_formula", {}) if isinstance(collision.get("local_formula", {}), dict) else {}
+            card = card_by_stage(contract.get("card_stage", ""))
+            secondary_card = card_by_stage(contract.get("secondary_card_stage", ""))
+            card_status = str(card.get("status", "") or "not_recorded")
+            secondary_status = str(secondary_card.get("status", "") or "")
+
+            conflict = clamp01(collision.get("conflict_score", 0.0))
+            drift = clamp01(collision.get("drift_score", 0.0))
+            card_pressure = pressure_from_status(card_status)
+            secondary_pressure = pressure_from_status(secondary_status) if secondary_status else 0.0
+            extra_pressure = 0.0
+            if collision_id == "object_relation_ontology":
+                extra_pressure = max(object_drift, clamp01(pressure_terms.get("object_relation_pressure", 0.0)))
+            elif collision_id == "high_low_sampler_strategy":
+                extra_pressure = clamp01(pressure_terms.get("high_low_pressure", 0.0))
+            elif collision_id == "tail_next_source":
+                extra_pressure = max(clamp01(pressure_terms.get("tail_pressure", 0.0)), seam_score if seam_attribution else 0.0)
+            elif collision_id == "previous_next_frame_motion":
+                extra_pressure = max(clamp01(pressure_terms.get("frame_motion_pressure", 0.0)), seam_score if seam_attribution == "late_segment_spike" else 0.0)
+
+            return_pressure = max(conflict, drift, card_pressure, secondary_pressure, extra_pressure)
+            return_score = 1.0 - return_pressure
+            if return_pressure >= 0.70:
+                route_status = "return_watch_high"
+            elif return_pressure >= 0.35:
+                route_status = "return_watch"
+            else:
+                route_status = "returned"
+
+            local_routes.append({
+                "collision_id": collision_id,
+                "local_strategy_id": local_formula.get("local_strategy_id", f"S_collision_{collision_id}"),
+                "parent_route": contract.get("parent_route", ""),
+                "return_requirement": contract.get("return_requirement", ""),
+                "formula_role": (local_formula.get("strategy_point", {}) or {}).get("meaning", ""),
+                "carriers": collision.get("carriers", []),
+                "collision_status": str(collision.get("status", "") or "not_recorded"),
+                "relation_card_stage": contract.get("card_stage", ""),
+                "relation_card_status": card_status,
+                "secondary_card_status": secondary_status,
+                "conflict_score": conflict,
+                "drift_score": drift,
+                "card_pressure": card_pressure,
+                "extra_topology_pressure": extra_pressure,
+                "return_pressure": return_pressure,
+                "return_score": return_score,
+                "return_status": route_status,
+                "active_control_allowed": False,
+            })
+
+        pressures = [clamp01(route.get("return_pressure", 0.0)) for route in local_routes]
+        scores = [clamp01(route.get("return_score", 0.0)) for route in local_routes]
+        topology_sync_score = sum(scores) / max(1, len(scores))
+        max_pressure = max(pressures) if pressures else 0.0
+        unstable_routes = [r for r in local_routes if str(r.get("return_status")) == "return_watch_high"]
+        watch_routes = [r for r in local_routes if str(r.get("return_status")).startswith("return_watch")]
+        sorted_routes = sorted(local_routes, key=lambda r: clamp01(r.get("return_pressure", 0.0)), reverse=True)
+        primary_pressure_axis = [r.get("collision_id", "") for r in sorted_routes[:3]]
+
+        if max_pressure >= 0.70 or len(unstable_routes) > 0:
+            status = "topology_return_watch_high"
+        elif max_pressure >= 0.35 or len(watch_routes) > 0:
+            status = "topology_return_watch"
+        else:
+            status = "topology_return_nominal"
+
+        next_route = "Keep topology report-only; run fixed-seed comparison before active math."
+        if "high_low_sampler_strategy" in primary_pressure_axis and "previous_next_frame_motion" in primary_pressure_axis:
+            next_route = (
+                "Focus r87/r88 research on sampler-route pressure returning into visible motion; "
+                "do not treat this as a seam-stitching fix unless seam pressure rises."
+            )
+        if seam_attribution == "late_segment_spike":
+            next_route = (
+                "Late segment spike is the active evidence target: compare high/low sampler pressure, prompt Strategy identity, "
+                "and visible motion after the seam before any damping/control."
+            )
+
+        return {
+            "stage": "EventTopologyStrategyReturnMap",
+            "status": status,
+            "map_version": "topology_strategy_return_v1_report_only",
+            "formula": "Every local collision formula may unfold, but it must return to the global Strategy route before the next sampler/segment receives data.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "global_strategy_id": "S_global_event_route",
+            "global_strategy": {
+                "meaning": "prompt meaning = model interpretation = sampler route = latent evolution = visible video outcome",
+                "primary_return_law": "Local Strategy points are accountable to the route-level StrategyCarrier, not independent controllers.",
+                "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            },
+            "topology_sync_score": topology_sync_score,
+            "max_return_pressure": max_pressure,
+            "unstable_route_count": len(unstable_routes),
+            "watch_route_count": len(watch_routes),
+            "primary_pressure_axis": primary_pressure_axis,
+            "top_conflict_collision": strategy_matrix.get("top_conflict_collision", ""),
+            "top_drift_collision": strategy_matrix.get("top_drift_collision", ""),
+            "cascade_post_seam_attribution": seam_attribution,
+            "cascade_post_seam_acceleration_score": seam_score,
+            "local_strategy_routes": local_routes,
+            "strategy_return_sequence": [
+                "prompt_image_anchor",
+                "positive_negative_prompt_polarity",
+                "image_latent_noise_seed",
+                "high_low_sampler_strategy",
+                "object_relation_ontology",
+                "tail_next_source",
+                "previous_next_frame_motion",
+                "visible_video_outcome",
+            ],
+            "next_route": next_route,
+        }
+
+    def _event_strategy_return_pressure_resolver(
+        self,
+        topology_strategy_return_map=None,
+        relation_pressure_cards=None,
+        strategy_matrix=None,
+        object_relation_review=None,
+    ):
+        """
+        r88 report-only resolver.
+
+        This is the topology-safe bridge between "we measured pressure" and
+        "which non-text control surface should be tested next". It does not
+        modify prompts, tensors, samplers, deltas, pause routing, or video
+        frames.
+        """
+        topology_strategy_return_map = topology_strategy_return_map if isinstance(topology_strategy_return_map, dict) else {}
+        relation_pressure_cards = [
+            c for c in (relation_pressure_cards or [])
+            if isinstance(c, dict)
+        ]
+        strategy_matrix = strategy_matrix if isinstance(strategy_matrix, dict) else {}
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+
+        def safe_float(value, default=None):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            value = safe_float(value, 0.0)
+            return max(0.0, min(1.0, value))
+
+        def card(stage_name):
+            for item in relation_pressure_cards:
+                if str(item.get("stage", "") or "") == stage_name:
+                    return item
+            return {}
+
+        def route(collision_id):
+            for item in topology_strategy_return_map.get("local_strategy_routes", []) or []:
+                if isinstance(item, dict) and str(item.get("collision_id", "") or "") == collision_id:
+                    return item
+            return {}
+
+        prompt_card = card("EventPromptCarrierContinuityCard")
+        low_card = card("EventLowBranchRelationPressureCard")
+        frame_card = card("EventFrameSpikeAttributionCard")
+        tail_card = card("EventTailStrategyContinuityCard")
+        object_card = card("EventObjectCarrierIdentityCard")
+        source_card = card("EventSourceAnchorPreservationCard")
+        global_card = card("EventGlobalStrategyReturnCard")
+
+        seam_terms = tail_card.get("seam_pressure_terms", {}) if isinstance(tail_card.get("seam_pressure_terms", {}), dict) else {}
+        prompt_status = str(prompt_card.get("status", "") or "not_recorded")
+        prompt_carrier_clean = prompt_status not in ("changed_runtime_strategy", "prompt_carrier_did_not_return_to_current_strategy")
+
+        high_low_pressure = max(
+            clamp01(low_card.get("high_low_pressure", 0.0)),
+            clamp01(low_card.get("low_trace_pressure", 0.0)),
+            clamp01(route("high_low_sampler_strategy").get("return_pressure", 0.0)),
+        )
+        frame_motion_pressure = max(
+            clamp01(frame_card.get("frame_pressure", 0.0)),
+            clamp01(route("previous_next_frame_motion").get("return_pressure", 0.0)),
+        )
+        late_segment_spike_pressure = max(
+            clamp01(seam_terms.get("max_late_segment_spike_pressure", 0.0)),
+            clamp01(topology_strategy_return_map.get("cascade_post_seam_acceleration_score", 0.0))
+            if str(topology_strategy_return_map.get("cascade_post_seam_attribution", "") or "") == "late_segment_spike"
+            else 0.0,
+        )
+        seam_boundary_pressure = clamp01(seam_terms.get("max_seam_pressure", 0.0))
+        tail_pressure = max(
+            clamp01(tail_card.get("tail_pressure", 0.0)),
+            clamp01(tail_card.get("post_seam_acceleration_score", 0.0)),
+            clamp01(route("tail_next_source").get("return_pressure", 0.0)),
+        )
+        object_relation_pressure = max(
+            clamp01(object_relation_review.get("object_relation_drift_score", 0.0)),
+            clamp01(route("object_relation_ontology").get("return_pressure", 0.0)),
+        )
+        source_anchor_pressure = clamp01(route("prompt_image_anchor").get("return_pressure", 0.0))
+        topology_pressure = clamp01(topology_strategy_return_map.get("max_return_pressure", 0.0))
+
+        pressure_vector = {
+            "prompt_carrier_pressure": 1.0 if not prompt_carrier_clean else clamp01(route("prompt_image_anchor").get("return_pressure", 0.0)),
+            "high_low_sampler_pressure": high_low_pressure,
+            "visible_frame_motion_pressure": frame_motion_pressure,
+            "late_segment_spike_pressure": late_segment_spike_pressure,
+            "seam_boundary_pressure": seam_boundary_pressure,
+            "tail_strategy_pressure": tail_pressure,
+            "object_relation_pressure": object_relation_pressure,
+            "source_anchor_pressure": source_anchor_pressure,
+            "topology_return_pressure": topology_pressure,
+        }
+        dominant_pressure = max(pressure_vector.values()) if pressure_vector else 0.0
+        dominant_axis = max(pressure_vector, key=pressure_vector.get) if pressure_vector else "none"
+        weighted_pressure = clamp01(
+            0.28 * high_low_pressure
+            + 0.24 * frame_motion_pressure
+            + 0.18 * late_segment_spike_pressure
+            + 0.12 * tail_pressure
+            + 0.10 * object_relation_pressure
+            + 0.08 * source_anchor_pressure
+        )
+        strategy_return_pressure = max(weighted_pressure, min(dominant_pressure, 0.82))
+        strategy_return_score = 1.0 - strategy_return_pressure
+
+        if not prompt_carrier_clean:
+            status = "blocked_until_prompt_carrier_returns"
+            primary_attribution = "prompt_carrier_not_returned"
+            next_surface = "prompt_payload_identity_guard"
+            next_action = "Fix prompt carrier continuity before interpreting sampler or motion math."
+        elif high_low_pressure >= 0.50 and frame_motion_pressure >= 0.55 and late_segment_spike_pressure >= 0.45:
+            status = "strategy_return_pressure_high"
+            primary_attribution = "high_low_visible_late_motion_coupling"
+            next_surface = "sampler_to_visible_motion_pressure_window"
+            next_action = "Test a bounded sampler-to-visible-motion pressure window; keep prompt text clean and change only one delta/sampler variable."
+        elif frame_motion_pressure >= 0.55:
+            status = "strategy_return_pressure_high"
+            primary_attribution = "visible_frame_motion_pressure"
+            next_surface = "visible_motion_stability_review"
+            next_action = "Compare fixed-seed visible motion before adding any active damping."
+        elif high_low_pressure >= 0.55:
+            status = "strategy_return_pressure_high"
+            primary_attribution = "high_low_sampler_strategy_pressure"
+            next_surface = "bounded_latent_delta_research"
+            next_action = "Investigate high/low delta as a sampler-route carrier, not as a prompt rewrite."
+        elif seam_boundary_pressure >= 0.55:
+            status = "strategy_return_pressure_high"
+            primary_attribution = "cascade_boundary_jump"
+            next_surface = "tail_frame_strategy_choice"
+            next_action = "Review selected tail frame and MirrorCut boundary before sampler math."
+        elif strategy_return_pressure >= 0.35:
+            status = "strategy_return_pressure_watch"
+            primary_attribution = dominant_axis
+            next_surface = "report_only_fixed_seed_comparison"
+            next_action = "Run one fixed-seed comparison and keep this resolver report-only."
+        else:
+            status = "strategy_return_nominal"
+            primary_attribution = "no_single_dominant_pressure"
+            next_surface = "continue_observation"
+            next_action = "Continue collecting fixed-seed evidence; no active math pressure is justified by this report."
+
+        candidate_control_surfaces = [
+            {
+                "surface": "sampler_to_visible_motion_pressure_window",
+                "role": "ObservedBehavior(high/low) -> visible motion Strategy return",
+                "when_to_test": "after r87 prompt continuity is clean and high_low + frame pressure are both high",
+                "default_active": False,
+            },
+            {
+                "surface": "bounded_latent_delta_research",
+                "role": "small high/low delta windows as sampler-route evidence",
+                "when_to_test": "one variable per fixed-seed comparison; never public default until visual proof",
+                "default_active": False,
+            },
+            {
+                "surface": "tail_frame_strategy_choice",
+                "role": "selected tail OutcomePrevious for next segment",
+                "when_to_test": "when seam boundary pressure or tail pressure dominates",
+                "default_active": False,
+            },
+            {
+                "surface": "conditioning_route_weight_map",
+                "role": "future non-text Strategy density routing",
+                "when_to_test": "after report-only density maps are stable across runs",
+                "default_active": False,
+            },
+        ]
+
+        return {
+            "stage": "EventStrategyReturnPressureResolver",
+            "status": status,
+            "resolver_version": "strategy_return_pressure_resolver_v1_report_only",
+            "formula": "Local Strategy pressure is folded back into S_global_event_route before any next sampler/control decision is proposed.",
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "model_freedom_policy": "This resolver names pressure and next surfaces; it does not force model physics or inject text.",
+            "parent_strategy": "S_global_event_route",
+            "sub_strategy_return_policy": "high/low, frame motion, tail, object, source, and prompt routes are local evidence routes that must return to the parent Strategy.",
+            "prompt_carrier_clean": bool(prompt_carrier_clean),
+            "pressure_vector": pressure_vector,
+            "strategy_return_pressure": strategy_return_pressure,
+            "strategy_return_score": strategy_return_score,
+            "weighted_pressure": weighted_pressure,
+            "dominant_pressure": dominant_pressure,
+            "dominant_axis": dominant_axis,
+            "primary_attribution": primary_attribution,
+            "next_control_surface": next_surface,
+            "candidate_control_surfaces": candidate_control_surfaces,
+            "do_not_do": [
+                "do not inject topology/math prose into the prompt",
+                "do not treat negative prompt bans as object physics",
+                "do not globally damp motion before high/low and frame-pressure evidence agree",
+                "do not tune from a stale-runtime or changed-prompt report",
+            ],
+            "evidence_stages": [
+                stage for stage in [
+                    str(prompt_card.get("stage", "") or ""),
+                    str(low_card.get("stage", "") or ""),
+                    str(frame_card.get("stage", "") or ""),
+                    str(tail_card.get("stage", "") or ""),
+                    str(object_card.get("stage", "") or ""),
+                    str(source_card.get("stage", "") or ""),
+                    str(global_card.get("stage", "") or ""),
+                    str(topology_strategy_return_map.get("stage", "") or ""),
+                    str(strategy_matrix.get("stage", "") or ""),
+                ] if stage
+            ],
+            "next_action": next_action,
         }
 
     def _event_core_cascade_progress(self, execution_records, result_status="", saved_video_path=""):
@@ -1458,6 +2716,17 @@ class SingularityTelemetryMixin:
     def _event_core_body_summary_record(self, audit, order_audit, gate, body=None):
         checks = audit.get("checks", {}) if isinstance(audit, dict) else {}
         body = body if isinstance(body, dict) else {}
+        relation_pressure_cards = [
+            item for item in (body.get("relation_pressure_cards", []) or [])
+            if isinstance(item, dict)
+        ]
+
+        def relation_card_status(stage_name):
+            for item in relation_pressure_cards:
+                if str(item.get("stage", "") or "") == stage_name:
+                    return str(item.get("status", "") or "")
+            return "not_recorded"
+
         return {
             "stage": "EventCoreBodySummary",
             "status": gate.get("status", "UNKNOWN") if isinstance(gate, dict) else "UNKNOWN",
@@ -1482,8 +2751,37 @@ class SingularityTelemetryMixin:
             "vector_collision_observed_count": (body.get("strategy_matrix", {}) or {}).get("observed_collision_count", 0) if isinstance(body.get("strategy_matrix", {}), dict) else 0,
             "local_micro_formula_count": (body.get("strategy_matrix", {}) or {}).get("micro_formula_count", 0) if isinstance(body.get("strategy_matrix", {}), dict) else 0,
             "strategy_guidance_proposal_count": (body.get("strategy_guidance_proposal", {}) or {}).get("proposal_count", 0) if isinstance(body.get("strategy_guidance_proposal", {}), dict) else 0,
+            "strategy_control_surface_status": (body.get("strategy_control_surface_plan", {}) or {}).get("status", "not_recorded") if isinstance(body.get("strategy_control_surface_plan", {}), dict) else "not_recorded",
+            "strategy_control_surface_policy": (body.get("strategy_control_surface_plan", {}) or {}).get("policy", "") if isinstance(body.get("strategy_control_surface_plan", {}), dict) else "",
+            "strategy_control_surface_path": (body.get("strategy_control_surface_plan", {}) or {}).get("active_generation_math_path", "") if isinstance(body.get("strategy_control_surface_plan", {}), dict) else "",
+            "strategy_control_surface_apply_count": len(body.get("strategy_control_surface_apply_records", []) or []),
+            "relation_pressure_card_count": len(relation_pressure_cards),
+            "prompt_carrier_continuity_status": relation_card_status("EventPromptCarrierContinuityCard"),
+            "low_branch_relation_pressure_status": relation_card_status("EventLowBranchRelationPressureCard"),
+            "object_carrier_identity_status": relation_card_status("EventObjectCarrierIdentityCard"),
+            "tail_strategy_continuity_status": relation_card_status("EventTailStrategyContinuityCard"),
+            "frame_spike_attribution_status": relation_card_status("EventFrameSpikeAttributionCard"),
+            "source_anchor_preservation_status": relation_card_status("EventSourceAnchorPreservationCard"),
+            "global_strategy_return_status": relation_card_status("EventGlobalStrategyReturnCard"),
+            "topology_strategy_return_status": (body.get("topology_strategy_return_map", {}) or {}).get("status", "not_recorded") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "not_recorded",
+            "topology_sync_score": (body.get("topology_strategy_return_map", {}) or {}).get("topology_sync_score", "") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "",
+            "topology_unstable_route_count": (body.get("topology_strategy_return_map", {}) or {}).get("unstable_route_count", "") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "",
+            "topology_watch_route_count": (body.get("topology_strategy_return_map", {}) or {}).get("watch_route_count", "") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "",
+            "topology_primary_pressure_axis": (body.get("topology_strategy_return_map", {}) or {}).get("primary_pressure_axis", []) if isinstance(body.get("topology_strategy_return_map", {}), dict) else [],
+            "topology_next_route": (body.get("topology_strategy_return_map", {}) or {}).get("next_route", "") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "",
+            "strategy_return_resolver_status": (body.get("strategy_return_pressure_resolver", {}) or {}).get("status", "not_recorded") if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else "not_recorded",
+            "strategy_return_pressure": (body.get("strategy_return_pressure_resolver", {}) or {}).get("strategy_return_pressure", "") if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else "",
+            "strategy_return_primary_attribution": (body.get("strategy_return_pressure_resolver", {}) or {}).get("primary_attribution", "") if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else "",
+            "strategy_return_next_control_surface": (body.get("strategy_return_pressure_resolver", {}) or {}).get("next_control_surface", "") if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else "",
+            "strategy_return_active_control_allowed": (body.get("strategy_return_pressure_resolver", {}) or {}).get("active_control_allowed", False) if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else False,
             "top_conflict_collision": (body.get("strategy_matrix", {}) or {}).get("top_conflict_collision", "") if isinstance(body.get("strategy_matrix", {}), dict) else "",
             "top_drift_collision": (body.get("strategy_matrix", {}) or {}).get("top_drift_collision", "") if isinstance(body.get("strategy_matrix", {}), dict) else "",
+            "object_relation_review_status": (body.get("object_relation_review", {}) or {}).get("status", "not_recorded") if isinstance(body.get("object_relation_review", {}), dict) else "not_recorded",
+            "object_relation_drift_score": (body.get("object_relation_review", {}) or {}).get("object_relation_drift_score", "") if isinstance(body.get("object_relation_review", {}), dict) else "",
+            "carrier_persistence_score": (body.get("object_relation_review", {}) or {}).get("carrier_persistence_score", "") if isinstance(body.get("object_relation_review", {}), dict) else "",
+            "contact_boundary_continuity_score": (body.get("object_relation_review", {}) or {}).get("contact_boundary_continuity_score", "") if isinstance(body.get("object_relation_review", {}), dict) else "",
+            "cascade_post_seam_acceleration_score": (body.get("object_relation_review", {}) or {}).get("cascade_post_seam_acceleration_score", "") if isinstance(body.get("object_relation_review", {}), dict) else "",
+            "cascade_post_seam_attribution": (body.get("object_relation_review", {}) or {}).get("cascade_post_seam_attribution", "") if isinstance(body.get("object_relation_review", {}), dict) else "",
             "required_exact_missing": checks.get("required_exact_missing", []),
             "required_prefix_missing": checks.get("required_prefix_missing", []),
             "video_stage_missing": checks.get("video_stage_missing", []),
@@ -1568,6 +2866,19 @@ class SingularityTelemetryMixin:
         )
         body["strategy_matrix"] = strategy_matrix
         body["vector_collision_records"] = vector_collisions
+        object_relation_review = self._event_object_relation_review_from_records(
+            execution_records,
+            strategy_matrix=strategy_matrix,
+            vector_collisions=vector_collisions,
+        )
+        strategy_matrix, vector_collisions = self._event_apply_object_relation_review(
+            object_relation_review,
+            strategy_matrix,
+            vector_collisions,
+        )
+        body["strategy_matrix"] = strategy_matrix
+        body["vector_collision_records"] = vector_collisions
+        body["object_relation_review"] = object_relation_review
         local_micro_formula_records = []
         for collision in vector_collisions:
             local_formula = collision.get("local_formula") if isinstance(collision, dict) else None
@@ -1598,9 +2909,47 @@ class SingularityTelemetryMixin:
         strategy_guidance = self._event_strategy_guidance_proposal(strategy_matrix, vector_collisions)
         strategy_matrix["guidance_proposal_count"] = int(strategy_guidance.get("proposal_count", 0) or 0)
         body["strategy_guidance_proposal"] = strategy_guidance
+        relation_pressure_cards = self._event_relation_pressure_cards_from_records(
+            execution_records,
+            strategy_matrix=strategy_matrix,
+            object_relation_review=object_relation_review,
+            vector_collisions=vector_collisions,
+        )
+        strategy_matrix["relation_pressure_card_count"] = len(relation_pressure_cards)
+        strategy_matrix["relation_pressure_card_statuses"] = {
+            str(card.get("stage", "") or ""): str(card.get("status", "") or "")
+            for card in relation_pressure_cards
+            if isinstance(card, dict)
+        }
+        body["relation_pressure_cards"] = relation_pressure_cards
+        topology_strategy_return_map = self._event_topology_strategy_return_map(
+            strategy_matrix=strategy_matrix,
+            relation_pressure_cards=relation_pressure_cards,
+            vector_collisions=vector_collisions,
+            object_relation_review=object_relation_review,
+        )
+        body["topology_strategy_return_map"] = topology_strategy_return_map
+        strategy_matrix["topology_strategy_return_status"] = topology_strategy_return_map.get("status", "")
+        strategy_matrix["topology_sync_score"] = topology_strategy_return_map.get("topology_sync_score", "")
+        strategy_matrix["topology_primary_pressure_axis"] = topology_strategy_return_map.get("primary_pressure_axis", [])
+        strategy_return_pressure_resolver = self._event_strategy_return_pressure_resolver(
+            topology_strategy_return_map=topology_strategy_return_map,
+            relation_pressure_cards=relation_pressure_cards,
+            strategy_matrix=strategy_matrix,
+            object_relation_review=object_relation_review,
+        )
+        body["strategy_return_pressure_resolver"] = strategy_return_pressure_resolver
+        strategy_matrix["strategy_return_resolver_status"] = strategy_return_pressure_resolver.get("status", "")
+        strategy_matrix["strategy_return_pressure"] = strategy_return_pressure_resolver.get("strategy_return_pressure", "")
+        strategy_matrix["strategy_return_primary_attribution"] = strategy_return_pressure_resolver.get("primary_attribution", "")
+        strategy_matrix["strategy_return_next_control_surface"] = strategy_return_pressure_resolver.get("next_control_surface", "")
+        execution_records.append(object_relation_review)
         execution_records.extend(vector_collisions)
         execution_records.extend(local_micro_formula_records)
         execution_records.append(strategy_guidance)
+        execution_records.extend(relation_pressure_cards)
+        execution_records.append(topology_strategy_return_map)
+        execution_records.append(strategy_return_pressure_resolver)
         execution_records.append(strategy_matrix)
         if body.get("runtime_monitor_summary"):
             execution_records.append({

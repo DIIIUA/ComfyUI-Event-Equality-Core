@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r62"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R62 Pause UI Recovery Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r62"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
+EVENT_HORIZON_BODY_VERSION = "0.1-r91"
 
 
 def _event_json_safe(value, depth=0):
@@ -439,6 +439,282 @@ class SingularityCascadeMixin:
             records.append(rec)
             return rec
 
+    def _cascade_seam_motion_review(self, segment_batches, concatenated_frames, records, frames_per_cascade=None):
+        """
+        r74 observer-only cascade seam review.
+        It distinguishes the boundary jump from post-seam acceleration inside the next segment.
+        """
+        try:
+            import torch
+
+            def safe_float(value, default=None):
+                try:
+                    out = float(value)
+                except Exception:
+                    return default
+                return out if math.isfinite(out) else default
+
+            def clamp01(value):
+                value = safe_float(value, 0.0)
+                return max(0.0, min(1.0, value))
+
+            def tensor_frames(value):
+                t = self._tensor_from_latent_like(value)
+                if t is None:
+                    return None
+                t = torch.nan_to_num(t.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                if t.dim() < 2 or t.shape[0] < 1:
+                    return None
+                return t
+
+            def delta_abs_values(frames):
+                if frames is None or frames.shape[0] < 2:
+                    return []
+                delta = frames[1:] - frames[:-1]
+                values = delta.abs().reshape(delta.shape[0], -1).mean(dim=1)
+                return [float(x) for x in values.detach().cpu().tolist()]
+
+            def mean(values):
+                values = [safe_float(v, None) for v in (values or [])]
+                values = [v for v in values if v is not None]
+                return float(sum(values) / len(values)) if values else None
+
+            def std(values):
+                values = [safe_float(v, None) for v in (values or [])]
+                values = [v for v in values if v is not None]
+                if len(values) < 2:
+                    return 0.0 if values else None
+                mu = sum(values) / len(values)
+                return float((sum((v - mu) ** 2 for v in values) / (len(values) - 1)) ** 0.5)
+
+            def window_mean(values, start=None, end=None):
+                values = list(values or [])
+                subset = values[slice(start, end)]
+                return mean(subset)
+
+            def ratio(numerator, denominator):
+                numerator = safe_float(numerator, None)
+                denominator = safe_float(denominator, None)
+                if numerator is None or denominator is None or denominator <= 0:
+                    return None
+                return float(numerator / (denominator + 1e-12))
+
+            segments = [tensor_frames(item) for item in (segment_batches or [])]
+            segments = [item for item in segments if item is not None and item.shape[0] >= 1]
+            if len(segments) < 2:
+                rec = {
+                    "stage": "EventCascadeSeamMotionReview",
+                    "status": "not_applicable",
+                    "reason": "requires_at_least_two_segments",
+                    "observed_segments": len(segments),
+                    "control_mode": "REPORT_ONLY",
+                }
+                records.append(rec)
+                return rec
+
+            concat = tensor_frames(concatenated_frames)
+            global_values = delta_abs_values(concat) if concat is not None else []
+            global_mean = mean(global_values)
+            global_std = std(global_values)
+
+            per_segment = []
+            segment_offsets = []
+            offset = 0
+            for idx, segment in enumerate(segments, start=1):
+                values = delta_abs_values(segment)
+                seg_mean = mean(values)
+                seg_std = std(values)
+                segment_offsets.append(offset)
+                offset += int(segment.shape[0])
+                early_n = min(8, len(values))
+                late_n = min(8, len(values))
+                per_segment.append({
+                    "segment_index": int(idx),
+                    "frame_count": int(segment.shape[0]),
+                    "transition_count": len(values),
+                    "mean_abs_delta": seg_mean,
+                    "std_abs_delta": seg_std,
+                    "max_abs_delta": max(values) if values else None,
+                    "early_mean_abs_delta": window_mean(values, 0, early_n) if early_n else None,
+                    "late_mean_abs_delta": window_mean(values, len(values) - late_n, len(values)) if late_n else None,
+                    "max_to_segment_mean_ratio": ratio(max(values) if values else None, seg_mean),
+                    "segment_to_global_mean_ratio": ratio(seg_mean, global_mean),
+                })
+
+            boundary_reviews = []
+            pressure_terms = {}
+            for idx in range(1, len(segments)):
+                prev = segments[idx - 1]
+                nxt = segments[idx]
+                boundary_delta = nxt[0] - prev[-1]
+                boundary_abs = float(boundary_delta.abs().reshape(-1).mean().item())
+                prev_summary = per_segment[idx - 1]
+                next_summary = per_segment[idx]
+                prev_mean = prev_summary.get("mean_abs_delta")
+                next_mean = next_summary.get("mean_abs_delta")
+                prev_late = prev_summary.get("late_mean_abs_delta")
+                next_early = next_summary.get("early_mean_abs_delta")
+                boundary_to_prev = ratio(boundary_abs, prev_mean)
+                boundary_to_next = ratio(boundary_abs, next_mean)
+                next_to_prev = ratio(next_mean, prev_mean)
+                next_early_to_prev_late = ratio(next_early, prev_late)
+                next_max_to_prev_mean = ratio(next_summary.get("max_abs_delta"), prev_mean)
+
+                seam_pressure = clamp01(((boundary_to_prev if boundary_to_prev is not None else 1.0) - 1.0) / 1.5)
+                post_pressure = clamp01(((next_to_prev if next_to_prev is not None else 1.0) - 1.0) / 1.5)
+                early_pressure = clamp01(((next_early_to_prev_late if next_early_to_prev_late is not None else 1.0) - 1.0) / 1.5)
+                late_spike_pressure = clamp01(((next_max_to_prev_mean if next_max_to_prev_mean is not None else 1.0) - 1.35) / 1.5)
+                pressure_key = f"boundary_{idx}_to_{idx + 1}"
+                pressure_terms[pressure_key] = {
+                    "seam_pressure": seam_pressure,
+                    "post_segment_pressure": post_pressure,
+                    "early_post_seam_pressure": early_pressure,
+                    "late_segment_spike_pressure": late_spike_pressure,
+                }
+                boundary_reviews.append({
+                    "boundary_index": int(idx),
+                    "previous_segment": int(idx),
+                    "next_segment": int(idx + 1),
+                    "previous_segment_frame_count": int(prev.shape[0]),
+                    "next_segment_frame_count": int(nxt.shape[0]),
+                    "boundary_abs_delta": boundary_abs,
+                    "boundary_to_previous_segment_mean_ratio": boundary_to_prev,
+                    "boundary_to_next_segment_mean_ratio": boundary_to_next,
+                    "next_segment_to_previous_segment_mean_ratio": next_to_prev,
+                    "next_early_to_previous_late_ratio": next_early_to_prev_late,
+                    "next_max_to_previous_mean_ratio": next_max_to_prev_mean,
+                    "seam_pressure": seam_pressure,
+                    "post_segment_pressure": post_pressure,
+                    "early_post_seam_pressure": early_pressure,
+                    "late_segment_spike_pressure": late_spike_pressure,
+                })
+
+            top_transitions = []
+            if global_values:
+                boundaries = []
+                running = 0
+                for segment in segments[:-1]:
+                    running += int(segment.shape[0])
+                    boundaries.append(running - 1)
+                top_indices = sorted(
+                    range(len(global_values)),
+                    key=lambda i: global_values[i],
+                    reverse=True,
+                )[:12]
+                for idx in top_indices:
+                    boundary_distance = min((abs(idx - b) for b in boundaries), default=None)
+                    segment_id = 1
+                    for boundary_pos in boundaries:
+                        if idx >= boundary_pos:
+                            segment_id += 1
+                    top_transitions.append({
+                        "transition": f"{idx}->{idx + 1}",
+                        "transition_index": int(idx),
+                        "approx_segment": int(segment_id),
+                        "abs_delta": float(global_values[idx]),
+                        "to_global_mean_ratio": ratio(global_values[idx], global_mean),
+                        "distance_to_nearest_seam_transition": int(boundary_distance) if boundary_distance is not None else None,
+                    })
+
+            max_boundary_to_previous = max(
+                [v for v in (item.get("boundary_to_previous_segment_mean_ratio") for item in boundary_reviews) if v is not None],
+                default=None,
+            )
+            max_post_ratio = max(
+                [v for v in (item.get("next_segment_to_previous_segment_mean_ratio") for item in boundary_reviews) if v is not None],
+                default=None,
+            )
+            max_early_ratio = max(
+                [v for v in (item.get("next_early_to_previous_late_ratio") for item in boundary_reviews) if v is not None],
+                default=None,
+            )
+            max_late_spike_ratio = max(
+                [v for v in (item.get("next_max_to_previous_mean_ratio") for item in boundary_reviews) if v is not None],
+                default=None,
+            )
+            max_seam_pressure = max(
+                [item.get("seam_pressure", 0.0) for item in boundary_reviews],
+                default=0.0,
+            )
+            max_post_pressure = max(
+                [item.get("post_segment_pressure", 0.0) for item in boundary_reviews],
+                default=0.0,
+            )
+            max_early_pressure = max(
+                [item.get("early_post_seam_pressure", 0.0) for item in boundary_reviews],
+                default=0.0,
+            )
+            max_late_spike_pressure = max(
+                [item.get("late_segment_spike_pressure", 0.0) for item in boundary_reviews],
+                default=0.0,
+            )
+            post_seam_acceleration_score = clamp01(
+                0.25 * max_seam_pressure
+                + 0.35 * max_post_pressure
+                + 0.20 * max_early_pressure
+                + 0.20 * max_late_spike_pressure
+            )
+            attribution_map = {
+                "cascade_boundary_jump": max_seam_pressure,
+                "next_segment_motion_pressure": max_post_pressure,
+                "early_post_seam_acceleration": max_early_pressure,
+                "late_segment_spike": max_late_spike_pressure,
+            }
+            attribution = max(attribution_map, key=attribution_map.get)
+            if attribution_map.get(attribution, 0.0) < 0.12:
+                attribution = "no_single_dominant_pressure"
+
+            rec = {
+                "stage": "EventCascadeSeamMotionReview",
+                "status": "reviewed",
+                "review_version": "cascade_seam_motion_review_v1_report_only",
+                "formula": "VisibleOutcome(previous segment) + post-seam ObservedBehavior = Strategy(next segment) = continued visible Outcome.",
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+                "observed_segments": len(segments),
+                "frames_per_cascade_requested": int(frames_per_cascade) if frames_per_cascade is not None else None,
+                "segment_frame_counts": [int(item.shape[0]) for item in segments],
+                "global_transition_count": len(global_values),
+                "global_mean_abs_delta": global_mean,
+                "global_std_abs_delta": global_std,
+                "per_segment": per_segment,
+                "boundary_reviews": boundary_reviews,
+                "top_transitions": top_transitions,
+                "max_boundary_to_previous_segment_mean_ratio": max_boundary_to_previous,
+                "max_post_segment_to_previous_segment_mean_ratio": max_post_ratio,
+                "max_early_post_seam_to_previous_late_ratio": max_early_ratio,
+                "max_late_spike_to_previous_mean_ratio": max_late_spike_ratio,
+                "post_seam_acceleration_score": post_seam_acceleration_score,
+                "attribution": attribution,
+                "pressure_terms": {
+                    "max_seam_pressure": max_seam_pressure,
+                    "max_post_segment_pressure": max_post_pressure,
+                    "max_early_post_seam_pressure": max_early_pressure,
+                    "max_late_segment_spike_pressure": max_late_spike_pressure,
+                    "by_boundary": pressure_terms,
+                },
+                "interpretation": (
+                    "post-seam acceleration dominates; review repeated prompt-conditioning pressure before adding damping"
+                    if attribution in ("next_segment_motion_pressure", "early_post_seam_acceleration", "late_segment_spike")
+                    else "seam boundary jump dominates; review MirrorCut frame choice and boundary continuity"
+                    if attribution == "cascade_boundary_jump"
+                    else "no dominant cascade seam pressure detected"
+                ),
+                "next_action": "Compare fixed-seed 2-cascade tests; if post_seam_acceleration_score remains high, test prompt-per-segment route before active motion damping.",
+            }
+            records.append(rec)
+            return rec
+        except Exception as e:
+            rec = {
+                "stage": "EventCascadeSeamMotionReview",
+                "status": "failed",
+                "error": str(e),
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+            }
+            records.append(rec)
+            return rec
+
     # _dual_branch_delta_coupling_math fully excised (physical cut #21): removed the observer-only smart alignment
     # and energy scoring layer on top of the raw high/low deltas. The dual-branch now interacts without this interpretive comfort math.
         except Exception as e:
@@ -683,7 +959,7 @@ class SingularityCascadeMixin:
         try:
             high = float(high_delta_strength)
             low = float(low_delta_strength)
-            mode = str(mode or "OBSERVE_ONLY")
+            mode = str(mode or "OBSERVE_ONLY").upper()
             if mode == "OBSERVE_ONLY" and (abs(high - 1.0) > 1e-9 or abs(low - 1.0) > 1e-9):
                 records.append({
                     "stage": "EventMathControlWarning",
@@ -699,6 +975,187 @@ class SingularityCascadeMixin:
                 "status": "failed",
                 "error": str(e),
             })
+
+    def _event_strategy_control_surface_plan(self, records=None):
+        try:
+            mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+            strengths = getattr(self, "_event_delta_strengths", {}) or {}
+            high = float(strengths.get("high", 1.0) or 1.0)
+            low = float(strengths.get("low", 1.0) or 1.0)
+        except Exception:
+            mode = "OBSERVE_ONLY"
+            high = 1.0
+            low = 1.0
+
+        active_mode = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL")
+        if mode == "STRATEGY_PRESSURE_WINDOW":
+            path = "unified_strategy_pressure_window"
+            policy = "bounded_pressure_intent"
+            active_control_allowed = True
+            model_native_sampler_preserved = True
+            cfg_preserved = True
+        elif mode == "LATENT_DELTA_SCALE":
+            path = "legacy_latent_delta_scale"
+            policy = "raw_branch_delta_scale"
+            active_control_allowed = True
+            model_native_sampler_preserved = True
+            cfg_preserved = True
+        elif mode == "DEEP_STEP_DELTA_CONTROL":
+            path = "deep_step_delta_control"
+            policy = "research_native_step_loop"
+            active_control_allowed = True
+            model_native_sampler_preserved = False
+            cfg_preserved = False
+        else:
+            path = "observe_only"
+            policy = "record_without_tensor_mutation"
+            active_control_allowed = False
+            model_native_sampler_preserved = True
+            cfg_preserved = True
+
+        branch_policies = {
+            "high": {
+                "formula_role": "ObservedBehavior(high) -> StrategyCarrier(low)",
+                "pressure_window_max": 0.020,
+                "pressure_compression": 20.0,
+                "coupling_allowed": False,
+                "requested_strength": float(high),
+            },
+            "low": {
+                "formula_role": "ObservedBehavior(low) -> decode-ready Outcome",
+                "pressure_window_max": 0.012,
+                "pressure_compression": 20.0,
+                "coupling_allowed": True,
+                "requested_strength": float(low),
+            },
+            "default": {
+                "formula_role": "latent transition",
+                "pressure_window_max": 0.016,
+                "pressure_compression": 20.0,
+                "coupling_allowed": False,
+                "requested_strength": 1.0,
+            },
+        }
+
+        plan = {
+            "stage": "EventStrategyControlSurfacePlan",
+            "status": "active" if active_mode else "observe_only",
+            "version": "strategy_control_surface_v1",
+            "mode": mode,
+            "parent_strategy": "S_global_event_route",
+            "active_generation_math_path": path,
+            "policy": policy,
+            "active_control_allowed": bool(active_control_allowed),
+            "model_native_sampler_preserved": bool(model_native_sampler_preserved),
+            "cfg_preserved": bool(cfg_preserved),
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "branch_policies": branch_policies,
+            "requested_strengths": {
+                "high": float(high),
+                "low": float(low),
+            },
+            "formula": "One Strategy control surface chooses how local high/low pressure may become latent transition control after returning to S_global_event_route.",
+        }
+        self._event_strategy_control_surface_plan_state = plan
+
+        signature = json.dumps(_event_json_safe({
+            "mode": mode,
+            "high": high,
+            "low": low,
+            "path": path,
+        }), sort_keys=True, ensure_ascii=True)
+        if records is not None and getattr(self, "_event_strategy_control_surface_plan_signature", "") != signature:
+            records.append(plan)
+            self._event_strategy_control_surface_plan_signature = signature
+        return plan
+
+    def _event_strategy_control_surface_apply(
+        self,
+        branch_name,
+        scheduled_strength,
+        base_strength,
+        coupling_multiplier,
+        step_schedule_factor,
+        records,
+        *,
+        step_index=None,
+        window_steps=None,
+    ):
+        plan = self._event_strategy_control_surface_plan(records)
+        mode = str(plan.get("mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+        branch_lower = str(branch_name or "").lower()
+        if "high" in branch_lower:
+            branch_key = "high"
+        elif "low" in branch_lower:
+            branch_key = "low"
+        else:
+            branch_key = "default"
+        branch_policy = (plan.get("branch_policies", {}) or {}).get(branch_key, {}) or {}
+
+        try:
+            requested_strength = float(scheduled_strength)
+        except Exception:
+            requested_strength = 1.0
+
+        pressure_intent = float(requested_strength - 1.0)
+        max_window = float(branch_policy.get("pressure_window_max", 0.016) or 0.016)
+        compression = float(branch_policy.get("pressure_compression", 20.0) or 20.0)
+        compressed_intent = math.tanh(pressure_intent * compression) if abs(pressure_intent) > 1e-12 else 0.0
+
+        if mode == "STRATEGY_PRESSURE_WINDOW":
+            effective_strength = 1.0 + (compressed_intent * max_window)
+            effective_strength = max(1.0 - max_window, min(1.0 + max_window, effective_strength))
+            apply_policy = "bounded_pressure_window"
+        elif mode in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL"):
+            effective_strength = max(0.0, min(2.0, float(requested_strength)))
+            apply_policy = "raw_delta_scale" if mode == "LATENT_DELTA_SCALE" else "deep_step_delta_scale"
+        else:
+            effective_strength = 1.0
+            apply_policy = "observe_only_no_mutation"
+
+        coupling = getattr(self, "_event_strategy_coupling", {}) or {}
+        try:
+            high_relative_delta = float(coupling.get("relative_delta", 0.0) or 0.0)
+        except Exception:
+            high_relative_delta = 0.0
+
+        active = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL") and abs(effective_strength - 1.0) >= 1e-9
+        rec = {
+            "stage": f"EventStrategyControlSurfaceApply_{branch_name}",
+            "status": "active" if active else "neutral",
+            "mode": mode,
+            "parent_strategy": "S_global_event_route",
+            "branch_name": str(branch_name or ""),
+            "branch_key": branch_key,
+            "formula_role": branch_policy.get("formula_role", "latent transition"),
+            "apply_policy": apply_policy,
+            "base_strength": float(base_strength),
+            "coupling_multiplier": float(coupling_multiplier),
+            "step_schedule_factor": float(step_schedule_factor),
+            "scheduled_strength": float(requested_strength),
+            "pressure_intent": float(pressure_intent),
+            "compressed_pressure_intent": float(compressed_intent),
+            "max_delta_window": float(max_window),
+            "effective_strength": float(effective_strength),
+            "high_relative_delta_evidence": float(high_relative_delta),
+            "step_index": int(step_index) if step_index is not None else None,
+            "window_steps": int(window_steps) if window_steps is not None else None,
+            "formula": "StrategyControlSurface(mode, branch, pressure) returns one effective_strength for latent transition control.",
+        }
+        records.append(rec)
+
+        if mode == "STRATEGY_PRESSURE_WINDOW":
+            alias_rec = dict(rec)
+            alias_rec["stage"] = f"EventStrategyPressureWindow_{branch_name}"
+            alias_rec["status"] = "active_window" if active else "neutral_window"
+            alias_rec["policy"] = "prompt_clean_model_native_sampler_bounded_post_window_delta"
+            alias_rec["formula"] = "Local sampler pressure returns to S_global_event_route through one bounded pressure window before latent delta is applied."
+            records.append(alias_rec)
+            self._event_strategy_pressure_window_last = alias_rec
+
+        self._event_strategy_control_surface_last = rec
+        return rec
 
     def _apply_latent_delta_control(
         self,
@@ -721,7 +1178,7 @@ class SingularityCascadeMixin:
           - per-step schedule factor inside the denoise window
         """
         try:
-            mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY")
+            mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
             strengths = getattr(self, "_event_delta_strengths", {}) or {}
             branch_lower = str(branch_name or "").lower()
             if strength_override is not None:
@@ -760,13 +1217,28 @@ class SingularityCascadeMixin:
         except Exception:
             step_schedule_factor = 1.0
 
-        strength_runtime = max(0.0, min(2.0, float(scheduled_strength)))
+        surface_rec = self._event_strategy_control_surface_apply(
+            branch_name,
+            scheduled_strength,
+            base_strength,
+            coupling_multiplier,
+            step_schedule_factor,
+            records,
+            step_index=step_index,
+            window_steps=window_steps,
+        )
+        try:
+            strength_runtime = float(surface_rec.get("effective_strength", 1.0))
+        except Exception:
+            strength_runtime = 1.0
 
-        if mode not in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL") or abs(strength_runtime - 1.0) < 1e-9:
+        if mode not in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "STRATEGY_PRESSURE_WINDOW") or abs(strength_runtime - 1.0) < 1e-9:
             records.append({
                 "stage": f"EventMathDeltaControl_{branch_name}",
                 "status": "bypass",
                 "mode": mode,
+                "strategy_control_surface": surface_rec.get("stage", ""),
+                "strategy_control_apply_policy": surface_rec.get("apply_policy", ""),
                 "base_strength": base_strength,
                 "coupling_multiplier": coupling_multiplier,
                 "step_schedule_factor": step_schedule_factor,
@@ -786,6 +1258,8 @@ class SingularityCascadeMixin:
                     "stage": f"EventMathDeltaControl_{branch_name}",
                     "status": "unavailable",
                     "mode": mode,
+                    "strategy_control_surface": surface_rec.get("stage", ""),
+                    "strategy_control_apply_policy": surface_rec.get("apply_policy", ""),
                     "base_strength": base_strength,
                     "coupling_multiplier": coupling_multiplier,
                     "step_schedule_factor": step_schedule_factor,
@@ -798,6 +1272,8 @@ class SingularityCascadeMixin:
                     "stage": f"EventMathDeltaControl_{branch_name}",
                     "status": "shape_mismatch",
                     "mode": mode,
+                    "strategy_control_surface": surface_rec.get("stage", ""),
+                    "strategy_control_apply_policy": surface_rec.get("apply_policy", ""),
                     "base_strength": base_strength,
                     "coupling_multiplier": coupling_multiplier,
                     "step_schedule_factor": step_schedule_factor,
@@ -822,6 +1298,8 @@ class SingularityCascadeMixin:
                 "stage": f"EventMathDeltaControl_{branch_name}",
                 "status": "applied",
                 "mode": mode,
+                "strategy_control_surface": surface_rec.get("stage", ""),
+                "strategy_control_apply_policy": surface_rec.get("apply_policy", ""),
                 "base_strength": base_strength,
                 "coupling_multiplier": coupling_multiplier,
                 "step_schedule_factor": step_schedule_factor,
@@ -843,6 +1321,8 @@ class SingularityCascadeMixin:
                 "stage": f"EventMathDeltaControl_{branch_name}",
                 "status": "failed_passthrough",
                 "mode": mode,
+                "strategy_control_surface": surface_rec.get("stage", ""),
+                "strategy_control_apply_policy": surface_rec.get("apply_policy", ""),
                 "base_strength": base_strength,
                 "coupling_multiplier": coupling_multiplier,
                 "step_schedule_factor": step_schedule_factor,
@@ -1215,7 +1695,7 @@ class SingularityCascadeMixin:
 
     def _event_sample_window(self, model, positive, negative, latent, window, records):
         self._math_tensor_summary(latent, records, f"EventMath_{window.branch_name}_latent_before", strict=False)
-        mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY")
+        mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
         # Preserve model-native generation path by default.
         # Math in LATENT_DELTA_SCALE should guide/measure behavior, not replace denoising physics step-by-step.
         use_native_math_loop = (mode == "DEEP_STEP_DELTA_CONTROL")
@@ -1227,6 +1707,14 @@ class SingularityCascadeMixin:
                 "math_control_mode": mode,
                 "native_step_loop_replacement": False,
                 "formula": "Math acts as semantic overlay/observer and post-window control, while sampler core stays model-native.",
+            })
+        elif mode == "STRATEGY_PRESSURE_WINDOW":
+            records.append({
+                "stage": "EventMathSamplerPathPolicy",
+                "status": "native_sampler_preserved_unified_pressure_window",
+                "math_control_mode": mode,
+                "native_step_loop_replacement": False,
+                "formula": "Math acts through one bounded Strategy pressure window after the native sampler window, then returns to S_global_event_route.",
             })
         elif mode == "DEEP_STEP_DELTA_CONTROL":
             records.append({
@@ -1270,7 +1758,7 @@ class SingularityCascadeMixin:
             controlled_latent_after = result.latent_after
 
         branch_name_lower = str(getattr(window, "branch_name", "") or "").lower()
-        if "high" in branch_name_lower and mode == "LATENT_DELTA_SCALE":
+        if "high" in branch_name_lower and mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW"):
             self._update_strategy_coupling_from_high(latent, controlled_latent_after, window.branch_name, records)
 
         self._finite_guard(controlled_latent_after, records, f"EventFiniteGuard_{window.branch_name}_latent_after", strict=True)
