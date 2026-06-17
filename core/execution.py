@@ -112,9 +112,10 @@ except Exception:
     def throw_exception_if_processing_interrupted():
         return None
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
-EVENT_HORIZON_BODY_VERSION = "0.1-r91"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r113"
+TAIL_CANDIDATE_COUNT = 5
 _SINGULARITY_PAUSE_STATES = {}
 
 
@@ -682,6 +683,24 @@ class SingularityExecutionMixin:
             control_mode="REPORT_ONLY",
             metadata={"video_format": str(video_format), "fps": float(fps), "loop_count": 0, "pingpong": False},
         )
+        self._record_raw_vs_singularity_parity_probe(
+            records,
+            "EventRawVsSingularityParity_VideoSaveBegin",
+            route_kind="vhs_video_save",
+            input_state=image,
+            output_state=None,
+            metadata={
+                "fps": float(fps),
+                "video_format": str(video_format),
+                "filename_prefix": str(save_prefix or "wansolo"),
+                "force_vhs": bool(force_vhs),
+                "output_target": str(output_target),
+                "output_folder_mode": str(output_folder_mode),
+                "loop_count": 0,
+                "pingpong": False,
+                "probe_scope": "frames_before_vhs_encode",
+            },
+        )
 
         try:
             self._frames_to_uint8_numpy(image, records=records, stage="EventVideoSave_validate_frames")
@@ -731,6 +750,21 @@ class SingularityExecutionMixin:
                 next_requirement="final report and UI preview should point to saved video path",
                 control_mode="REPORT_ONLY",
                 metadata={"video_format": str(video_format), "fps": float(fps), "saved_video_path": path or ""},
+            )
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_VideoSaveResult",
+                route_kind="vhs_video_save",
+                input_state=image,
+                output_state=path or str(result)[:500],
+                metadata={
+                    "fps": float(fps),
+                    "video_format": str(video_format),
+                    "filename_prefix": str(save_prefix or "wansolo"),
+                    "saved_video_path": path or "",
+                    "vhs_result_found_path": bool(path),
+                    "probe_scope": "frames_after_vhs_encode_path_resolution",
+                },
             )
 
             if path:
@@ -843,7 +877,9 @@ class SingularityExecutionMixin:
             policy = "latent_delta_scale_keeps_cfg_native"
         elif mode == "STRATEGY_PRESSURE_WINDOW":
             policy = "strategy_pressure_window_keeps_cfg_native"
-        elif mode not in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL"):
+        elif mode == "LATENT_MEMORY_BRIDGE":
+            policy = "latent_memory_bridge_keeps_cfg_native"
+        elif mode not in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "DEEP_STEP_DELTA_CONTROL"):
             policy = "mode_keeps_cfg_native"
 
         records.append({
@@ -858,7 +894,7 @@ class SingularityExecutionMixin:
             "cfg_multiplier": multiplier,
             "adjusted_cfg": adjusted_cfg,
             "policy": policy,
-            "formula": "CFG is preserved in LATENT_DELTA_SCALE and STRATEGY_PRESSURE_WINDOW; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
+            "formula": "CFG is preserved in LATENT_DELTA_SCALE, STRATEGY_PRESSURE_WINDOW, and LATENT_MEMORY_BRIDGE; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
         })
         return adjusted_cfg
 
@@ -879,12 +915,12 @@ class SingularityExecutionMixin:
                 i for i in range(tail_start_idx, total_f)
                 if ((i + 1) - 1) % 4 == 0
             ]
-            if len(valid_indices) < 3:
+            if len(valid_indices) < TAIL_CANDIDATE_COUNT:
                 valid_indices = [
                     i for i in range(total_f)
                     if ((i + 1) - 1) % 4 == 0
                 ]
-            selected_indices = valid_indices[-3:] if valid_indices else [max(0, total_f - 1)]
+            selected_indices = valid_indices[-TAIL_CANDIDATE_COUNT:] if valid_indices else [max(0, total_f - 1)]
             prefix = "singularity_pause_" + str(random.randint(100000, 999999))
 
             for idx, frame_idx in enumerate(selected_indices):
@@ -1133,6 +1169,27 @@ class SingularityExecutionMixin:
     def _trim_cascade_resume_state(self, frames, latent, resume_frame_index, execution_records, stage_prefix):
         resume_frame_index = max(1, int(resume_frame_index))
         target_t = max(1, (resume_frame_index - 1) // 4 + 1)
+        frame_shape_before = list(frames.shape) if hasattr(frames, "shape") else None
+        latent_shape_before = None
+        try:
+            samples_before = latent.get("samples") if isinstance(latent, dict) else None
+            latent_shape_before = list(samples_before.shape) if hasattr(samples_before, "shape") else None
+        except Exception:
+            latent_shape_before = None
+        self._record_raw_vs_singularity_parity_probe(
+            execution_records,
+            f"EventRawVsSingularityParity_{stage_prefix}TrimBefore",
+            route_kind="pause_resume_trim",
+            input_state={"frames": frames, "latent": latent},
+            output_state=None,
+            metadata={
+                "resume_frame_index": int(resume_frame_index),
+                "target_latent_t": int(target_t),
+                "frame_shape_before": frame_shape_before,
+                "latent_shape_before": latent_shape_before,
+                "probe_scope": "pause_selection_before_frame_and_latent_trim",
+            },
+        )
         try:
             samples = latent.get("samples") if isinstance(latent, dict) else None
             if samples is not None and samples.shape[2] > target_t:
@@ -1153,6 +1210,29 @@ class SingularityExecutionMixin:
                 "status": "failed_nonfatal",
                 "error": str(e),
             })
+        frame_shape_after = list(frames.shape) if hasattr(frames, "shape") else None
+        latent_shape_after = None
+        try:
+            samples_after = latent.get("samples") if isinstance(latent, dict) else None
+            latent_shape_after = list(samples_after.shape) if hasattr(samples_after, "shape") else None
+        except Exception:
+            latent_shape_after = None
+        self._record_raw_vs_singularity_parity_probe(
+            execution_records,
+            f"EventRawVsSingularityParity_{stage_prefix}TrimAfter",
+            route_kind="pause_resume_trim",
+            input_state=None,
+            output_state={"frames": frames, "latent": latent},
+            metadata={
+                "resume_frame_index": int(resume_frame_index),
+                "target_latent_t": int(target_t),
+                "frame_shape_before": frame_shape_before,
+                "latent_shape_before": latent_shape_before,
+                "frame_shape_after": frame_shape_after,
+                "latent_shape_after": latent_shape_after,
+                "probe_scope": "pause_selection_after_frame_and_latent_trim",
+            },
+        )
         return frames, latent, target_t
 
     def _last_frame_image(self, frames, width=64, height=64):
@@ -1236,7 +1316,150 @@ class SingularityExecutionMixin:
                 records.append({"stage": "TailFrames_ContinuationFitness", "status": "failed", "error": str(e)})
             return None
 
-    def _select_best_tail_frames(self, frames, count=3, records=None):
+    def _event_background_anchor_preservation_card(self, frames, records=None):
+        """
+        Report-only visible-frame anchor card.
+
+        The center may move because the event requires motion. The background
+        should stay closer to SourceAnchor / OutcomePrevious. If background ROI
+        motion rises with center motion, the whole scene is drifting instead of
+        only the intended event carrier changing.
+        """
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        card = {
+            "stage": "EventBackgroundAnchorPreservationCard",
+            "status": "not_available",
+            "card_version": "background_anchor_preservation_v1",
+            "formula": "Background is SourceAnchor / OutcomePrevious evidence; central motion should not turn the whole visible field into ObservedBehavior.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "formula_role": "SourceAnchor preservation against global scene drift",
+        }
+
+        try:
+            import torch
+
+            t = self._tensor_from_latent_like(frames)
+            if t is None or not hasattr(t, "dim") or t.dim() != 4:
+                card.update({"status": "bad_shape", "shape": list(getattr(frames, "shape", [])) if hasattr(frames, "shape") else None})
+                return card
+
+            if t.shape[-1] not in (1, 3, 4) and t.shape[1] in (1, 3, 4):
+                t = t.permute(0, 2, 3, 1)
+            if t.shape[0] < 2:
+                card.update({"status": "not_enough_frames", "frame_count": int(t.shape[0])})
+                return card
+
+            frame_count = int(t.shape[0])
+            sample_stride = max(1, frame_count // 180)
+            sampled = t[::sample_stride].detach().float().cpu()
+            if sampled.shape[0] < 2:
+                sampled = t.detach().float().cpu()
+
+            # Keep measurement cheap and stable. Values are scaled for report
+            # readability so historical mp4-side analysis and in-node cards
+            # live in the same rough numeric range.
+            if sampled.shape[-1] >= 3:
+                gray = (
+                    0.299 * sampled[..., 0]
+                    + 0.587 * sampled[..., 1]
+                    + 0.114 * sampled[..., 2]
+                )
+            else:
+                gray = sampled[..., 0]
+            diffs = (gray[1:] - gray[:-1]).abs()
+            height = int(diffs.shape[1])
+            width = int(diffs.shape[2])
+            scale = 255.0
+
+            def roi_mean(box):
+                x0, y0, x1, y1 = box
+                ix0 = max(0, min(width - 1, int(round(width * x0))))
+                iy0 = max(0, min(height - 1, int(round(height * y0))))
+                ix1 = max(ix0 + 1, min(width, int(round(width * x1))))
+                iy1 = max(iy0 + 1, min(height, int(round(height * y1))))
+                roi = diffs[:, iy0:iy1, ix0:ix1]
+                per_step = roi.reshape(roi.shape[0], -1).mean(dim=1) * scale
+                return {
+                    "mean": float(per_step.mean().item()),
+                    "max": float(per_step.max().item()),
+                }
+
+            roi_boxes = {
+                "top_left_background": (0.00, 0.00, 0.28, 0.22),
+                "top_right_background": (0.72, 0.00, 1.00, 0.22),
+                "top_band_background": (0.20, 0.00, 0.80, 0.16),
+                "left_side_floor": (0.00, 0.40, 0.18, 1.00),
+                "right_side_floor": (0.82, 0.40, 1.00, 1.00),
+                "lower_side_floor": (0.00, 0.78, 1.00, 1.00),
+                "center_event_proxy": (0.25, 0.22, 0.75, 0.82),
+                "full_frame": (0.00, 0.00, 1.00, 1.00),
+            }
+            roi_stats = {name: roi_mean(box) for name, box in roi_boxes.items()}
+            background_names = [
+                "top_left_background",
+                "top_right_background",
+                "top_band_background",
+                "left_side_floor",
+                "right_side_floor",
+                "lower_side_floor",
+            ]
+            background_values = [roi_stats[name]["mean"] for name in background_names]
+            background_max_values = [roi_stats[name]["max"] for name in background_names]
+            background_mean = sum(background_values) / max(1, len(background_values))
+            background_max = max(background_max_values) if background_max_values else 0.0
+            center_mean = roi_stats["center_event_proxy"]["mean"]
+            full_mean = roi_stats["full_frame"]["mean"]
+            center_background_ratio = center_mean / max(background_mean, 1e-6)
+
+            background_drift_score = clamp01((background_mean - 3.50) / 1.80)
+            weak_separation_score = clamp01((1.80 - center_background_ratio) / 0.80)
+            global_scene_drift_score = max(background_drift_score, weak_separation_score)
+            if global_scene_drift_score >= 0.65:
+                status = "global_scene_drift_high"
+            elif global_scene_drift_score >= 0.35:
+                status = "background_anchor_watch"
+            else:
+                status = "background_anchor_stable"
+
+            card.update({
+                "status": status,
+                "frame_count": frame_count,
+                "sample_stride": int(sample_stride),
+                "background_temporal_mean": round(background_mean, 6),
+                "background_temporal_max": round(background_max, 6),
+                "center_temporal_mean": round(center_mean, 6),
+                "full_frame_temporal_mean": round(full_mean, 6),
+                "center_background_ratio": round(center_background_ratio, 6),
+                "background_drift_score": round(background_drift_score, 6),
+                "weak_center_background_separation_score": round(weak_separation_score, 6),
+                "global_scene_drift_score": round(global_scene_drift_score, 6),
+                "roi_temporal_means": {name: round(stats["mean"], 6) for name, stats in roi_stats.items()},
+                "roi_temporal_maxes": {name: round(stats["max"], 6) for name, stats in roi_stats.items()},
+                "score_policy": "background_mean > 3.5 or center/background ratio < 1.8 means visible motion may be global scene drift, not only central event motion",
+                "next_action": (
+                    "Pull low branch toward neutral or keep report-only if background drift is high."
+                    if status == "global_scene_drift_high"
+                    else "Background anchor is measurable; compare this card across fixed-seed runs."
+                ),
+            })
+            return card
+        except Exception as e:
+            card.update({"status": "failed_nonfatal", "error": str(e)})
+            if records is not None:
+                records.append({"stage": "EventBackgroundAnchorPreservationCardError", "status": "failed_nonfatal", "error": str(e)})
+            return card
+
+    def _select_best_tail_frames(self, frames, count=TAIL_CANDIDATE_COUNT, records=None):
         """
         Selection of N frames from the tail, scored by existing motion math.
         This is part of the "1 UI + formula layer" on top of internal node flows.
@@ -1320,10 +1543,12 @@ class SingularityExecutionMixin:
                     system_interest *= (1.0 + rev * 0.5) * (1.0 + (1.0 - min(stab, 1.0)) * 0.3)
 
             # 3. Final system proposal scores
+            # Recency is intentionally only a tiny tie-breaker. Earlier builds
+            # let the last slot win too often even when the content was weaker.
             final_scores = []
             for i, local in enumerate(local_scores):
-                recency = 1.0 + (i / max(n-1, 1)) * 0.2
-                score = local * system_interest * recency
+                recency_tiebreak = (i / max(n-1, 1)) * 0.025
+                score = (local * system_interest) + recency_tiebreak
                 final_scores.append(float(score))
 
             # Normalize
@@ -1367,11 +1592,12 @@ class SingularityExecutionMixin:
             local_score_max = max(local_scores) if local_scores else 0.0
 
             for i in range(n):
-                # Observed for this candidate (right side proxy): normalized tail motion + recency as "future trace".
+                # Observed for this candidate (right side proxy): normalized tail motion
+                # plus a tiny recency tie-breaker, not a dominant future trace.
                 cand_local = local_scores[i] if i < len(local_scores) else 0.0
                 cand_local_norm = (float(cand_local) / float(local_score_max)) if local_score_max > 0 else 0.0
                 cand_recency_norm = i / max(n - 1, 1)
-                observed_for_cand = min(max(0.75 * cand_local_norm + 0.25 * cand_recency_norm, 0.0), 1.0)
+                observed_for_cand = min(max(0.97 * cand_local_norm + 0.03 * cand_recency_norm, 0.0), 1.0)
 
                 # MirrorBreak compares normalized Strategy-side signals, not raw latent norm units vs pixel motion units.
                 # Lower = better admissible continuation (keeps the event coherent per formula right side)
@@ -1398,15 +1624,16 @@ class SingularityExecutionMixin:
                             "local_motion_normalized": float(cand_local_norm),
                             "recency_normalized": float(cand_recency_norm)
                         },
-                        "note": "[RAW6] Bidirectional normalized Mirror: left=normalized segment Strategy (bounded seam pressure + motion), right=normalized candidate continuation. MirrorBreak = same-scale semantic distance per KB Mirror Core."
+                        "note": "[RAW7] Bidirectional normalized Mirror: left=normalized segment Strategy (bounded seam pressure + motion), right=normalized candidate continuation. Recency is only a tie-breaker, not the selection driver."
                     })
 
-            # Blend existing system scores with new formula admissible scores (raw, explicit weights)
+            # Blend existing system scores with formula admissible scores.
+            # The content/continuation evidence must dominate slot order.
             blended_formula_scores = []
             for i in range(n):
                 sys_s = final_scores[i] if i < len(final_scores) else 0.0
                 adm = admissible_continuation_scores[i] if i < len(admissible_continuation_scores) else 0.5
-                blended = 0.6 * sys_s + 0.4 * adm   # 60% existing system signals (raw deltas + motion), 40% formula admissible continuation
+                blended = 0.55 * sys_s + 0.45 * adm
                 blended_formula_scores.append(float(blended))
 
             # Re-normalize blended for recommendation use
@@ -1461,6 +1688,20 @@ class SingularityExecutionMixin:
         try:
             if hasattr(frames, "dim") and frames.dim() == 4 and frames.shape[0] > 1:
                 out = frames[1:]
+                self._record_raw_vs_singularity_parity_probe(
+                    records,
+                    "EventRawVsSingularityParity_CascadeDropFirstFrame",
+                    route_kind="cascade_boundary_frame_trim",
+                    input_state=frames,
+                    output_state=out,
+                    metadata={
+                        "segment_index": int(segment_index),
+                        "before_shape": list(frames.shape),
+                        "after_shape": list(out.shape),
+                        "dropped_first_frame": True,
+                        "reason": "remove duplicated source/continuation frame at cascade boundary",
+                    },
+                )
                 records.append({
                     "stage": "SingularityCascadeDropFirstFrame",
                     "status": "ok",
@@ -1477,17 +1718,205 @@ class SingularityExecutionMixin:
                 "segment_index": int(segment_index),
                 "error": str(e),
             })
+        self._record_raw_vs_singularity_parity_probe(
+            records,
+            "EventRawVsSingularityParity_CascadeDropFirstFrame",
+            route_kind="cascade_boundary_frame_trim",
+            input_state=frames,
+            output_state=frames,
+            metadata={
+                "segment_index": int(segment_index),
+                "dropped_first_frame": False,
+                "reason": "frame batch was not a trim-eligible 4D tensor with more than one frame",
+            },
+        )
         return frames
+
+    def _record_cascade_strategy_continuity_probe(
+        self,
+        records,
+        *,
+        segment_index,
+        previous_frames,
+        next_source_image,
+        next_frames,
+        resume_frame_index=None,
+        latent_temporal_target_t=None,
+        strategy_carrier_context=None,
+    ):
+        """
+        Report-only r109 probe for the cascade Strategy return boundary.
+        It checks whether the selected/terminal OutcomePrevious became the next
+        source StrategyCarrier, and how hard the next segment reinterprets it.
+        """
+        def _slice_frame(obj, mode):
+            try:
+                t = self._tensor_from_latent_like(obj)
+                if t is None:
+                    return None
+                if hasattr(t, "dim"):
+                    if t.dim() == 4 and int(t.shape[0]) > 0:
+                        return t[-1:] if mode == "last" else t[:1]
+                    if t.dim() == 3:
+                        return t.unsqueeze(0)
+                return t
+            except Exception:
+                return None
+
+        def _compare_frames(a, b):
+            try:
+                import torch
+                if a is None or b is None:
+                    return {"status": "unavailable"}
+                af = torch.nan_to_num(a.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                bf = torch.nan_to_num(b.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                if list(af.shape) != list(bf.shape):
+                    return {
+                        "status": "shape_mismatch",
+                        "a_shape": [int(x) for x in list(af.shape)],
+                        "b_shape": [int(x) for x in list(bf.shape)],
+                    }
+                d = bf - af
+                abs_mean = float(d.abs().mean().item())
+                norm = float(torch.linalg.vector_norm(d).item())
+                max_abs = float(d.abs().max().item())
+                if abs_mean <= 1.0e-7 and max_abs <= 1.0e-6:
+                    band = "exact"
+                elif abs_mean <= 0.003:
+                    band = "near_exact"
+                elif abs_mean <= 0.03:
+                    band = "small_motion"
+                elif abs_mean <= 0.10:
+                    band = "visible_reinterpretation"
+                else:
+                    band = "strong_reinterpretation"
+                return {
+                    "status": "ok",
+                    "band": band,
+                    "abs_mean": abs_mean,
+                    "norm": norm,
+                    "max_abs": max_abs,
+                    "shape": [int(x) for x in list(af.shape)],
+                }
+            except Exception as e:
+                return {"status": "failed", "error": str(e)[:240]}
+
+        try:
+            previous_last = _slice_frame(previous_frames, "last")
+            source_frame = _slice_frame(next_source_image, "first")
+            next_first = _slice_frame(next_frames, "first")
+            previous_last_vs_source = _compare_frames(previous_last, source_frame)
+            source_vs_next_first = _compare_frames(source_frame, next_first)
+            previous_last_vs_next_first = _compare_frames(previous_last, next_first)
+
+            def _band(metric):
+                return metric.get("band", metric.get("status", "unknown")) if isinstance(metric, dict) else "unknown"
+
+            tail_to_source_band = _band(previous_last_vs_source)
+            source_to_first_band = _band(source_vs_next_first)
+            if tail_to_source_band in ("exact", "near_exact"):
+                tail_to_source_status = "strategy_carrier_preserved"
+            elif tail_to_source_band in ("small_motion", "visible_reinterpretation", "strong_reinterpretation"):
+                tail_to_source_status = "strategy_carrier_drift_before_sampler"
+            else:
+                tail_to_source_status = tail_to_source_band
+
+            if source_to_first_band in ("exact", "near_exact", "small_motion"):
+                source_to_first_status = "next_segment_continues_source_anchor"
+            elif source_to_first_band in ("visible_reinterpretation", "strong_reinterpretation"):
+                source_to_first_status = "next_segment_reinterprets_source_anchor"
+            else:
+                source_to_first_status = source_to_first_band
+
+            ctx = strategy_carrier_context if isinstance(strategy_carrier_context, dict) else {}
+            context_digest = {
+                "prompt_source": ctx.get("prompt_source", ""),
+                "prompt_transcode_mode": ctx.get("prompt_transcode_mode", ""),
+                "prompt_continuity_reused": bool(ctx.get("prompt_continuity_reused", False)),
+                "prompt_continuity_policy": ctx.get("prompt_continuity_policy", ""),
+                "current_active_positive_signature": ctx.get("current_active_positive_signature", ""),
+                "current_active_negative_signature": ctx.get("current_active_negative_signature", ""),
+                "current_active_positive_normalized_signature": ctx.get("current_active_positive_normalized_signature", ""),
+                "last_runtime_prompt_update_applies_to_segment": ctx.get("last_runtime_prompt_update_applies_to_segment", None),
+            }
+            record = {
+                "stage": "EventCascadeStrategyContinuityProbe",
+                "status": "recorded",
+                "probe_version": "cascade_strategy_continuity_probe_v1",
+                "segment_index": int(segment_index),
+                "previous_segment_index": int(segment_index) - 1,
+                "resume_frame_index": int(resume_frame_index) if resume_frame_index is not None else None,
+                "latent_temporal_target_t": int(latent_temporal_target_t) if latent_temporal_target_t is not None else None,
+                "previous_last_frame_probe": self._event_tensor_probe(previous_last, label=f"cascade_{segment_index}.previous_last_frame"),
+                "next_source_image_probe": self._event_tensor_probe(source_frame, label=f"cascade_{segment_index}.next_source_image"),
+                "next_first_frame_probe": self._event_tensor_probe(next_first, label=f"cascade_{segment_index}.next_first_frame"),
+                "next_batch_probe": self._event_tensor_probe(next_frames, label=f"cascade_{segment_index}.next_frame_batch"),
+                "continuity_metrics": {
+                    "previous_last_vs_next_source": previous_last_vs_source,
+                    "next_source_vs_next_first": source_vs_next_first,
+                    "previous_last_vs_next_first": previous_last_vs_next_first,
+                },
+                "tail_to_source_status": tail_to_source_status,
+                "source_to_first_status": source_to_first_status,
+                "strategy_carrier_context": context_digest,
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+                "formula": (
+                    "Cascade Strategy continuity reads the selected tail OutcomePrevious as the next source "
+                    "StrategyCarrier; the first next-frame Outcome shows whether the model continued the same "
+                    "event or re-solved the prompt as a local segment."
+                ),
+            }
+            records.append(record)
+            return record
+        except Exception as e:
+            record = {
+                "stage": "EventCascadeStrategyContinuityProbe",
+                "status": "failed",
+                "segment_index": int(segment_index) if segment_index is not None else None,
+                "error": str(e)[:240],
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+            }
+            records.append(record)
+            return record
 
     def _concat_frame_batches(self, batches, records):
         valid = [b for b in batches if b is not None]
         if not valid:
             return None
         if len(valid) == 1:
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_CascadeJoin",
+                route_kind="cascade_frame_join",
+                input_state=valid,
+                output_state=valid[0],
+                metadata={
+                    "segments": 1,
+                    "concat_performed": False,
+                    "input_shapes": [list(b.shape) if hasattr(b, "shape") else str(type(b)) for b in valid],
+                    "output_shape": list(valid[0].shape) if hasattr(valid[0], "shape") else str(type(valid[0])),
+                },
+            )
             return valid[0]
         try:
             import torch
             out = torch.cat(valid, dim=0)
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_CascadeJoin",
+                route_kind="cascade_frame_join",
+                input_state=valid,
+                output_state=out,
+                metadata={
+                    "segments": len(valid),
+                    "concat_performed": True,
+                    "concat_dim": 0,
+                    "input_shapes": [list(b.shape) if hasattr(b, "shape") else str(type(b)) for b in valid],
+                    "output_shape": list(out.shape) if hasattr(out, "shape") else str(type(out)),
+                },
+            )
             records.append({
                 "stage": "SingularityCascadeFrameConcat",
                 "status": "ok",
@@ -1509,10 +1938,39 @@ class SingularityExecutionMixin:
         if not valid:
             return None
         if len(valid) == 1:
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_PausePreviewJoin",
+                route_kind="cascade_pause_preview_join",
+                input_state=valid,
+                output_state=valid[0],
+                metadata={
+                    "segment_index": int(segment_index),
+                    "segments": 1,
+                    "concat_performed": False,
+                    "input_shapes": [list(b.shape) if hasattr(b, "shape") else str(type(b)) for b in valid],
+                    "output_shape": list(valid[0].shape) if hasattr(valid[0], "shape") else str(type(valid[0])),
+                },
+            )
             return valid[0]
         try:
             import torch
             out = torch.cat(valid, dim=0)
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_PausePreviewJoin",
+                route_kind="cascade_pause_preview_join",
+                input_state=valid,
+                output_state=out,
+                metadata={
+                    "segment_index": int(segment_index),
+                    "segments": len(valid),
+                    "concat_performed": True,
+                    "concat_dim": 0,
+                    "input_shapes": [list(b.shape) if hasattr(b, "shape") else str(type(b)) for b in valid],
+                    "output_shape": list(out.shape) if hasattr(out, "shape") else str(type(out)),
+                },
+            )
             records.append({
                 "stage": "SingularityCascadePausePreviewConcat",
                 "status": "ok",
@@ -1597,6 +2055,391 @@ class SingularityExecutionMixin:
             })
         return selected
 
+    def _build_cascade_remaining_strategy(
+        self,
+        *,
+        positive_prompt,
+        negative_prompt,
+        pause_segment_index,
+        next_segment_index,
+        resume_frame_index,
+        frames_per_cascade,
+        frames=None,
+        records,
+    ):
+        """
+        Build a non-text Strategy memory for the next cascade.
+
+        This does not rewrite the prompt. It gives the Strategy Control Surface a
+        measured "remaining route" after a pause cut, so the next sampler segment
+        is less likely to reinterpret the global prompt as a fresh full event.
+        """
+        def clamp(value, lo=0.0, hi=1.0):
+            try:
+                value = float(value)
+            except Exception:
+                value = 0.0
+            return max(lo, min(hi, value))
+
+        positive = str(positive_prompt or "").lower()
+        negative = str(negative_prompt or "").lower()
+        text = f"{positive}\n{negative}"
+        frames = max(1, int(frames_per_cascade or 1))
+        resume = max(1, int(resume_frame_index or 1))
+        progress = clamp(resume / float(frames))
+        remaining = clamp(1.0 - progress)
+
+        motion_terms = {
+            "rotate": ("rotate", "rotation", "turn", "turning", "360", "axis", "spin"),
+            "action": (
+                "move", "moves", "moving", "motion", "animate", "animation", "walk", "walking",
+                "run", "running", "raise", "raises", "lower", "lowers", "lift", "lifts",
+                "lean", "leans", "bend", "bends", "sit", "sits", "stand", "stands",
+                "open", "opens", "close", "closes", "slide", "slides", "push", "pull",
+                "touch", "hold", "grab", "look", "turns", "breath", "breathing",
+            ),
+            "interaction": (
+                "contact", "between", "inside", "outside", "against", "through", "toward",
+                "away", "with her", "with his", "object", "hand", "hands", "body",
+                "fabric", "hair", "face", "camera", "floor", "background",
+            ),
+            "endpoint": ("return", "returns", "endpoint", "same state", "starting frame", "original", "precisely", "continuity"),
+            "fixed_camera": ("fixed camera", "no camera movement", "same framing", "same lighting"),
+            "identity": ("same", "identity", "same expression", "same body", "same hair", "same dress"),
+        }
+        hits = {
+            group: [term for term in terms if term in text]
+            for group, terms in motion_terms.items()
+        }
+        rotation_pressure = clamp(len(hits["rotate"]) / 4.0)
+        action_pressure = clamp(len(hits["action"]) / 6.0)
+        interaction_pressure = clamp(len(hits["interaction"]) / 6.0)
+        motion_pressure = max(rotation_pressure, action_pressure, interaction_pressure)
+        endpoint_pressure = clamp(len(hits["endpoint"]) / 5.0)
+        anchor_pressure = clamp((len(hits["fixed_camera"]) + len(hits["identity"])) / 5.0)
+        route_pressure = clamp((motion_pressure * 0.45) + (endpoint_pressure * 0.35) + (anchor_pressure * 0.20))
+
+        late_cut_pressure = clamp((progress - 0.55) / 0.45)
+        restart_risk = clamp(route_pressure * late_cut_pressure)
+        tail_observed_behavior = self._compute_cascade_tail_observed_behavior(
+            frames,
+            resume_frame_index=resume,
+            records=records,
+        )
+        try:
+            tail_motion_energy = float(tail_observed_behavior.get("motion_energy", 0.0) or 0.0)
+        except Exception:
+            tail_motion_energy = 0.0
+        motion_memory_pressure = clamp(tail_motion_energy * late_cut_pressure * route_pressure)
+        # The later the selected cut is, the less the next high branch should birth
+        # a new full route. Low stays close to neutral and only refines continuity.
+        high_field_intent_multiplier = 1.0 - (0.72 * restart_risk)
+        high_field_window_multiplier = 1.0 - (0.45 * restart_risk)
+        low_field_intent_multiplier = 1.0 - (0.25 * restart_risk)
+        low_field_window_multiplier = 1.0 - (0.20 * restart_risk)
+
+        memory = {
+            "stage": "EventCascadeRemainingStrategy",
+            "status": "active" if route_pressure > 0.0 else "neutral",
+            "strategy_version": "cascade_remaining_strategy_v1",
+            "pause_segment_index": int(pause_segment_index or 1),
+            "applies_to_segment": int(next_segment_index or 1),
+            "resume_frame_index": int(resume),
+            "frames_per_cascade": int(frames),
+            "progress_ratio": float(progress),
+            "remaining_ratio": float(remaining),
+            "rotation_pressure": float(rotation_pressure),
+            "action_pressure": float(action_pressure),
+            "interaction_pressure": float(interaction_pressure),
+            "motion_pressure": float(motion_pressure),
+            "endpoint_pressure": float(endpoint_pressure),
+            "anchor_pressure": float(anchor_pressure),
+            "route_pressure": float(route_pressure),
+            "late_cut_pressure": float(late_cut_pressure),
+            "restart_risk": float(restart_risk),
+            "tail_observed_behavior": tail_observed_behavior,
+            "motion_memory_pressure": float(motion_memory_pressure),
+            "branch_multipliers": {
+                "high_field_intent_multiplier": float(max(0.18, min(1.0, high_field_intent_multiplier))),
+                "high_field_window_multiplier": float(max(0.35, min(1.0, high_field_window_multiplier))),
+                "low_field_intent_multiplier": float(max(0.65, min(1.0, low_field_intent_multiplier))),
+                "low_field_window_multiplier": float(max(0.75, min(1.0, low_field_window_multiplier))),
+            },
+            "hits": hits,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula": (
+                "Selected tail Outcome(t-1) plus observed route progress becomes RemainingStrategy(t) "
+                "for the next cascade; this is numeric Strategy memory, not prompt rewriting."
+            ),
+        }
+        if records is not None:
+            records.append(memory)
+        return memory
+
+    def _compute_cascade_tail_observed_behavior(self, frames, *, resume_frame_index, records=None):
+        """
+        Read the selected tail as ObservedBehavior(t-1), not just as a still frame.
+
+        This is deliberately lightweight: no external vision model, no prompt
+        text, only frame-difference energy and a coarse screen-space centroid.
+        It gives the next Strategy surface evidence that the cut has a moving
+        direction/phase instead of being a fresh static source image.
+        """
+        neutral = {
+            "status": "unavailable",
+            "tail_window": 0,
+            "resume_frame_index": int(resume_frame_index or 0),
+            "motion_energy": 0.0,
+            "centroid_shift_x": 0.0,
+            "centroid_shift_y": 0.0,
+            "direction_hint": "unknown",
+            "formula_role": "ObservedBehavior(t-1) tail motion memory",
+        }
+        try:
+            import torch
+
+            t = self._tensor_from_latent_like(frames)
+            if t is None or not hasattr(t, "dim"):
+                if records is not None:
+                    records.append({"stage": "EventCascadeTailObservedBehavior", **neutral})
+                return neutral
+            if t.dim() == 3:
+                t = t.unsqueeze(0)
+            elif t.dim() == 5:
+                t = t.reshape((-1,) + tuple(t.shape[-3:]))
+            if t.dim() != 4:
+                if records is not None:
+                    records.append({
+                        "stage": "EventCascadeTailObservedBehavior",
+                        **neutral,
+                        "status": "unsupported_shape",
+                        "shape": list(t.shape) if hasattr(t, "shape") else None,
+                    })
+                return {**neutral, "status": "unsupported_shape", "shape": list(t.shape) if hasattr(t, "shape") else None}
+            n = int(t.shape[0])
+            if n < 2:
+                if records is not None:
+                    records.append({"stage": "EventCascadeTailObservedBehavior", **neutral, "status": "too_short"})
+                return {**neutral, "status": "too_short"}
+
+            end = max(1, min(n, int(resume_frame_index or n)))
+            start = max(0, end - 8)
+            window = t[start:end].detach().float()
+            if window.shape[0] < 2:
+                if records is not None:
+                    records.append({"stage": "EventCascadeTailObservedBehavior", **neutral, "status": "too_short_after_cut"})
+                return {**neutral, "status": "too_short_after_cut"}
+
+            diffs = torch.abs(window[1:] - window[:-1]).mean(dim=-1)
+            h = int(diffs.shape[1])
+            w = int(diffs.shape[2])
+            eps = 1e-8
+            x_coords = torch.linspace(-1.0, 1.0, w, device=diffs.device, dtype=diffs.dtype).view(1, 1, w)
+            y_coords = torch.linspace(-1.0, 1.0, h, device=diffs.device, dtype=diffs.dtype).view(1, h, 1)
+            weights = diffs + eps
+            totals = weights.sum(dim=(1, 2)).clamp_min(eps)
+            cx = (weights * x_coords).sum(dim=(1, 2)) / totals
+            cy = (weights * y_coords).sum(dim=(1, 2)) / totals
+            centroid_shift_x = float((cx[-1] - cx[0]).item()) if cx.numel() else 0.0
+            centroid_shift_y = float((cy[-1] - cy[0]).item()) if cy.numel() else 0.0
+            motion_energy = float(diffs.mean().item()) if diffs.numel() else 0.0
+            left_energy = float(diffs[:, :, : max(1, w // 3)].mean().item()) if diffs.numel() else 0.0
+            right_energy = float(diffs[:, :, max(0, (2 * w) // 3):].mean().item()) if diffs.numel() else 0.0
+            if abs(centroid_shift_x) < 0.015:
+                direction_hint = "centered_or_axis_rotation"
+            elif centroid_shift_x > 0.0:
+                direction_hint = "rightward_screen_motion"
+            else:
+                direction_hint = "leftward_screen_motion"
+
+            record = {
+                "status": "observed",
+                "shape": list(t.shape) if hasattr(t, "shape") else None,
+                "tail_window": int(window.shape[0]),
+                "resume_frame_index": int(resume_frame_index or end),
+                "motion_energy": motion_energy,
+                "centroid_shift_x": centroid_shift_x,
+                "centroid_shift_y": centroid_shift_y,
+                "left_motion_energy": left_energy,
+                "right_motion_energy": right_energy,
+                "direction_hint": direction_hint,
+                "formula_role": "ObservedBehavior(t-1) tail motion memory",
+                "formula": "Tail frame differences bind the selected Outcome(t-1) to a moving route phase before the next cascade Strategy.",
+            }
+            if records is not None:
+                records.append({"stage": "EventCascadeTailObservedBehavior", **record})
+            return record
+        except Exception as e:
+            failed = {**neutral, "status": "failed", "error": str(e)}
+            if records is not None:
+                records.append({"stage": "EventCascadeTailObservedBehavior", **failed})
+            return failed
+
+    def _build_cascade_phase_prompt_transform(
+        self,
+        *,
+        positive_prompt,
+        remaining_strategy,
+        applies_to_segment,
+        preserve_prompt_carrier=False,
+        preserve_reason="",
+        records=None,
+    ):
+        """
+        Clean natural-language segment transform for TRANSFORM_PROMPT.
+
+        It is not formula prose and not an appended explanation layer. It replaces
+        the next segment's StrategyCandidate with a local continuation route when
+        the global prompt would otherwise restart the full cascade event.
+        """
+        raw = str(positive_prompt or "").strip()
+        if not raw:
+            return raw, {"status": "empty_prompt"}
+        strategy = remaining_strategy if isinstance(remaining_strategy, dict) else {}
+        try:
+            restart_risk = float(strategy.get("restart_risk", 0.0) or 0.0)
+            progress = float(strategy.get("progress_ratio", 0.0) or 0.0)
+            rotation_pressure = float(strategy.get("rotation_pressure", 0.0) or 0.0)
+            motion_pressure = float(strategy.get("motion_pressure", rotation_pressure) or 0.0)
+        except Exception:
+            restart_risk = 0.0
+            progress = 0.0
+            rotation_pressure = 0.0
+            motion_pressure = 0.0
+        if preserve_prompt_carrier:
+            summary = {
+                "status": "skipped_same_prompt_strategy_carrier_preserved",
+                "transform_version": "cascade_phase_prompt_transform_v2_same_prompt_guard",
+                "applies_to_segment": int(applies_to_segment),
+                "restart_risk": float(restart_risk),
+                "progress_ratio": float(progress),
+                "motion_pressure": float(motion_pressure),
+                "preserve_reason": str(preserve_reason or "same_prompt_identity_reused"),
+                "prompt_continuity_reused": True,
+                "positive_prompt_changed": False,
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "policy": "same_prompt_preserve_clean_strategy_candidate",
+                "formula": (
+                    "Continue reused the same prompt identity; RemainingStrategy stays numeric, "
+                    "and the original clean StrategyCandidate is not rewritten for the next segment."
+                ),
+            }
+            if records is not None:
+                records.append({"stage": "EventCascadePhasePromptTransform", **summary})
+            return raw, summary
+        if restart_risk < 0.35 or motion_pressure <= 0.0:
+            summary = {
+                "status": "not_needed",
+                "applies_to_segment": int(applies_to_segment),
+                "restart_risk": float(restart_risk),
+                "progress_ratio": float(progress),
+                "motion_pressure": float(motion_pressure),
+                "positive_prompt_changed": False,
+            }
+            if records is not None:
+                records.append({"stage": "EventCascadePhasePromptTransform", **summary})
+            return raw, summary
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
+        restart_terms = (
+            "begins", "begin ", "starts from", "starts ", "video starts",
+            "completes the full 360", "full 360", "360-degree rotation",
+            "returns precisely", "return precisely", "returns to the original",
+            "starting frame", "original front-facing pose", "from the reference image",
+            "exact same reference", "same reference photo", "first frame",
+        )
+        keep = []
+        for sentence in sentences:
+            lower = sentence.lower()
+            if any(term in lower for term in restart_terms):
+                continue
+            keep.append(sentence)
+        if not keep:
+            keep = sentences[:2]
+
+        tail_behavior = strategy.get("tail_observed_behavior", {}) if isinstance(strategy, dict) else {}
+        direction_hint = str(tail_behavior.get("direction_hint", "existing direction") if isinstance(tail_behavior, dict) else "existing direction")
+        has_rotation_route = rotation_pressure > 0.0
+        late_phase = progress >= 0.85
+        if late_phase:
+            local_motion_sentence = (
+                "Treat the selected resume frame as a late phase of the event. "
+                "Do not perform the earlier middle actions again; continue only the remaining motion needed to converge toward the described endpoint. "
+            )
+        elif has_rotation_route:
+            local_motion_sentence = (
+                "Continue the already established rotation in the same direction from this exact pose phase. "
+                "Do not reverse the turn and do not restart the earlier part of the motion. "
+            )
+        else:
+            local_motion_sentence = (
+                "Continue the already established action and object relationships from this exact temporal phase. "
+                "Do not reverse, reset, duplicate, or restart the earlier part of the event. "
+            )
+        phase_text = (
+            "Start this cascade segment from the selected resume frame as the current state, not from the original first frame. "
+            + local_motion_sentence +
+            "Use the selected frame as the local anchor, preserve identity, camera, background continuity, and object relationships, "
+            "and move toward the remaining endpoint of the same event with smooth continuity."
+        )
+        if late_phase:
+            keep_scored = []
+            middle_terms = (
+                "as ", "begins", "begin", "starts", "start", "revealing", "reveals",
+                "lift", "lifts", "lower", "lowers", "gradually", "slowly",
+                "while", "when ", "during", "into view", "back rotates into view",
+            )
+            endpoint_terms = (
+                "endpoint", "continuity", "same state", "returns", "return",
+                "preserve", "same", "fixed camera", "no camera", "identity",
+                "smooth", "consistent", "natural extension",
+            )
+            for sentence in keep:
+                lower = sentence.lower()
+                endpoint_score = sum(1 for term in endpoint_terms if term in lower)
+                middle_score = sum(1 for term in middle_terms if term in lower)
+                if endpoint_score >= middle_score:
+                    keep_scored.append(sentence)
+            if keep_scored:
+                keep = keep_scored
+        transformed = " ".join([phase_text] + keep).strip()
+        summary = {
+            "status": "applied",
+            "transform_version": "cascade_phase_prompt_transform_v1",
+            "applies_to_segment": int(applies_to_segment),
+            "restart_risk": float(restart_risk),
+            "progress_ratio": float(progress),
+            "motion_pressure": float(motion_pressure),
+            "rotation_specific": bool(has_rotation_route),
+            "late_phase": bool(late_phase),
+            "direction_hint": direction_hint,
+            "removed_restart_sentence_count": int(max(0, len(sentences) - len(keep))),
+            "positive_prompt_changed": transformed != raw,
+            "prompt_text_injection_allowed": False,
+            "policy": "clean_segment_strategy_transform_replace_not_append",
+            "formula": "Global Strategy is locally re-read after a pause: the next prompt carrier describes the remaining route, not a fresh full event.",
+        }
+        if records is not None:
+            records.append({"stage": "EventCascadePhasePromptTransform", **summary})
+        return transformed, summary
+
+    def _activate_cascade_remaining_strategy(self, memory, records=None):
+        if not isinstance(memory, dict):
+            return
+        self._event_cascade_remaining_strategy = memory
+        if records is not None:
+            records.append({
+                "stage": "EventCascadeRemainingStrategyBind",
+                "status": str(memory.get("status", "unknown")),
+                "applies_to_segment": int(memory.get("applies_to_segment", 0) or 0),
+                "resume_frame_index": int(memory.get("resume_frame_index", 0) or 0),
+                "restart_risk": float(memory.get("restart_risk", 0.0) or 0.0),
+                "branch_multipliers": memory.get("branch_multipliers", {}),
+                "formula": "RemainingStrategy is bound to the next segment Strategy Control Surface before sampler execution.",
+            })
+
     def _record_segment_strategy_carrier(self, records, *, segment_index, positive_prompt, negative_prompt, context=None):
         context = context if isinstance(context, dict) else {}
 
@@ -1649,19 +2492,21 @@ class SingularityExecutionMixin:
         context = context if isinstance(context, dict) else {}
         text_value = str(text or "")
         text_signature = hashlib.sha256(text_value.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        clip_route_signature = self._object_route_cache_signature(clip)
         cache = context.setdefault("conditioning_cache", {})
-        cache_key = f"{str(polarity or 'text')}:{text_signature}"
+        cache_key = f"{str(polarity or 'text')}:{clip_route_signature}:{text_signature}"
 
         if cache_key in cache:
             records.append({
                 "stage": f"Event{label}",
                 "status": "reused_conditioning",
                 "cache_key": cache_key,
+                "clip_route_signature": clip_route_signature,
                 "text_signature": text_signature,
                 "text_length": len(text_value),
                 "formula": (
-                    "Same prompt StrategyCarrier reuses the already encoded conditioning; "
-                    "the cascade continuation does not ask T5/CLIP to reinterpret identical text."
+                    "Same prompt StrategyCarrier and same CLIP/encoder route reuse the already encoded conditioning; "
+                    "a changed CLIP/LoRA text route must not reuse stale NumericStrategy conditioning."
                 ),
                 "control_mode": "REPORT_ONLY",
             })
@@ -1673,18 +2518,861 @@ class SingularityExecutionMixin:
             "stage": f"Event{label}ConditioningCache",
             "status": "stored",
             "cache_key": cache_key,
+            "clip_route_signature": clip_route_signature,
             "text_signature": text_signature,
             "text_length": len(text_value),
-            "formula": "Prompt StrategyCarrier text encoded once into NumericStrategy conditioning for reuse when unchanged.",
+            "formula": "Prompt StrategyCarrier text encoded once into NumericStrategy conditioning for reuse when text and CLIP/encoder route are unchanged.",
             "control_mode": "REPORT_ONLY",
         })
         return conditioning
+
+    def _compact_route_value_summary(self, value, *, max_keys=12, max_items=8):
+        try:
+            if value is None:
+                return {"type": "NoneType", "present": False}
+            if isinstance(value, dict):
+                keys = [str(k) for k in list(value.keys())[:max_keys]]
+                return {
+                    "type": type(value).__name__,
+                    "present": True,
+                    "len": len(value),
+                    "keys": keys,
+                }
+            if isinstance(value, (list, tuple, set)):
+                items = []
+                for item in list(value)[:max_items]:
+                    items.append(type(item).__name__)
+                return {
+                    "type": type(value).__name__,
+                    "present": True,
+                    "len": len(value),
+                    "item_types": items,
+                }
+            shape = getattr(value, "shape", None)
+            if shape is not None:
+                return {
+                    "type": type(value).__name__,
+                    "present": True,
+                    "shape": [int(x) for x in list(shape)[:8]],
+                    "dtype": str(getattr(value, "dtype", "")),
+                }
+            return {
+                "type": type(value).__name__,
+                "present": True,
+            }
+        except Exception as exc:
+            return {
+                "type": type(value).__name__ if value is not None else "NoneType",
+                "present": value is not None,
+                "summary_error": str(exc)[:160],
+            }
+
+    def _probe_operator_route_object(self, obj, role):
+        probe = {
+            "role": str(role),
+            "present": obj is not None,
+            "object_type": type(obj).__name__ if obj is not None else "NoneType",
+            "object_module": type(obj).__module__ if obj is not None else "",
+            "runtime_object_id": hex(id(obj)) if obj is not None else "",
+            "probe_policy": "metadata_only_no_tensor_mutation",
+        }
+        if obj is None:
+            probe["route_signature"] = hashlib.sha256(f"{role}:none".encode("utf-8")).hexdigest()[:16]
+            return probe
+
+        attr_names = [
+            "patches",
+            "object_patches",
+            "model_options",
+            "model",
+            "model_sampling",
+            "sampling",
+            "model_config",
+            "load_device",
+            "offload_device",
+            "size",
+            "loaded_size",
+        ]
+        attrs = {}
+        for attr_name in attr_names:
+            try:
+                if hasattr(obj, attr_name):
+                    attrs[attr_name] = self._compact_route_value_summary(getattr(obj, attr_name))
+            except Exception as exc:
+                attrs[attr_name] = {
+                    "type": "unknown",
+                    "present": True,
+                    "summary_error": str(exc)[:160],
+                }
+        probe["attributes"] = attrs
+
+        patch_summary = attrs.get("patches", {})
+        object_patch_summary = attrs.get("object_patches", {})
+        model_options_summary = attrs.get("model_options", {})
+        probe["patch_evidence"] = {
+            "patches_count": int(patch_summary.get("len", 0) or 0) if isinstance(patch_summary, dict) else 0,
+            "object_patches_count": int(object_patch_summary.get("len", 0) or 0) if isinstance(object_patch_summary, dict) else 0,
+            "model_options_count": int(model_options_summary.get("len", 0) or 0) if isinstance(model_options_summary, dict) else 0,
+            "has_any_patch_evidence": bool(
+                (isinstance(patch_summary, dict) and int(patch_summary.get("len", 0) or 0) > 0)
+                or (isinstance(object_patch_summary, dict) and int(object_patch_summary.get("len", 0) or 0) > 0)
+            ),
+            "interpretation": (
+                "LoRA/SD3/compile patches are usually visible as ModelPatcher metadata, "
+                "but exact LoRA filenames may not survive inside the runtime MODEL object."
+            ),
+        }
+
+        stable_probe = dict(probe)
+        stable_probe.pop("runtime_object_id", None)
+        try:
+            raw = json.dumps(stable_probe, sort_keys=True, default=str)
+        except Exception:
+            raw = repr(stable_probe)
+        probe["route_signature"] = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        return probe
+
+    def _object_route_cache_signature(self, obj):
+        if obj is None:
+            return "none"
+        try:
+            probe = self._probe_operator_route_object(obj, "cache_route")
+            route_signature = str(probe.get("route_signature") or "")
+            return hashlib.sha256(
+                f"{type(obj).__module__}.{type(obj).__name__}:{id(obj)}:{route_signature}".encode("utf-8", errors="ignore")
+            ).hexdigest()[:16]
+        except Exception:
+            return hashlib.sha256(f"{type(obj).__name__}:{id(obj)}".encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+    def _record_external_operator_route_diagnostics(
+        self,
+        records,
+        *,
+        primary_model,
+        secondary_model,
+        clip,
+        vae,
+        global_steps,
+        primary_start_step,
+        primary_end_step,
+        secondary_start_step,
+        secondary_end_step,
+        primary_sd3_shift,
+        secondary_sd3_shift,
+    ):
+        try:
+            steps = max(int(global_steps or 0), 1)
+        except Exception:
+            steps = 1
+        try:
+            high_span = max(0, int(primary_end_step) - int(primary_start_step))
+        except Exception:
+            high_span = 0
+        try:
+            low_span = max(0, int(secondary_end_step) - int(secondary_start_step))
+        except Exception:
+            low_span = 0
+        route = {
+            "stage": "EventExternalOperatorRouteDiagnostics",
+            "status": "recorded",
+            "probe_policy": "metadata_only_no_tensor_mutation",
+            "primary_model": self._probe_operator_route_object(primary_model, "primary_model_high_operator"),
+            "secondary_model": self._probe_operator_route_object(secondary_model, "secondary_model_low_operator"),
+            "clip": self._probe_operator_route_object(clip, "clip_text_encoder"),
+            "vae": self._probe_operator_route_object(vae, "vae_decoder_encoder"),
+            "sampler_window_split": {
+                "global_steps": steps,
+                "primary_start_step": int(primary_start_step),
+                "primary_end_step": int(primary_end_step),
+                "primary_span": high_span,
+                "primary_fraction": round(float(high_span) / float(steps), 6),
+                "secondary_start_step": int(secondary_start_step),
+                "secondary_end_step": int(secondary_end_step),
+                "secondary_span": low_span,
+                "secondary_fraction": round(float(low_span) / float(steps), 6),
+            },
+            "internal_sd3_shift_request": {
+                "primary_sd3_shift": float(primary_sd3_shift or 0.0),
+                "secondary_sd3_shift": float(secondary_sd3_shift or 0.0),
+                "interpretation": (
+                    "Singularity clean node normally expects SD3 shift to be applied outside; "
+                    "zero here means passthrough, not proof that incoming models are unshifted."
+                ),
+            },
+            "formula": (
+                "External MODEL/CLIP/VAE route is the Operator side of Strategy(t). "
+                "If raw Wan is sharper, the first parity question is whether Singularity received the same post-LoRA, post-SD3, post-compile operator objects."
+            ),
+            "next_route": (
+                "Compare this record against raw PNG workflow metadata. "
+                "Missing patch evidence on primary/secondary MODEL while raw workflow uses LoRA loaders means the external route is not equivalent."
+            ),
+            "control_mode": "REPORT_ONLY",
+        }
+        records.append(route)
+        return route
+
+    def _record_workflow_graph_route_diagnostics(
+        self,
+        records,
+        *,
+        workflow_prompt=None,
+        workflow_extra_pnginfo=None,
+        unique_id=None,
+    ):
+        def safe_node_inputs(node):
+            inputs = node.get("inputs", {}) if isinstance(node, dict) else {}
+            if not isinstance(inputs, dict):
+                return {}
+            keep = {}
+            allowed_exact = {
+                "lora_name",
+                "strength_model",
+                "strength_clip",
+                "unet_name",
+                "ckpt_name",
+                "clip_name",
+                "vae_name",
+                "shift",
+                "model",
+                "clip",
+                "vae",
+                "sampler_name",
+                "scheduler",
+                "steps",
+                "cfg",
+                "start_at_step",
+                "end_at_step",
+                "add_noise",
+                "return_with_leftover_noise",
+                "noise_seed",
+            }
+            for key, value in inputs.items():
+                key_s = str(key)
+                if key_s in allowed_exact or any(part in key_s.lower() for part in ("lora", "model", "clip", "vae", "shift")):
+                    keep[key_s] = _event_json_safe(value)
+            return keep
+
+        def active_node_record(node_id, node):
+            class_type = str(node.get("class_type") or node.get("type") or "")
+            meta = node.get("_meta", {}) if isinstance(node.get("_meta", {}), dict) else {}
+            return {
+                "id": str(node_id),
+                "class_type": class_type,
+                "title": str(meta.get("title", "") or ""),
+                "inputs": safe_node_inputs(node),
+            }
+
+        prompt_is_dict = isinstance(workflow_prompt, dict)
+        records_out = []
+        lora_nodes = []
+        sd3_nodes = []
+        sampler_nodes = []
+        loader_nodes = []
+        clip_nodes = []
+        compile_nodes = []
+        if prompt_is_dict:
+            for node_id, node in workflow_prompt.items():
+                if not isinstance(node, dict):
+                    continue
+                class_type = str(node.get("class_type") or node.get("type") or "")
+                low = class_type.lower()
+                rec = active_node_record(node_id, node)
+                if "lora" in low:
+                    lora_nodes.append(rec)
+                    records_out.append(rec)
+                elif "modelsamplingsd3" in low or ("model" in low and "sampling" in low):
+                    sd3_nodes.append(rec)
+                    records_out.append(rec)
+                elif "ksampler" in low or "sampler" in low:
+                    sampler_nodes.append(rec)
+                    records_out.append(rec)
+                elif "unetloader" in low or "gguf" in low:
+                    loader_nodes.append(rec)
+                    records_out.append(rec)
+                elif "cliploader" in low:
+                    clip_nodes.append(rec)
+                    records_out.append(rec)
+                elif "compile" in low or "torch" in low:
+                    compile_nodes.append(rec)
+                    records_out.append(rec)
+
+        visible_node_count = None
+        try:
+            workflow = None
+            if isinstance(workflow_extra_pnginfo, dict):
+                workflow = workflow_extra_pnginfo.get("workflow")
+            if isinstance(workflow, dict) and isinstance(workflow.get("nodes"), list):
+                visible_node_count = len(workflow.get("nodes") or [])
+        except Exception:
+            visible_node_count = None
+
+        status = "recorded" if prompt_is_dict else "unavailable_hidden_prompt"
+        record = {
+            "stage": "EventWorkflowGraphRouteDiagnostics",
+            "status": status,
+            "probe_policy": "hidden_prompt_graph_metadata_only_no_prompt_text",
+            "node_id": str(unique_id or ""),
+            "active_prompt_graph_available": bool(prompt_is_dict),
+            "active_prompt_node_count": len(workflow_prompt) if prompt_is_dict else 0,
+            "visible_workflow_node_count": visible_node_count,
+            "lora_nodes": lora_nodes,
+            "sd3_nodes": sd3_nodes,
+            "sampler_nodes": sampler_nodes,
+            "loader_nodes": loader_nodes,
+            "clip_nodes": clip_nodes,
+            "compile_nodes": compile_nodes,
+            "active_route_nodes": records_out,
+            "lora_node_count": len(lora_nodes),
+            "sd3_node_count": len(sd3_nodes),
+            "sampler_node_count": len(sampler_nodes),
+            "compile_node_count": len(compile_nodes),
+            "formula": (
+                "The ComfyUI active graph is a route witness for Strategy Operator construction: "
+                "LoRA -> SD3 shift -> sampler should be visible as graph metadata before tensor execution."
+            ),
+            "next_route": (
+                "Compare lora_nodes and sd3_nodes against EventExternalOperatorRouteDiagnostics patch evidence. "
+                "If graph has LoRA but MODEL patch evidence is missing, the operator route is broken before Singularity."
+            ),
+            "control_mode": "REPORT_ONLY",
+        }
+        records.append(record)
+        return record
+
+    def _record_segment_entry_strategy_return_probe(
+        self,
+        records,
+        *,
+        segment_index,
+        source_image=None,
+        scaled_image=None,
+        previous_segment_latent=None,
+        wan_positive=None,
+        wan_negative=None,
+        wan_latent=None,
+        latent_after_high=None,
+        latent_after_low=None,
+        frames_out=None,
+        strategy_carrier_context=None,
+    ):
+        """
+        r110 report-only probe for the real cascade continuity problem:
+        decoded tail image continuity may be exact while latent Strategy memory
+        is lost between previous segment latent tail and the next Wan/sampler entry.
+        """
+        def _frame_slice(obj, mode="first"):
+            try:
+                t = self._tensor_from_latent_like(obj)
+                if t is None:
+                    return None
+                if hasattr(t, "dim"):
+                    if t.dim() == 4 and int(t.shape[0]) > 0:
+                        return t[-1:] if mode == "last" else t[:1]
+                    if t.dim() == 3:
+                        return t.unsqueeze(0)
+                return t
+            except Exception:
+                return None
+
+        def _latent_time_slice(obj, mode="first"):
+            try:
+                t = self._tensor_from_latent_like(obj)
+                if t is None:
+                    return None
+                if hasattr(t, "dim") and t.dim() == 5 and int(t.shape[2]) > 0:
+                    return t[:, :, -1:, :, :] if mode == "last" else t[:, :, :1, :, :]
+                return t
+            except Exception:
+                return None
+
+        def _find_named_tensor(obj, key_name):
+            try:
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if str(k) == str(key_name) and hasattr(v, "detach") and hasattr(v, "shape"):
+                            return v
+                    for v in obj.values():
+                        found = _find_named_tensor(v, key_name)
+                        if found is not None:
+                            return found
+                if isinstance(obj, (list, tuple)):
+                    for v in obj:
+                        found = _find_named_tensor(v, key_name)
+                        if found is not None:
+                            return found
+            except Exception:
+                return None
+            return None
+
+        def _compare(a, b):
+            try:
+                import torch
+                if a is None or b is None:
+                    return {"status": "unavailable"}
+                af = torch.nan_to_num(a.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                bf = torch.nan_to_num(b.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                if list(af.shape) != list(bf.shape):
+                    return {
+                        "status": "shape_mismatch",
+                        "a_shape": [int(x) for x in list(af.shape)],
+                        "b_shape": [int(x) for x in list(bf.shape)],
+                    }
+                d = bf - af
+                abs_mean = float(d.abs().mean().item())
+                norm = float(torch.linalg.vector_norm(d).item())
+                max_abs = float(d.abs().max().item())
+                if abs_mean <= 1.0e-7 and max_abs <= 1.0e-6:
+                    band = "exact"
+                elif abs_mean <= 0.003:
+                    band = "near_exact"
+                elif abs_mean <= 0.03:
+                    band = "small_shift"
+                elif abs_mean <= 0.10:
+                    band = "visible_shift"
+                else:
+                    band = "strong_shift"
+                return {
+                    "status": "ok",
+                    "band": band,
+                    "abs_mean": abs_mean,
+                    "norm": norm,
+                    "max_abs": max_abs,
+                    "shape": [int(x) for x in list(af.shape)],
+                }
+            except Exception as e:
+                return {"status": "failed", "error": str(e)[:240]}
+
+        try:
+            source_frame = _frame_slice(source_image, "first")
+            scaled_frame = _frame_slice(scaled_image, "first")
+            decoded_first = _frame_slice(frames_out, "first")
+            decoded_second = None
+            try:
+                ft = self._tensor_from_latent_like(frames_out)
+                if ft is not None and hasattr(ft, "dim") and ft.dim() == 4 and int(ft.shape[0]) > 1:
+                    decoded_second = ft[1:2]
+            except Exception:
+                decoded_second = None
+
+            previous_latent_tail = _latent_time_slice(previous_segment_latent, "last")
+            wan_latent_first = _latent_time_slice(wan_latent, "first")
+            high_first = _latent_time_slice(latent_after_high, "first")
+            low_first = _latent_time_slice(latent_after_low, "first")
+            concat_latent = _find_named_tensor(wan_positive, "concat_latent_image")
+            concat_mask = _find_named_tensor(wan_positive, "concat_mask")
+            concat_first = _latent_time_slice(concat_latent, "first")
+
+            image_metrics = {
+                "source_vs_scaled": _compare(source_frame, scaled_frame),
+                "source_vs_decoded_first": _compare(source_frame, decoded_first),
+                "source_vs_decoded_second": _compare(source_frame, decoded_second),
+            }
+            latent_metrics = {
+                "previous_latent_tail_vs_wan_concat_first": _compare(previous_latent_tail, concat_first),
+                "previous_latent_tail_vs_wan_latent_first": _compare(previous_latent_tail, wan_latent_first),
+                "wan_concat_first_vs_wan_latent_first": _compare(concat_first, wan_latent_first),
+                "wan_concat_first_vs_high_first": _compare(concat_first, high_first),
+                "wan_concat_first_vs_low_first": _compare(concat_first, low_first),
+                "previous_latent_tail_vs_high_first": _compare(previous_latent_tail, high_first),
+                "previous_latent_tail_vs_low_first": _compare(previous_latent_tail, low_first),
+            }
+
+            def _band(metric):
+                return metric.get("band", metric.get("status", "unknown")) if isinstance(metric, dict) else "unknown"
+
+            image_entry_band = _band(image_metrics.get("source_vs_decoded_second", {}))
+            latent_memory_band = _band(latent_metrics.get("previous_latent_tail_vs_wan_concat_first", {}))
+            sampler_entry_band = _band(latent_metrics.get("wan_concat_first_vs_low_first", {}))
+            if latent_memory_band in ("strong_shift", "visible_shift", "small_shift"):
+                status = "latent_memory_bridge_changed"
+            elif sampler_entry_band in ("strong_shift", "visible_shift"):
+                status = "sampler_entry_reinterprets_conditioning"
+            elif image_entry_band in ("visible_shift", "strong_shift"):
+                status = "visible_entry_reinterprets_source"
+            else:
+                status = "entry_strategy_return_observed"
+
+            ctx = strategy_carrier_context if isinstance(strategy_carrier_context, dict) else {}
+            record = {
+                "stage": "EventSegmentEntryStrategyReturnProbe",
+                "status": status,
+                "probe_version": "segment_entry_strategy_return_probe_v1",
+                "segment_index": int(segment_index),
+                "source_image_probe": self._event_tensor_probe(source_frame, label=f"cascade_{segment_index}.entry_source_image"),
+                "scaled_image_probe": self._event_tensor_probe(scaled_frame, label=f"cascade_{segment_index}.entry_scaled_image"),
+                "previous_latent_tail_probe": self._event_tensor_probe(previous_latent_tail, label=f"cascade_{segment_index}.previous_latent_tail"),
+                "wan_concat_latent_first_probe": self._event_tensor_probe(concat_first, label=f"cascade_{segment_index}.wan_concat_latent_first"),
+                "wan_concat_mask_probe": self._event_tensor_probe(concat_mask, label=f"cascade_{segment_index}.wan_concat_mask"),
+                "wan_latent_first_probe": self._event_tensor_probe(wan_latent_first, label=f"cascade_{segment_index}.wan_latent_first"),
+                "latent_after_high_first_probe": self._event_tensor_probe(high_first, label=f"cascade_{segment_index}.latent_after_high_first"),
+                "latent_after_low_first_probe": self._event_tensor_probe(low_first, label=f"cascade_{segment_index}.latent_after_low_first"),
+                "decoded_first_frame_probe": self._event_tensor_probe(decoded_first, label=f"cascade_{segment_index}.decoded_first_frame"),
+                "decoded_second_frame_probe": self._event_tensor_probe(decoded_second, label=f"cascade_{segment_index}.decoded_second_frame"),
+                "image_entry_metrics": image_metrics,
+                "latent_entry_metrics": latent_metrics,
+                "entry_status_summary": {
+                    "image_entry_band": image_entry_band,
+                    "latent_memory_band": latent_memory_band,
+                    "sampler_entry_band": sampler_entry_band,
+                    "latent_memory_bridge_available": previous_latent_tail is not None and concat_first is not None,
+                    "decoded_second_available": decoded_second is not None,
+                },
+                "strategy_carrier_context": {
+                    "prompt_source": ctx.get("prompt_source", ""),
+                    "prompt_transcode_mode": ctx.get("prompt_transcode_mode", ""),
+                    "prompt_continuity_reused": bool(ctx.get("prompt_continuity_reused", False)),
+                    "prompt_continuity_policy": ctx.get("prompt_continuity_policy", ""),
+                    "current_active_positive_signature": ctx.get("current_active_positive_signature", ""),
+                    "current_active_negative_signature": ctx.get("current_active_negative_signature", ""),
+                },
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+                "formula": (
+                    "Segment-entry Strategy return compares the preserved visible source with the hidden latent "
+                    "memory route: previous latent tail -> Wan concat latent -> sampler high/low first slice -> "
+                    "decoded first/second frame. This names where continuity is lost before active correction."
+                ),
+                "next_route": (
+                    "If visible tail is preserved but latent_memory_band is high, test a future bounded latent-memory "
+                    "bridge. If sampler_entry_band is high, test sampler-entry Strategy pressure before postprocess blending."
+                ),
+            }
+            records.append(record)
+            return record
+        except Exception as e:
+            record = {
+                "stage": "EventSegmentEntryStrategyReturnProbe",
+                "status": "failed",
+                "segment_index": int(segment_index) if segment_index is not None else None,
+                "error": str(e)[:240],
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+            }
+            records.append(record)
+            return record
+
+    def _apply_segment_entry_latent_memory_bridge(
+        self,
+        *,
+        segment_index,
+        previous_segment_latent=None,
+        wan_positive=None,
+        wan_negative=None,
+        wan_latent=None,
+        records=None,
+        strategy_carrier_context=None,
+    ):
+        """
+        r113 bounded active research surface.
+
+        The visible selected frame can be exact while WanImageToVideo rebuilds a
+        fresh hidden latent entry. This bridge gives the next segment's first
+        latent slice a small, clamped memory of the previous segment latent tail.
+        It is intentionally not a full latent replacement.
+        """
+        if records is None:
+            records = []
+
+        def _latent_time_slice(obj, mode="first"):
+            try:
+                t = self._tensor_from_latent_like(obj)
+                if t is None:
+                    return None
+                if hasattr(t, "dim") and t.dim() == 5 and int(t.shape[2]) > 0:
+                    return t[:, :, -1:, :, :] if mode == "last" else t[:, :, :1, :, :]
+                return t
+            except Exception:
+                return None
+
+        def _find_named_tensor(obj, key_name):
+            try:
+                if isinstance(obj, dict):
+                    for k, v in obj.items():
+                        if str(k) == str(key_name) and hasattr(v, "detach") and hasattr(v, "shape"):
+                            return v
+                    for v in obj.values():
+                        found = _find_named_tensor(v, key_name)
+                        if found is not None:
+                            return found
+                if isinstance(obj, (list, tuple)):
+                    for v in obj:
+                        found = _find_named_tensor(v, key_name)
+                        if found is not None:
+                            return found
+            except Exception:
+                return None
+            return None
+
+        def _replace_named_tensor(obj, key_name, replacement):
+            try:
+                if isinstance(obj, dict):
+                    changed = False
+                    out = {}
+                    for k, v in obj.items():
+                        if str(k) == str(key_name) and hasattr(v, "detach") and hasattr(v, "shape"):
+                            out[k] = replacement
+                            changed = True
+                        else:
+                            new_v, child_changed = _replace_named_tensor(v, key_name, replacement)
+                            out[k] = new_v
+                            changed = changed or child_changed
+                    return (out if changed else obj), changed
+                if isinstance(obj, list):
+                    changed = False
+                    out = []
+                    for v in obj:
+                        new_v, child_changed = _replace_named_tensor(v, key_name, replacement)
+                        out.append(new_v)
+                        changed = changed or child_changed
+                    return (out if changed else obj), changed
+                if isinstance(obj, tuple):
+                    changed = False
+                    out = []
+                    for v in obj:
+                        new_v, child_changed = _replace_named_tensor(v, key_name, replacement)
+                        out.append(new_v)
+                        changed = changed or child_changed
+                    return (tuple(out) if changed else obj), changed
+            except Exception:
+                return obj, False
+            return obj, False
+
+        def _compare(a, b):
+            try:
+                import torch
+                if a is None or b is None:
+                    return {"status": "unavailable"}
+                af = torch.nan_to_num(a.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                bf = torch.nan_to_num(b.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                if list(af.shape) != list(bf.shape):
+                    return {
+                        "status": "shape_mismatch",
+                        "a_shape": [int(x) for x in list(af.shape)],
+                        "b_shape": [int(x) for x in list(bf.shape)],
+                    }
+                d = bf - af
+                abs_mean = float(d.abs().mean().item())
+                norm = float(torch.linalg.vector_norm(d).item())
+                max_abs = float(d.abs().max().item())
+                if abs_mean <= 1.0e-7 and max_abs <= 1.0e-6:
+                    band = "exact"
+                elif abs_mean <= 0.003:
+                    band = "near_exact"
+                elif abs_mean <= 0.03:
+                    band = "small_shift"
+                elif abs_mean <= 0.10:
+                    band = "visible_shift"
+                else:
+                    band = "strong_shift"
+                return {
+                    "status": "ok",
+                    "band": band,
+                    "abs_mean": abs_mean,
+                    "norm": norm,
+                    "max_abs": max_abs,
+                    "shape": [int(x) for x in list(af.shape)],
+                }
+            except Exception as e:
+                return {"status": "failed", "error": str(e)[:240]}
+
+        def _blend_first_slice(base_tensor, previous_tail, *, alpha, max_step):
+            try:
+                import torch
+                if base_tensor is None or previous_tail is None:
+                    return base_tensor, {
+                        "status": "unavailable",
+                        "reason": "missing_tensor",
+                    }
+                if not (hasattr(base_tensor, "dim") and base_tensor.dim() == 5 and int(base_tensor.shape[2]) > 0):
+                    return base_tensor, {
+                        "status": "unsupported_shape",
+                        "shape": [int(x) for x in list(base_tensor.shape)] if hasattr(base_tensor, "shape") else None,
+                    }
+                current_first = base_tensor[:, :, :1, :, :]
+                target = previous_tail.to(device=base_tensor.device, dtype=torch.float32)
+                current_f = torch.nan_to_num(current_first.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                if list(current_f.shape) != list(target.shape):
+                    return base_tensor, {
+                        "status": "shape_mismatch",
+                        "current_shape": [int(x) for x in list(current_f.shape)],
+                        "target_shape": [int(x) for x in list(target.shape)],
+                    }
+                raw_delta = torch.nan_to_num(target - current_f, nan=0.0, posinf=0.0, neginf=0.0)
+                bounded_delta = torch.clamp(raw_delta, min=-float(max_step), max=float(max_step))
+                memory_delta = bounded_delta * float(alpha)
+                out = base_tensor.clone()
+                out[:, :, :1, :, :] = (current_f + memory_delta).to(dtype=base_tensor.dtype, device=base_tensor.device)
+                first_after = out[:, :, :1, :, :]
+                return out, {
+                    "status": "applied",
+                    "alpha": float(alpha),
+                    "max_step": float(max_step),
+                    "raw_delta_abs_mean": float(raw_delta.abs().mean().item()),
+                    "raw_delta_max_abs": float(raw_delta.abs().max().item()),
+                    "bounded_delta_abs_mean": float(bounded_delta.abs().mean().item()),
+                    "bounded_delta_max_abs": float(bounded_delta.abs().max().item()),
+                    "memory_delta_abs_mean": float(memory_delta.abs().mean().item()),
+                    "memory_delta_max_abs": float(memory_delta.abs().max().item()),
+                    "before_metric": _compare(target, current_first),
+                    "after_metric": _compare(target, first_after),
+                }
+            except Exception as e:
+                return base_tensor, {
+                    "status": "failed",
+                    "error": str(e)[:240],
+                }
+
+        def _control_float(controls, key, default, min_value, max_value):
+            try:
+                value = controls.get(key, controls.get(f"bridge_{key}", default)) if isinstance(controls, dict) else default
+                out = float(value)
+            except Exception:
+                out = float(default)
+            return max(float(min_value), min(float(max_value), out))
+
+        try:
+            mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+            strengths = getattr(self, "_event_delta_strengths", {}) or {}
+            high_strength = float(strengths.get("high", 1.0) or 1.0)
+            low_strength = float(strengths.get("low", 1.0) or 1.0)
+        except Exception:
+            mode = "OBSERVE_ONLY"
+            high_strength = 1.0
+            low_strength = 1.0
+
+        bridge_controls = getattr(self, "_event_latent_memory_bridge_controls", {}) or {}
+
+        previous_tail = _latent_time_slice(previous_segment_latent, "last")
+        wan_samples = self._tensor_from_latent_like(wan_latent)
+        wan_first = _latent_time_slice(wan_latent, "first")
+        concat_latent = _find_named_tensor(wan_positive, "concat_latent_image")
+        concat_first = _latent_time_slice(concat_latent, "first")
+        active_requested = bool(mode == "LATENT_MEMORY_BRIDGE" and int(segment_index or 0) > 1)
+        available = bool(previous_tail is not None and wan_first is not None)
+
+        wan_alpha = _control_float(bridge_controls, "wan_alpha", 0.10, 0.0, 0.50)
+        concat_alpha = _control_float(bridge_controls, "concat_alpha", 0.06, 0.0, 0.50)
+        wan_max_step = _control_float(bridge_controls, "wan_max_step", 0.45, 0.0, 2.0)
+        concat_max_step = _control_float(bridge_controls, "concat_max_step", 0.28, 0.0, 2.0)
+
+        record = {
+            "stage": "EventSegmentEntryLatentMemoryBridge",
+            "status": "inactive_mode",
+            "bridge_version": "segment_entry_latent_memory_bridge_v2_explicit_controls",
+            "segment_index": int(segment_index) if segment_index is not None else None,
+            "mode": mode,
+            "control_mode": mode,
+            "active_control_allowed": bool(active_requested),
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "available": bool(available),
+            "requested_strengths": {
+                "high_delta_strength": float(high_strength),
+                "low_delta_strength": float(low_strength),
+            },
+            "bridge_controls": {
+                "source": "explicit_widgets",
+                "wan_alpha": float(wan_alpha),
+                "concat_alpha": float(concat_alpha),
+                "wan_max_step": float(wan_max_step),
+                "concat_max_step": float(concat_max_step),
+                "meaning": (
+                    "These controls tune the latent-memory bridge only. "
+                    "They no longer reuse high_delta_strength/low_delta_strength."
+                ),
+            },
+            "bridge_params": {
+                "wan_latent_alpha": float(wan_alpha),
+                "wan_latent_max_step": float(wan_max_step),
+                "concat_latent_alpha": float(concat_alpha),
+                "concat_latent_max_step": float(concat_max_step),
+                "temporal_scope": "first_latent_slice_only",
+            },
+            "before_metrics": {
+                "previous_tail_vs_wan_first": _compare(previous_tail, wan_first),
+                "previous_tail_vs_concat_first": _compare(previous_tail, concat_first),
+            },
+            "strategy_carrier_context": strategy_carrier_context if isinstance(strategy_carrier_context, dict) else {},
+            "formula": (
+                "Bounded latent-memory bridge: previous latent tail contributes a small clamped first-slice memory "
+                "to the next segment Wan latent entry before high sampler. R113 keeps this as its own Strategy-return "
+                "surface instead of coupling it to high/low delta scale."
+            ),
+        }
+
+        if not active_requested:
+            if int(segment_index or 0) > 1 and available:
+                record["status"] = "report_only_available"
+            elif int(segment_index or 0) <= 1:
+                record["status"] = "not_applicable_first_segment"
+            else:
+                record["status"] = "unavailable"
+            records.append(record)
+            return wan_positive, wan_negative, wan_latent
+
+        if not available:
+            record["status"] = "unavailable"
+            record["reason"] = "previous tail or Wan latent first slice missing"
+            records.append(record)
+            return wan_positive, wan_negative, wan_latent
+
+        bridged_wan_latent = wan_latent
+        bridged_wan_samples, wan_bridge = _blend_first_slice(
+            wan_samples,
+            previous_tail,
+            alpha=wan_alpha,
+            max_step=wan_max_step,
+        )
+        wan_applied = bool(isinstance(wan_bridge, dict) and wan_bridge.get("status") == "applied")
+        if wan_applied:
+            if isinstance(wan_latent, dict) and "samples" in wan_latent:
+                bridged_wan_latent = dict(wan_latent)
+                bridged_wan_latent["samples"] = bridged_wan_samples
+            else:
+                bridged_wan_latent = bridged_wan_samples
+
+        bridged_wan_positive = wan_positive
+        concat_bridge = {"status": "unavailable"}
+        concat_replaced = False
+        if concat_latent is not None:
+            bridged_concat, concat_bridge = _blend_first_slice(
+                concat_latent,
+                previous_tail,
+                alpha=concat_alpha,
+                max_step=concat_max_step,
+            )
+            if isinstance(concat_bridge, dict) and concat_bridge.get("status") == "applied":
+                bridged_wan_positive, concat_replaced = _replace_named_tensor(
+                    wan_positive,
+                    "concat_latent_image",
+                    bridged_concat,
+                )
+
+        record.update({
+            "status": "applied" if wan_applied or concat_replaced else "not_applied",
+            "wan_latent_bridge": wan_bridge,
+            "concat_latent_bridge": concat_bridge,
+            "concat_latent_replaced": bool(concat_replaced),
+            "after_metrics": {
+                "previous_tail_vs_wan_first": _compare(previous_tail, _latent_time_slice(bridged_wan_latent, "first")),
+                "previous_tail_vs_concat_first": _compare(previous_tail, _latent_time_slice(_find_named_tensor(bridged_wan_positive, "concat_latent_image"), "first")),
+            },
+            "policy": "bounded_first_slice_memory_return_before_high_sampler",
+            "next_route": (
+                "Compare against r110 neutral run. If seam motion improves without background/identity noise, "
+                "promote to a narrower configurable research surface; otherwise reduce alpha or move to sampler-entry pressure."
+            ),
+        })
+        records.append(record)
+        return bridged_wan_positive, wan_negative, bridged_wan_latent
 
     def _run_event_horizon_segment_core(
         self,
         *,
         segment_index,
         source_image,
+        previous_segment_latent=None,
         primary_model,
         secondary_model,
         clip,
@@ -1754,10 +3442,30 @@ class SingularityExecutionMixin:
             polarity="negative",
         )
         self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_text_encode")
-        scaled_image = self._scale_image(source_image, width, height, image_upscale_method, image_crop, records)
+        scaled_image = self._scale_image(
+            source_image,
+            width,
+            height,
+            image_upscale_method,
+            image_crop,
+            records,
+            segment_index=segment_index,
+            route_label=segment_label,
+        )
 
         wan_positive, wan_negative, wan_latent = self._wan_image_to_video(
-            positive, negative, vae, scaled_image, width, height, frames, batch_size, records
+            positive, negative, vae, scaled_image, width, height, frames, batch_size, records,
+            segment_index=segment_index,
+            route_label=segment_label,
+        )
+        wan_positive, wan_negative, wan_latent = self._apply_segment_entry_latent_memory_bridge(
+            segment_index=segment_index,
+            previous_segment_latent=previous_segment_latent,
+            wan_positive=wan_positive,
+            wan_negative=wan_negative,
+            wan_latent=wan_latent,
+            records=records,
+            strategy_carrier_context=strategy_carrier_context,
         )
         self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_wan_image_to_video")
 
@@ -1845,10 +3553,26 @@ class SingularityExecutionMixin:
         frames_out = self._decode_tiled(
             vae, final_latent,
             decode_tile_size, decode_overlap, decode_temporal_size, decode_temporal_overlap,
-            records
+            records,
+            segment_index=segment_index,
+            route_label=segment_label,
         )
         self._math_tensor_summary(frames_out, records, f"EventMath_cascade_{segment_index}_decoded_frames", strict=False)
         self._frame_motion_math(frames_out, records, f"EventMath_cascade_{segment_index}_frame_motion")
+        self._record_segment_entry_strategy_return_probe(
+            records,
+            segment_index=segment_index,
+            source_image=source_image,
+            scaled_image=scaled_image,
+            previous_segment_latent=previous_segment_latent,
+            wan_positive=wan_positive,
+            wan_negative=wan_negative,
+            wan_latent=wan_latent,
+            latent_after_high=latent_after_high,
+            latent_after_low=final_latent,
+            frames_out=frames_out,
+            strategy_carrier_context=strategy_carrier_context,
+        )
         self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_decode")
         last_frame = self._last_frame_image(frames_out, width, height)
         records.append({
@@ -1922,7 +3646,10 @@ class SingularityExecutionMixin:
         mask=None,
         use_formula_recommendation=False,
         prompt_transcode_mode="REPORT_ONLY",
-        selected_tail_index=0,
+        auto_calibration_mode="OFF",
+        selected_tail_index=-1,
+        workflow_prompt=None,
+        workflow_extra_pnginfo=None,
     ):
         run_id = now_run_id(prefix="Singularity")
         pause_node_id = _singularity_pause_key(
@@ -1987,6 +3714,12 @@ class SingularityExecutionMixin:
             },
             "formula": "The public workflow node alias resolves to one internal Event Core Body runtime implementation.",
         })
+        self._record_workflow_graph_route_diagnostics(
+            execution_records,
+            workflow_prompt=workflow_prompt,
+            workflow_extra_pnginfo=workflow_extra_pnginfo,
+            unique_id=getattr(self, "_singularity_node_id", None),
+        )
         input_normalization = getattr(self, "_event_input_normalization", None)
         if isinstance(input_normalization, dict):
             adjustments = input_normalization.get("adjustments", [])
@@ -2011,6 +3744,20 @@ class SingularityExecutionMixin:
                     "status": "recorded",
                     "adjustments": adjustments,
                 })
+        auto_calibration_state = getattr(self, "_event_auto_calibration_state", None)
+        if isinstance(auto_calibration_state, dict):
+            execution_records.append({
+                "stage": "EventAutoCalibrationPrepare",
+                "status": auto_calibration_state.get("status", "unknown"),
+                "mode": str(auto_calibration_state.get("mode", auto_calibration_mode) or "OFF"),
+                "scene_key": auto_calibration_state.get("scene_key", ""),
+                "cache_path": auto_calibration_state.get("cache_path", ""),
+                "cache_entry_found": bool(auto_calibration_state.get("cache_entry_found", False)),
+                "requested": auto_calibration_state.get("requested", {}),
+                "applied": auto_calibration_state.get("applied", {}),
+                "background_anchor_preservation_control": getattr(self, "_event_background_anchor_preservation_control", {}),
+                "formula": auto_calibration_state.get("formula", "Auto calibration observes one run and can apply a cached scene-local recommendation on the next run."),
+            })
         self._event_control_warning(
             execution_records,
             getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
@@ -2115,6 +3862,20 @@ class SingularityExecutionMixin:
             "formula": "MODEL + LoRA + compile + SD3 shift form the Operator side of Strategy(t); order is observable and must not be hidden.",
             **model_route_builder_policy,
         })
+        self._record_external_operator_route_diagnostics(
+            execution_records,
+            primary_model=primary_model,
+            secondary_model=secondary_model,
+            clip=clip,
+            vae=vae,
+            global_steps=global_steps,
+            primary_start_step=primary_start_step,
+            primary_end_step=primary_end_step,
+            secondary_start_step=secondary_start_step,
+            secondary_end_step=secondary_end_step,
+            primary_sd3_shift=primary_sd3_shift,
+            secondary_sd3_shift=secondary_sd3_shift,
+        )
         execution_records.append({
             "stage": "EventRuntimeLayerProbes",
             "status": "observer_only",
@@ -2235,6 +3996,7 @@ class SingularityExecutionMixin:
                 "math_control_mode": getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
                 "high_delta_strength": getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
                 "low_delta_strength": getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+                "latent_memory_bridge": getattr(self, "_event_latent_memory_bridge_controls", {}),
                 "sampler_trace_mode": getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"),
                 "sampler_trace_max_steps": getattr(self, "_event_sampler_trace", {}).get("max_steps", 64),
                 "prompt_transcode_mode": prompt_transcode_mode,
@@ -2429,6 +4191,7 @@ class SingularityExecutionMixin:
                     "math_control_mode": getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"),
                     "high_delta_strength": getattr(self, "_event_delta_strengths", {}).get("high", 1.0),
                     "low_delta_strength": getattr(self, "_event_delta_strengths", {}).get("low", 1.0),
+                    "latent_memory_bridge": getattr(self, "_event_latent_memory_bridge_controls", {}),
                     "sampler_trace_mode": getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"),
                     "sampler_trace_max_steps": getattr(self, "_event_sampler_trace", {}).get("max_steps", 64),
                     "prompt_transcode_mode": mode_n,
@@ -2872,6 +4635,8 @@ class SingularityExecutionMixin:
                 "continue_same_prompt_reuse_active_strategy" if same_prompt else "continue_widget_payload"
             )
             segment_strategy_carrier_context["prompt_transcode_mode"] = transform_summary.get("prompt_transcode_mode", mode_value)
+            segment_strategy_carrier_context["prompt_continuity_reused"] = bool(transform_summary.get("prompt_continuity_reused", False))
+            segment_strategy_carrier_context["prompt_continuity_policy"] = str(transform_summary.get("prompt_continuity_policy", ""))
             segment_strategy_carrier_context["last_runtime_prompt_update_applies_to_segment"] = int(applies_to_segment)
             segment_strategy_carrier_context["last_runtime_prompt_update_active_positive_signature"] = transform_summary.get("active_positive_signature", "")
             segment_strategy_carrier_context["last_runtime_prompt_update_active_negative_signature"] = transform_summary.get("active_negative_signature", "")
@@ -3117,10 +4882,21 @@ class SingularityExecutionMixin:
                 execution_records.append({"stage": "EventTextEncode", "status": "ok", "formula": "prompt + CLIP behavior = S_text = conditioning"})
                 self._stage_delay(stage_delay_seconds, execution_records, "after_text_encode")
 
-                scaled_image = self._scale_image(image, width, height, image_upscale_method, image_crop, execution_records)
+                scaled_image = self._scale_image(
+                    image,
+                    width,
+                    height,
+                    image_upscale_method,
+                    image_crop,
+                    execution_records,
+                    segment_index=1,
+                    route_label="first_body",
+                )
 
                 wan_positive, wan_negative, wan_latent = self._wan_image_to_video(
-                    positive, negative, vae, scaled_image, width, height, frames, batch_size, execution_records
+                    positive, negative, vae, scaled_image, width, height, frames, batch_size, execution_records,
+                    segment_index=1,
+                    route_label="first_body",
                 )
                 self._stage_delay(stage_delay_seconds, execution_records, "after_wan_image_to_video")
 
@@ -3246,6 +5022,33 @@ class SingularityExecutionMixin:
                 # DIRECT, no EventSamplerCore / wrapper / per-step math owning the KSamplerAdvanced window.
                 # This is the dumb physical bypass for the exact symptom (low never starts after high in first body + pause/cascade_1).
                 print(f"[RAW] *** DIRECT LOW BYPASS CALL: start={secondary_start_step} end={secondary_end_step} cfg={low_cfg} (strength={low_delta_strength}, raw_delta_norm={raw_delta_norm}) (this is the 1-4 refinement, NOT another high) ***")
+                self._record_sampler_route_parity_probe(
+                    execution_records,
+                    "EventRawVsSingularityParity_FirstBodyLowDirectBegin",
+                    branch_name="low",
+                    route_variant="first_body_direct_low_bypass",
+                    latent_before=latent_after_high,
+                    latent_after=None,
+                    model=low_model,
+                    seed=int(seed),
+                    steps=int(global_steps),
+                    cfg=low_cfg,
+                    sampler_name=str(sampler_name),
+                    scheduler=str(scheduler),
+                    start_at_step=int(secondary_start_step),
+                    end_at_step=int(secondary_end_step),
+                    add_noise="disable",
+                    return_leftover_noise="disable",
+                    sd3_shift=float(secondary_sd3_shift),
+                    segment_index=1,
+                    extra={
+                        "branch_role": "refinement_detail_stabilization_first_body_bypass",
+                        "math_control_mode": str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")),
+                        "reason": "first body uses direct KSamplerAdvanced bypass while later cascade segments use EventSamplerCore",
+                        "raw_high_delta_norm_for_cfg_policy": raw_delta_norm,
+                        "low_delta_strength": low_delta_strength,
+                    },
+                )
                 latent_after_low_native = self._low_level_sampler_operation(
                     model=low_model,
                     positive=wan_positive,
@@ -3261,11 +5064,61 @@ class SingularityExecutionMixin:
                     add_noise="disable",
                     return_leftover_noise="disable",
                 )
+                self._record_sampler_route_parity_probe(
+                    execution_records,
+                    "EventRawVsSingularityParity_FirstBodyLowDirectRawAfter",
+                    branch_name="low",
+                    route_variant="first_body_direct_low_bypass",
+                    latent_before=latent_after_high,
+                    latent_after=latent_after_low_native,
+                    model=low_model,
+                    seed=int(seed),
+                    steps=int(global_steps),
+                    cfg=low_cfg,
+                    sampler_name=str(sampler_name),
+                    scheduler=str(scheduler),
+                    start_at_step=int(secondary_start_step),
+                    end_at_step=int(secondary_end_step),
+                    add_noise="disable",
+                    return_leftover_noise="disable",
+                    sd3_shift=float(secondary_sd3_shift),
+                    segment_index=1,
+                    extra={
+                        "branch_role": "refinement_detail_stabilization_first_body_bypass",
+                        "math_control_mode": str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")),
+                        "probe_scope": "direct_low_native_output_before_delta_overlay",
+                    },
+                )
                 latent_after_low = self._apply_latent_delta_control(
                     latent_after_high,
                     latent_after_low_native,
                     "low",
                     execution_records,
+                )
+                self._record_sampler_route_parity_probe(
+                    execution_records,
+                    "EventRawVsSingularityParity_FirstBodyLowDirectControlledAfter",
+                    branch_name="low",
+                    route_variant="first_body_direct_low_bypass",
+                    latent_before=latent_after_high,
+                    latent_after=latent_after_low,
+                    model=low_model,
+                    seed=int(seed),
+                    steps=int(global_steps),
+                    cfg=low_cfg,
+                    sampler_name=str(sampler_name),
+                    scheduler=str(scheduler),
+                    start_at_step=int(secondary_start_step),
+                    end_at_step=int(secondary_end_step),
+                    add_noise="disable",
+                    return_leftover_noise="disable",
+                    sd3_shift=float(secondary_sd3_shift),
+                    segment_index=1,
+                    extra={
+                        "branch_role": "refinement_detail_stabilization_first_body_bypass",
+                        "math_control_mode": str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY")),
+                        "probe_scope": "direct_low_output_after_delta_overlay",
+                    },
                 )
                 final_latent = latent_after_low
                 print(f"[RAW] low done with cfg={low_cfg} (first body direct bypass)")
@@ -3403,7 +5256,9 @@ class SingularityExecutionMixin:
                 generated_frames = self._decode_tiled(
                     vae, generated_latent,
                     decode_tile_size, decode_overlap, decode_temporal_size, decode_temporal_overlap,
-                    execution_records
+                    execution_records,
+                    segment_index=1,
+                    route_label="first_body",
                 )
                 self._math_tensor_summary(generated_frames, execution_records, "EventMath_decoded_frames", strict=False)
                 self._frame_motion_math(generated_frames, execution_records, "EventMath_decoded_frame_motion")
@@ -3431,6 +5286,8 @@ class SingularityExecutionMixin:
                 segment_batches = [generated_frames]
                 current_cascade_image = self._last_frame_image(generated_frames, width, height)
                 start_segment = 2
+                pending_resume_frame_index = None
+                pending_resume_target_t = None
 
                 # Handle pause at cascade 1
                 if pause_after_cascade_1 and start_segment == 2:
@@ -3452,7 +5309,35 @@ class SingularityExecutionMixin:
 
                     segment_batches = [generated_frames]
                     current_cascade_image = self._last_frame_image(generated_frames, width, height)
+                    pending_resume_frame_index = int(resume_frame_index)
+                    pending_resume_target_t = int(target_t)
                     _apply_runtime_prompt_update(prompt_update, 1, start_segment)
+                    remaining_strategy = self._build_cascade_remaining_strategy(
+                        positive_prompt=positive_prompt,
+                        negative_prompt=negative_prompt,
+                        pause_segment_index=1,
+                        next_segment_index=start_segment,
+                        resume_frame_index=resume_frame_index,
+                        frames_per_cascade=frames,
+                        frames=generated_frames,
+                        records=execution_records,
+                    )
+                    self._activate_cascade_remaining_strategy(remaining_strategy, execution_records)
+                    if str(prompt_transcode_mode_n or "").upper() == "TRANSFORM_PROMPT":
+                        phase_positive, phase_summary = self._build_cascade_phase_prompt_transform(
+                            positive_prompt=positive_prompt,
+                            remaining_strategy=remaining_strategy,
+                            applies_to_segment=start_segment,
+                            preserve_prompt_carrier=bool(segment_strategy_carrier_context.get("prompt_continuity_reused", False)),
+                            preserve_reason=str(segment_strategy_carrier_context.get("prompt_continuity_policy", "")),
+                            records=execution_records,
+                        )
+                        if phase_summary.get("status") == "applied" and phase_positive != positive_prompt:
+                            positive_prompt = phase_positive
+                            segment_strategy_carrier_context["prompt_source"] = "cascade_phase_prompt_transform"
+                            segment_strategy_carrier_context["current_active_positive_signature"] = _prompt_text_signature(positive_prompt)
+                            segment_strategy_carrier_context["current_active_positive_normalized_signature"] = _prompt_normalized_text_signature(positive_prompt)
+                            segment_strategy_carrier_context["current_positive_prompt_transformed"] = True
                     pause_after_cascade_1 = False
                     self._pause_flag_triggered = False
                     if requested_cascade_count < start_segment:
@@ -3483,9 +5368,15 @@ class SingularityExecutionMixin:
                         "cascade_execution_plan": cascade_execution_plan,
                     })
                     for segment_index in range(start_segment, requested_cascade_count + 1):
+                        previous_segment_frames = segment_batches[-1] if segment_batches else None
+                        previous_segment_latent = generated_latent
+                        segment_source_image = current_cascade_image
+                        continuity_resume_frame_index = pending_resume_frame_index
+                        continuity_resume_target_t = pending_resume_target_t
                         next_frames, current_cascade_image, generated_latent = self._run_event_horizon_segment_core(
                             segment_index=segment_index,
-                            source_image=current_cascade_image,
+                            source_image=segment_source_image,
+                            previous_segment_latent=previous_segment_latent,
                             primary_model=primary_model,
                             secondary_model=secondary_model,
                             clip=clip,
@@ -3524,6 +5415,18 @@ class SingularityExecutionMixin:
                         )
                         if segment_index > 1:
                             next_frames = self._drop_first_frame_batch(next_frames, execution_records, segment_index)
+                        self._record_cascade_strategy_continuity_probe(
+                            execution_records,
+                            segment_index=segment_index,
+                            previous_frames=previous_segment_frames,
+                            next_source_image=segment_source_image,
+                            next_frames=next_frames,
+                            resume_frame_index=continuity_resume_frame_index,
+                            latent_temporal_target_t=continuity_resume_target_t,
+                            strategy_carrier_context=segment_strategy_carrier_context,
+                        )
+                        pending_resume_frame_index = None
+                        pending_resume_target_t = None
                         self._cascade_boundary_math(segment_batches[-1], next_frames, execution_records, segment_index)
                         segment_batches.append(next_frames)
                         
@@ -3555,7 +5458,35 @@ class SingularityExecutionMixin:
                             )
                             segment_batches[-1] = next_frames
                             current_cascade_image = self._last_frame_image(next_frames, width, height)
+                            pending_resume_frame_index = int(resume_frame_index)
+                            pending_resume_target_t = int(target_t)
                             _apply_runtime_prompt_update(prompt_update, segment_index, int(segment_index) + 1)
+                            remaining_strategy = self._build_cascade_remaining_strategy(
+                                positive_prompt=positive_prompt,
+                                negative_prompt=negative_prompt,
+                                pause_segment_index=segment_index,
+                                next_segment_index=int(segment_index) + 1,
+                                resume_frame_index=resume_frame_index,
+                                frames_per_cascade=frames,
+                                frames=next_frames,
+                                records=execution_records,
+                            )
+                            self._activate_cascade_remaining_strategy(remaining_strategy, execution_records)
+                            if str(prompt_transcode_mode_n or "").upper() == "TRANSFORM_PROMPT":
+                                phase_positive, phase_summary = self._build_cascade_phase_prompt_transform(
+                                    positive_prompt=positive_prompt,
+                                    remaining_strategy=remaining_strategy,
+                                    applies_to_segment=int(segment_index) + 1,
+                                    preserve_prompt_carrier=bool(segment_strategy_carrier_context.get("prompt_continuity_reused", False)),
+                                    preserve_reason=str(segment_strategy_carrier_context.get("prompt_continuity_policy", "")),
+                                    records=execution_records,
+                                )
+                                if phase_summary.get("status") == "applied" and phase_positive != positive_prompt:
+                                    positive_prompt = phase_positive
+                                    segment_strategy_carrier_context["prompt_source"] = "cascade_phase_prompt_transform"
+                                    segment_strategy_carrier_context["current_active_positive_signature"] = _prompt_text_signature(positive_prompt)
+                                    segment_strategy_carrier_context["current_active_positive_normalized_signature"] = _prompt_normalized_text_signature(positive_prompt)
+                                    segment_strategy_carrier_context["current_positive_prompt_transformed"] = True
                             self._pause_flag_triggered = False
                             execution_records.append({
                                 "stage": "SingularityCascadeResume",
@@ -3708,14 +5639,14 @@ class SingularityExecutionMixin:
 
         # Tail formula evidence must exist before Event Core finalization/report
         # so Strategy Matrix can see tail->next-source as an observed collision.
-        tail_result = self._select_best_tail_frames(generated_frames, count=3, records=execution_records)
-        tail_3_frames = tail_result["frames"] if tail_result else None
-        tail_scores = tail_result.get("scores", [0.0, 0.0, 0.0]) if tail_result else [0.0, 0.0, 0.0]
-        mirror_breaks = tail_result.get("mirror_break_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
-        admissible_conts = tail_result.get("admissible_continuation_scores", [0.5, 0.5, 0.5]) if tail_result else [0.5, 0.5, 0.5]
+        tail_result = self._select_best_tail_frames(generated_frames, count=TAIL_CANDIDATE_COUNT, records=execution_records)
+        tail_candidate_frames = tail_result["frames"] if tail_result else None
+        tail_scores = tail_result.get("scores", [0.0] * TAIL_CANDIDATE_COUNT) if tail_result else [0.0] * TAIL_CANDIDATE_COUNT
+        mirror_breaks = tail_result.get("mirror_break_scores", [0.5] * TAIL_CANDIDATE_COUNT) if tail_result else [0.5] * TAIL_CANDIDATE_COUNT
+        admissible_conts = tail_result.get("admissible_continuation_scores", [0.5] * TAIL_CANDIDATE_COUNT) if tail_result else [0.5] * TAIL_CANDIDATE_COUNT
 
         continuation_fitness = self._compute_continuation_fitness(
-            tail_3_frames,
+            tail_candidate_frames,
             source_image=uploaded_image,
             records=execution_records,
         )
@@ -3724,10 +5655,10 @@ class SingularityExecutionMixin:
         if tail_scores:
             formula_best_index = tail_scores.index(max(tail_scores))
 
-        continuation_scores = [0.0] * 3
+        continuation_scores = [0.0] * TAIL_CANDIDATE_COUNT
         if continuation_fitness and continuation_fitness.get("fitness"):
             fit = continuation_fitness["fitness"]
-            for i in range(min(3, len(fit))):
+            for i in range(min(TAIL_CANDIDATE_COUNT, len(fit))):
                 sys_score = tail_scores[i] if i < len(tail_scores) else 0.0
                 cont_score = fit[i]
                 adm = admissible_conts[i] if i < len(admissible_conts) else 0.5
@@ -3745,16 +5676,17 @@ class SingularityExecutionMixin:
             manual_sel = int(float(str(selected_tail_index).strip())) if selected_tail_index is not None else -1
         except Exception:
             manual_sel = -1
-        if manual_sel not in (-1, 0, 1, 2):
+        valid_tail_indices = tuple(range(TAIL_CANDIDATE_COUNT))
+        if manual_sel not in (-1,) + valid_tail_indices:
             manual_sel = -1
         if use_formula_recommendation:
-            initial_selected_index = formula_best_index
+            initial_selected_index = system_best_for_continuation
         else:
-            initial_selected_index = manual_sel if manual_sel in (0, 1, 2) else -1
+            initial_selected_index = manual_sel if manual_sel in valid_tail_indices else -1
 
-        packet["metadata"]["tail_3_formula_summary"] = {
-            "tail_3_frames_available": tail_3_frames is not None,
-            "tail_3_count": tail_3_frames.shape[0] if tail_3_frames is not None and hasattr(tail_3_frames, "shape") else 0,
+        tail_formula_summary = {
+            "tail_5_frames_available": tail_candidate_frames is not None,
+            "tail_5_count": tail_candidate_frames.shape[0] if tail_candidate_frames is not None and hasattr(tail_candidate_frames, "shape") else 0,
             "tail_scores": tail_scores,
             "mirror_break_scores": mirror_breaks,
             "admissible_continuation_scores": admissible_conts,
@@ -3762,13 +5694,22 @@ class SingularityExecutionMixin:
             "initial_selected_tail_index": initial_selected_index,
             "system_best_for_continuation": system_best_for_continuation,
             "continuation_fitness_scores": continuation_scores,
+            "formula_recommendation_selection_policy": (
+                "system_best_for_continuation_when_enabled; recency_is_tiebreaker_only"
+                if use_formula_recommendation
+                else "manual_selected_tail_index_or_none"
+            ),
             "report_timing": "pre_finalize",
             "formula_role": "tail candidate as admissible Outcome(t+1)+ObservedBehavior(t+1) for next cascade Strategy",
         }
-        if tail_3_frames is not None:
-            packet["metadata"]["tail_3_best_frames"] = {
-                "description": "Last 3 frames from the end of the generated sequence (formula proposes admissible continuation per KB Mirror reading)",
-                "shape": list(tail_3_frames.shape) if hasattr(tail_3_frames, "shape") else None,
+        tail_formula_summary["tail_3_frames_available"] = tail_formula_summary["tail_5_frames_available"]
+        tail_formula_summary["tail_3_count"] = min(3, tail_formula_summary["tail_5_count"])
+        packet["metadata"]["tail_5_formula_summary"] = tail_formula_summary
+        packet["metadata"]["tail_3_formula_summary"] = tail_formula_summary
+        if tail_candidate_frames is not None:
+            tail_best_frames = {
+                "description": "Last 5 candidate frames from the end of the generated sequence (formula proposes admissible continuation per KB Mirror reading)",
+                "shape": list(tail_candidate_frames.shape) if hasattr(tail_candidate_frames, "shape") else None,
                 "scores": tail_scores,
                 "mirror_break_scores": mirror_breaks,
                 "admissible_continuation_scores": admissible_conts,
@@ -3776,6 +5717,15 @@ class SingularityExecutionMixin:
                 "user_selected_index": manual_sel,
                 "mirror_note": "Human Strategy (green outline / manual click) meets Formula ObservedBehavior (motion scores). Selection is always bidirectional reweighting - formula proposes, human Strategy decides or overrides.",
             }
+            packet["metadata"]["tail_5_best_frames"] = tail_best_frames
+            packet["metadata"]["tail_3_best_frames"] = tail_best_frames
+
+        background_anchor_card = self._event_background_anchor_preservation_card(
+            generated_frames,
+            records=execution_records,
+        )
+        execution_records.append(background_anchor_card)
+        packet["metadata"]["background_anchor_preservation"] = background_anchor_card
 
         packet = self._event_core_body_finalize(packet, execution_records, result_status, saved_video_path, failure_reason)
         packet["metadata"]["execution_records"] = execution_records
@@ -3846,6 +5796,21 @@ class SingularityExecutionMixin:
                     "observer_only": True,
                     "formula": "Runtime Monitor writes machine-readable ObservedBehavior sidecars without changing generation.",
                 })
+                if hasattr(self, "_event_auto_calibration_finalize"):
+                    try:
+                        execution_records.append(self._event_auto_calibration_finalize(
+                            packet,
+                            execution_records,
+                            saved_report_path=saved_report_path,
+                            saved_video_path=saved_video_path,
+                        ))
+                    except Exception as e:
+                        execution_records.append({
+                            "stage": "EventAutoCalibrationResult",
+                            "status": "failed",
+                            "error": str(e),
+                            "active_control_allowed": False,
+                        })
                 report = build_markdown_report(packet)
                 report_size = self._rewrite_report_file(saved_report_path, report)
             except Exception as e:
@@ -3866,16 +5831,22 @@ class SingularityExecutionMixin:
             result_preview = self._placeholder_image(width, height)
 
         # Tail math was computed before Event Core finalization/report; here we only expose the already-scored frames.
-        # Split into 3 separate IMAGE outputs for the UI layer to use
+        # Split into 5 separate IMAGE outputs for the UI layer to use.
         tail_frame_0 = None
         tail_frame_1 = None
         tail_frame_2 = None
-        if tail_3_frames is not None and hasattr(tail_3_frames, "shape") and tail_3_frames.shape[0] > 0:
-            tail_frame_0 = tail_3_frames[0:1]
-            if tail_3_frames.shape[0] >= 2:
-                tail_frame_1 = tail_3_frames[1:2]
-            if tail_3_frames.shape[0] >= 3:
-                tail_frame_2 = tail_3_frames[2:3]
+        tail_frame_3 = None
+        tail_frame_4 = None
+        if tail_candidate_frames is not None and hasattr(tail_candidate_frames, "shape") and tail_candidate_frames.shape[0] > 0:
+            tail_frame_0 = tail_candidate_frames[0:1]
+            if tail_candidate_frames.shape[0] >= 2:
+                tail_frame_1 = tail_candidate_frames[1:2]
+            if tail_candidate_frames.shape[0] >= 3:
+                tail_frame_2 = tail_candidate_frames[2:3]
+            if tail_candidate_frames.shape[0] >= 4:
+                tail_frame_3 = tail_candidate_frames[3:4]
+            if tail_candidate_frames.shape[0] >= 5:
+                tail_frame_4 = tail_candidate_frames[4:5]
 
         if not ui_images:
             ui_images = self._make_ui_previews(source_preview, result_preview, save_prefix, execution_records, include_result_preview=enable_continuation_outputs)
@@ -3883,25 +5854,27 @@ class SingularityExecutionMixin:
             "source_preview": "source image or upload",
             "result_preview": "disabled; no PreviewImage calls in terminal node",
             "continuation_seed_frame": "not emitted by main terminal node in r15; use future extractor/chain node",
-            "tail_frames_exposed": "tail_frame_0 / tail_frame_1 / tail_frame_2 as separate IMAGE outputs (3 last frames from tail)",
+            "tail_frames_exposed": "tail_frame_0 / tail_frame_1 / tail_frame_2 / tail_frame_3 / tail_frame_4 as separate IMAGE outputs (5 candidate frames from tail)",
             "ui_images_count": len(ui_images),
             "video_ui_payload_returned": bool(video_ui_payload),
-            "tail_3_frames_available": tail_3_frames is not None,
-            "tail_3_count": tail_3_frames.shape[0] if tail_3_frames is not None and hasattr(tail_3_frames, "shape") else 0,
+            "tail_5_frames_available": tail_candidate_frames is not None,
+            "tail_5_count": tail_candidate_frames.shape[0] if tail_candidate_frames is not None and hasattr(tail_candidate_frames, "shape") else 0,
+            "tail_3_frames_available": tail_candidate_frames is not None,
+            "tail_3_count": min(3, tail_candidate_frames.shape[0]) if tail_candidate_frames is not None and hasattr(tail_candidate_frames, "shape") else 0,
             "tail_scores": tail_scores,  # blended system + KB formula admissible continuation scores
             "mirror_break_scores": mirror_breaks,  # per-candidate semantic distance (lower = better event continuation)
             "admissible_continuation_scores": admissible_conts,  # right side of formula: how well candidate continues the event (B+ + O+)
-            "formula_best_tail_index": formula_best_index,  # what the raw formula recommends as the best of the 3
+            "formula_best_tail_index": formula_best_index,  # what the raw formula recommends as the best of the tail candidates
             "initial_selected_tail_index": initial_selected_index,  # respects the use_formula_recommendation toggle (default manual)
             "system_best_for_continuation": system_best_for_continuation,  # hybrid: raw deltas/motion + fitness + admissible continuation
             "continuation_fitness_scores": continuation_scores if 'continuation_scores' in locals() else [],
             "formula_raw_note": "KB Mirror Core bidirectional: left=segment Strategy (Outcome+Observed via raw_delta + motion at high/low seam), right=candidate tail as admissible causal continuation. MirrorBreak = semantic distance. See FORMULA_TAIL_MIRROR_BREAK records. Always manual green; gold only proposal when use_formula_recommendation."
         }
 
-        if tail_3_frames is not None:
-            packet["metadata"]["tail_3_best_frames"] = {
-                "description": "Last 3 frames from the end of the generated sequence (formula proposes admissible continuation per KB Mirror reading)",
-                "shape": list(tail_3_frames.shape) if hasattr(tail_3_frames, "shape") else None,
+        if tail_candidate_frames is not None:
+            tail_best_frames = {
+                "description": "Last 5 candidate frames from the end of the generated sequence (formula proposes admissible continuation per KB Mirror reading)",
+                "shape": list(tail_candidate_frames.shape) if hasattr(tail_candidate_frames, "shape") else None,
                 "scores": tail_scores,
                 "mirror_break_scores": mirror_breaks,
                 "admissible_continuation_scores": admissible_conts,
@@ -3909,6 +5882,8 @@ class SingularityExecutionMixin:
                 "user_selected_index": manual_sel if 'manual_sel' in locals() else initial_selected_index,
                 "mirror_note": "Human Strategy (green outline / manual click) meets Formula ObservedBehavior (motion scores). Selection is always bidirectional reweighting — formula proposes, human Strategy decides or overrides."
             }
+            packet["metadata"]["tail_5_best_frames"] = tail_best_frames
+            packet["metadata"]["tail_3_best_frames"] = tail_best_frames
 
         status = (
             f"Singularity v{EVENT_HORIZON_RUNTIME_VERSION} | target={generation_target} | result={result_status} | "
@@ -3930,6 +5905,8 @@ class SingularityExecutionMixin:
             tail_frame_0,
             tail_frame_1,
             tail_frame_2,
+            tail_frame_3,
+            tail_frame_4,
         )
 
         if not video_ui_payload:

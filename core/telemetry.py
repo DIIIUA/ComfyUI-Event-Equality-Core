@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
-EVENT_HORIZON_BODY_VERSION = "0.1-r91"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r113"
 
 
 def _event_json_safe(value, depth=0):
@@ -1713,7 +1713,128 @@ class SingularityTelemetryMixin:
             "next_action": "Keep source/crop/size fixed while comparing math; otherwise visual drift cannot be attributed cleanly.",
         }
 
-        local_cards = [prompt_card, low_card, object_card, tail_card, frame_card, source_card]
+        background_raw = latest_record("EventBackgroundAnchorPreservationCard")
+        background_status = str(background_raw.get("status") or "not_recorded")
+        background_roi_means = background_raw.get("roi_temporal_means", {}) if isinstance(background_raw.get("roi_temporal_means", {}), dict) else {}
+        background_roi_maxes = background_raw.get("roi_temporal_maxes", {}) if isinstance(background_raw.get("roi_temporal_maxes", {}), dict) else {}
+        top_band_temporal_mean = safe_float(background_roi_means.get("top_band_background"), 0.0)
+        top_band_temporal_max = safe_float(background_roi_maxes.get("top_band_background"), 0.0)
+        top_band_pressure = clamp01(((top_band_temporal_mean or 0.0) - 6.5) / 3.0)
+        background_pressure = max(
+            clamp01(background_raw.get("global_scene_drift_score", 0.0)),
+            clamp01(background_raw.get("background_drift_score", 0.0)),
+            clamp01(background_raw.get("weak_center_background_separation_score", 0.0)),
+            top_band_pressure,
+        )
+        background_card = {
+            "stage": "EventBackgroundAnchorPreservationCard",
+            "status": background_status,
+            "card_version": "relation_pressure_cards_v2_background_anchor",
+            "formula": "Background should remain SourceAnchor evidence while central event carriers move; global background drift means local motion failed to return to the primary Strategy.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "background_temporal_mean": safe_float(background_raw.get("background_temporal_mean"), None),
+            "background_temporal_max": safe_float(background_raw.get("background_temporal_max"), None),
+            "center_temporal_mean": safe_float(background_raw.get("center_temporal_mean"), None),
+            "full_frame_temporal_mean": safe_float(background_raw.get("full_frame_temporal_mean"), None),
+            "center_background_ratio": safe_float(background_raw.get("center_background_ratio"), None),
+            "background_drift_score": safe_float(background_raw.get("background_drift_score"), None),
+            "weak_center_background_separation_score": safe_float(background_raw.get("weak_center_background_separation_score"), None),
+            "global_scene_drift_score": safe_float(background_raw.get("global_scene_drift_score"), None),
+            "top_band_temporal_mean": top_band_temporal_mean,
+            "top_band_temporal_max": top_band_temporal_max,
+            "top_band_pressure": top_band_pressure,
+            "roi_temporal_means": background_roi_means,
+            "roi_temporal_maxes": background_roi_maxes,
+            "background_anchor_pressure": background_pressure,
+            "evidence_stages": compact_record_refs([str(background_raw.get("stage", "") or "")]),
+            "next_action": (
+                "Treat this as global scene drift before raising low_delta_strength."
+                if background_status == "global_scene_drift_high"
+                else "Use this as the background side of fixed-seed comparisons."
+            ),
+        }
+
+        spatial_roles = {
+            "top_left_background": "SourceAnchor background corner",
+            "top_right_background": "SourceAnchor background corner",
+            "top_band_background": "SourceAnchor top band",
+            "left_side_floor": "SourceAnchor left side / floor",
+            "right_side_floor": "SourceAnchor right side / floor",
+            "lower_side_floor": "SourceAnchor lower side / floor",
+            "center_event_proxy": "intended central ObservedBehavior carrier",
+            "full_frame": "global visible Outcome carrier",
+        }
+        spatial_region_cards = []
+        background_region_pressures = []
+        center_region_pressure = 0.0
+        for roi_name in spatial_roles:
+            mean_value = safe_float(background_roi_means.get(roi_name), None)
+            max_value = safe_float(background_roi_maxes.get(roi_name), None)
+            is_center = roi_name == "center_event_proxy"
+            is_full = roi_name == "full_frame"
+            if mean_value is None:
+                pressure = 0.0
+            elif is_center:
+                pressure = clamp01((mean_value - 10.0) / 12.0)
+                center_region_pressure = pressure
+            elif is_full:
+                pressure = clamp01((mean_value - 8.0) / 10.0)
+            else:
+                threshold = 3.5 if "top_left" in roi_name or "top_right" in roi_name else 6.5
+                pressure = clamp01((mean_value - threshold) / 4.0)
+                background_region_pressures.append(pressure)
+            spatial_region_cards.append({
+                "roi": roi_name,
+                "formula_role": spatial_roles[roi_name],
+                "temporal_mean": mean_value,
+                "temporal_max": max_value,
+                "pressure": pressure,
+                "carrier_type": "central_motion" if is_center else ("global_outcome" if is_full else "background_anchor"),
+            })
+        dominant_region = "none"
+        dominant_region_pressure = 0.0
+        for item in spatial_region_cards:
+            if item.get("carrier_type") == "background_anchor" and float(item.get("pressure", 0.0) or 0.0) >= dominant_region_pressure:
+                dominant_region = str(item.get("roi", "") or "none")
+                dominant_region_pressure = float(item.get("pressure", 0.0) or 0.0)
+        background_region_pressure = max(background_region_pressures) if background_region_pressures else 0.0
+        center_background_separation = clamp01(((safe_float(background_card.get("center_background_ratio"), 1.0) or 1.0) - 1.0) / 1.25)
+        spatial_anchor_pressure = max(
+            background_region_pressure,
+            clamp01(background_card.get("background_anchor_pressure", 0.0)),
+            clamp01(1.0 - center_background_separation),
+        )
+        spatial_anchor_map = {
+            "stage": "EventSpatialAnchorMap",
+            "status": status_from_pressure(spatial_anchor_pressure, "spatial_anchor"),
+            "card_version": "spatial_anchor_map_v1_report_only",
+            "formula": "SourceAnchor is not one global value: background regions, central motion, seam handoff, and selected tail are separate local carriers that must return to one Strategy.",
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "spatial_anchor_pressure": spatial_anchor_pressure,
+            "dominant_background_region": dominant_region,
+            "dominant_background_region_pressure": dominant_region_pressure,
+            "background_region_pressure": background_region_pressure,
+            "center_motion_pressure": center_region_pressure,
+            "center_background_separation_score": center_background_separation,
+            "region_carriers": spatial_region_cards,
+            "seam_handoff_status": str(tail_card.get("status", "") or ""),
+            "frame_motion_status": str(frame_card.get("status", "") or ""),
+            "source_anchor_status": str(source_card.get("status", "") or ""),
+            "background_anchor_status": str(background_card.get("status", "") or ""),
+            "next_control_surface": "spatial_anchor_preservation_map",
+            "next_action": (
+                "Build region-aware evidence before any active background control; do not damp the whole branch for one drifting spatial carrier."
+                if spatial_anchor_pressure >= 0.30
+                else "Spatial carriers are readable; continue fixed-seed comparison before enabling control."
+            ),
+        }
+
+        local_cards = [prompt_card, low_card, object_card, tail_card, frame_card, source_card, background_card, spatial_anchor_map]
         sub_strategy_statuses = {
             str(card.get("stage", "") or ""): str(card.get("status", "") or "")
             for card in local_cards
@@ -1732,6 +1853,10 @@ class SingularityTelemetryMixin:
             divergence_flags.append("tail_strategy_pressure_high")
         if str(source_card.get("status", "") or "") == "source_anchor_missing_evidence":
             divergence_flags.append("source_anchor_missing")
+        if str(background_card.get("status", "") or "") == "global_scene_drift_high":
+            divergence_flags.append("background_anchor_global_drift_high")
+        if str(spatial_anchor_map.get("status", "") or "").endswith("_high"):
+            divergence_flags.append("spatial_anchor_map_high")
 
         if divergence_flags:
             global_status = "global_strategy_return_watch"
@@ -1741,6 +1866,7 @@ class SingularityTelemetryMixin:
             "object_identity_measured",
             "source_anchor_recorded",
             "source_anchor_crop_disabled",
+            "spatial_anchor_nominal",
         ) for status in sub_strategy_statuses.values()):
             global_status = "global_strategy_return_nominal"
         else:
@@ -1755,7 +1881,7 @@ class SingularityTelemetryMixin:
             "active_control_allowed": False,
             "primary_strategy": "Preserve one event identity, reweight local carriers only as evidence permits, and pass the resulting StrategyCarrier to the next route stage.",
             "primary_strategy_role": "global Strategy(t) / route-level accountability",
-            "sub_strategy_return_policy": "Local prompt/source/low/object/tail/frame strategies are subordinate evidence routes, not independent math controllers.",
+            "sub_strategy_return_policy": "Local prompt/source/low/object/tail/frame/spatial strategies are subordinate evidence routes, not independent math controllers.",
             "sub_strategy_statuses": sub_strategy_statuses,
             "divergence_flag_count": len(divergence_flags),
             "divergence_flags": divergence_flags,
@@ -2053,6 +2179,8 @@ class SingularityTelemetryMixin:
         tail_card = card("EventTailStrategyContinuityCard")
         object_card = card("EventObjectCarrierIdentityCard")
         source_card = card("EventSourceAnchorPreservationCard")
+        background_card = card("EventBackgroundAnchorPreservationCard")
+        spatial_card = card("EventSpatialAnchorMap")
         global_card = card("EventGlobalStrategyReturnCard")
 
         seam_terms = tail_card.get("seam_pressure_terms", {}) if isinstance(tail_card.get("seam_pressure_terms", {}), dict) else {}
@@ -2085,6 +2213,14 @@ class SingularityTelemetryMixin:
             clamp01(route("object_relation_ontology").get("return_pressure", 0.0)),
         )
         source_anchor_pressure = clamp01(route("prompt_image_anchor").get("return_pressure", 0.0))
+        background_anchor_pressure = max(
+            clamp01(background_card.get("background_anchor_pressure", 0.0)),
+            clamp01(background_card.get("global_scene_drift_score", 0.0)),
+        )
+        spatial_anchor_pressure = max(
+            clamp01(spatial_card.get("spatial_anchor_pressure", 0.0)),
+            clamp01(spatial_card.get("background_region_pressure", 0.0)),
+        )
         topology_pressure = clamp01(topology_strategy_return_map.get("max_return_pressure", 0.0))
 
         pressure_vector = {
@@ -2096,17 +2232,21 @@ class SingularityTelemetryMixin:
             "tail_strategy_pressure": tail_pressure,
             "object_relation_pressure": object_relation_pressure,
             "source_anchor_pressure": source_anchor_pressure,
+            "background_anchor_pressure": background_anchor_pressure,
+            "spatial_anchor_pressure": spatial_anchor_pressure,
             "topology_return_pressure": topology_pressure,
         }
         dominant_pressure = max(pressure_vector.values()) if pressure_vector else 0.0
         dominant_axis = max(pressure_vector, key=pressure_vector.get) if pressure_vector else "none"
         weighted_pressure = clamp01(
-            0.28 * high_low_pressure
-            + 0.24 * frame_motion_pressure
-            + 0.18 * late_segment_spike_pressure
-            + 0.12 * tail_pressure
-            + 0.10 * object_relation_pressure
-            + 0.08 * source_anchor_pressure
+            0.24 * high_low_pressure
+            + 0.22 * frame_motion_pressure
+            + 0.16 * late_segment_spike_pressure
+            + 0.11 * tail_pressure
+            + 0.09 * object_relation_pressure
+            + 0.07 * source_anchor_pressure
+            + 0.06 * background_anchor_pressure
+            + 0.05 * spatial_anchor_pressure
         )
         strategy_return_pressure = max(weighted_pressure, min(dominant_pressure, 0.82))
         strategy_return_score = 1.0 - strategy_return_pressure
@@ -2126,6 +2266,16 @@ class SingularityTelemetryMixin:
             primary_attribution = "visible_frame_motion_pressure"
             next_surface = "visible_motion_stability_review"
             next_action = "Compare fixed-seed visible motion before adding any active damping."
+        elif spatial_anchor_pressure >= 0.55:
+            status = "strategy_return_pressure_high"
+            primary_attribution = "spatial_anchor_region_drift"
+            next_surface = "spatial_anchor_preservation_map"
+            next_action = "Use region-aware SourceAnchor evidence before any active control; global damping is too broad for this pressure."
+        elif background_anchor_pressure >= 0.55:
+            status = "strategy_return_pressure_high"
+            primary_attribution = "background_anchor_global_drift"
+            next_surface = "spatial_anchor_preservation_map"
+            next_action = "Read background drift through SpatialAnchorMap first; do not pull the whole branch toward SourceAnchor until the drifting carrier is known."
         elif high_low_pressure >= 0.55:
             status = "strategy_return_pressure_high"
             primary_attribution = "high_low_sampler_strategy_pressure"
@@ -2167,6 +2317,12 @@ class SingularityTelemetryMixin:
                 "default_active": False,
             },
             {
+                "surface": "spatial_anchor_preservation_map",
+                "role": "background ROI / central carrier / seam handoff -> global Strategy return",
+                "when_to_test": "when central motion improves but background drift rises across fixed-seed comparisons",
+                "default_active": False,
+            },
+            {
                 "surface": "conditioning_route_weight_map",
                 "role": "future non-text Strategy density routing",
                 "when_to_test": "after report-only density maps are stable across runs",
@@ -2184,7 +2340,7 @@ class SingularityTelemetryMixin:
             "active_control_allowed": False,
             "model_freedom_policy": "This resolver names pressure and next surfaces; it does not force model physics or inject text.",
             "parent_strategy": "S_global_event_route",
-            "sub_strategy_return_policy": "high/low, frame motion, tail, object, source, and prompt routes are local evidence routes that must return to the parent Strategy.",
+            "sub_strategy_return_policy": "high/low, frame motion, tail, object, source, spatial, and prompt routes are local evidence routes that must return to the parent Strategy.",
             "prompt_carrier_clean": bool(prompt_carrier_clean),
             "pressure_vector": pressure_vector,
             "strategy_return_pressure": strategy_return_pressure,
@@ -2209,6 +2365,7 @@ class SingularityTelemetryMixin:
                     str(tail_card.get("stage", "") or ""),
                     str(object_card.get("stage", "") or ""),
                     str(source_card.get("stage", "") or ""),
+                    str(spatial_card.get("stage", "") or ""),
                     str(global_card.get("stage", "") or ""),
                     str(topology_strategy_return_map.get("stage", "") or ""),
                     str(strategy_matrix.get("stage", "") or ""),
@@ -2762,6 +2919,8 @@ class SingularityTelemetryMixin:
             "tail_strategy_continuity_status": relation_card_status("EventTailStrategyContinuityCard"),
             "frame_spike_attribution_status": relation_card_status("EventFrameSpikeAttributionCard"),
             "source_anchor_preservation_status": relation_card_status("EventSourceAnchorPreservationCard"),
+            "background_anchor_preservation_status": relation_card_status("EventBackgroundAnchorPreservationCard"),
+            "spatial_anchor_map_status": relation_card_status("EventSpatialAnchorMap"),
             "global_strategy_return_status": relation_card_status("EventGlobalStrategyReturnCard"),
             "topology_strategy_return_status": (body.get("topology_strategy_return_map", {}) or {}).get("status", "not_recorded") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "not_recorded",
             "topology_sync_score": (body.get("topology_strategy_return_map", {}) or {}).get("topology_sync_score", "") if isinstance(body.get("topology_strategy_return_map", {}), dict) else "",

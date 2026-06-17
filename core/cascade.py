@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
-EVENT_HORIZON_BODY_VERSION = "0.1-r91"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r113"
 
 
 def _event_json_safe(value, depth=0):
@@ -979,18 +979,31 @@ class SingularityCascadeMixin:
     def _event_strategy_control_surface_plan(self, records=None):
         try:
             mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+            field_mode = str(getattr(self, "_event_strategy_field_mode", "OFF") or "OFF").upper()
             strengths = getattr(self, "_event_delta_strengths", {}) or {}
+            bridge_controls = getattr(self, "_event_latent_memory_bridge_controls", {}) or {}
             high = float(strengths.get("high", 1.0) or 1.0)
             low = float(strengths.get("low", 1.0) or 1.0)
         except Exception:
             mode = "OBSERVE_ONLY"
+            field_mode = "OFF"
+            bridge_controls = {}
             high = 1.0
             low = 1.0
 
-        active_mode = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL")
+        active_mode = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "DEEP_STEP_DELTA_CONTROL")
+        strategy_field_delta_active_mode = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL")
+        strategy_field_reportable = field_mode in ("REPORT_ONLY", "HIGH_NOISE_FIELD", "LOW_REFINEMENT_FIELD", "DUAL_FIELD")
+        strategy_field_active = strategy_field_delta_active_mode and field_mode in ("HIGH_NOISE_FIELD", "LOW_REFINEMENT_FIELD", "DUAL_FIELD")
         if mode == "STRATEGY_PRESSURE_WINDOW":
             path = "unified_strategy_pressure_window"
             policy = "bounded_pressure_intent"
+            active_control_allowed = True
+            model_native_sampler_preserved = True
+            cfg_preserved = True
+        elif mode == "LATENT_MEMORY_BRIDGE":
+            path = "segment_entry_latent_memory_bridge"
+            policy = "bounded_first_slice_memory_return"
             active_control_allowed = True
             model_native_sampler_preserved = True
             cfg_preserved = True
@@ -1020,6 +1033,20 @@ class SingularityCascadeMixin:
                 "pressure_compression": 20.0,
                 "coupling_allowed": False,
                 "requested_strength": float(high),
+                "strategy_field_role": "HighStrategyNoiseField",
+                "strategy_field_window_max": 0.080,
+                "strategy_field_compression": 12.0,
+                "strategy_field_policy": "event_birth_direction_with_source_anchor_preservation",
+                "pressure_field_return_weight": 0.50,
+                "mirror_residual_weight": 0.12,
+                "trajectory_weight": 0.02,
+                "recursive_relation_depth": 7,
+                "recursive_relation_decay": 0.45,
+                "recursive_relation_feedback_weight": 0.04,
+                "source_anchor_return_weight": 0.35,
+                "source_anchor_guard_role": "preserve source identity while birthing motion direction",
+                "source_anchor_guard_max_intent_compression": 0.18,
+                "source_anchor_guard_max_window_compression": 0.12,
             },
             "low": {
                 "formula_role": "ObservedBehavior(low) -> decode-ready Outcome",
@@ -1027,6 +1054,20 @@ class SingularityCascadeMixin:
                 "pressure_compression": 20.0,
                 "coupling_allowed": True,
                 "requested_strength": float(low),
+                "strategy_field_role": "LowStrategyRefinementField",
+                "strategy_field_window_max": 0.006,
+                "strategy_field_compression": 90.0,
+                "strategy_field_policy": "detail_refinement_with_background_blur_guard",
+                "pressure_field_return_weight": 0.20,
+                "mirror_residual_weight": 0.10,
+                "trajectory_weight": 0.02,
+                "recursive_relation_depth": 7,
+                "recursive_relation_decay": 0.45,
+                "recursive_relation_feedback_weight": 0.03,
+                "source_anchor_return_weight": 0.25,
+                "source_anchor_guard_role": "refine detail without letting background/global scene become motion carrier",
+                "source_anchor_guard_max_intent_compression": 0.34,
+                "source_anchor_guard_max_window_compression": 0.24,
             },
             "default": {
                 "formula_role": "latent transition",
@@ -1034,14 +1075,31 @@ class SingularityCascadeMixin:
                 "pressure_compression": 20.0,
                 "coupling_allowed": False,
                 "requested_strength": 1.0,
+                "strategy_field_role": "GenericStrategyField",
+                "strategy_field_window_max": 0.016,
+                "strategy_field_compression": 20.0,
+                "strategy_field_policy": "report_only",
+                "pressure_field_return_weight": 0.30,
+                "mirror_residual_weight": 0.10,
+                "trajectory_weight": 0.02,
+                "recursive_relation_depth": 7,
+                "recursive_relation_decay": 0.45,
+                "recursive_relation_feedback_weight": 0.03,
+                "source_anchor_return_weight": 0.25,
+                "source_anchor_guard_role": "generic source-anchor return",
+                "source_anchor_guard_max_intent_compression": 0.20,
+                "source_anchor_guard_max_window_compression": 0.15,
             },
         }
 
         plan = {
             "stage": "EventStrategyControlSurfacePlan",
             "status": "active" if active_mode else "observe_only",
-            "version": "strategy_control_surface_v1",
+            "version": "strategy_control_surface_v7_noise_field_strategy_bridge",
             "mode": mode,
+            "strategy_field_mode": field_mode,
+            "strategy_field_reportable": bool(strategy_field_reportable),
+            "strategy_field_active": bool(strategy_field_active),
             "parent_strategy": "S_global_event_route",
             "active_generation_math_path": path,
             "policy": policy,
@@ -1050,19 +1108,84 @@ class SingularityCascadeMixin:
             "cfg_preserved": bool(cfg_preserved),
             "prompt_text_injection_allowed": False,
             "semantic_math_in_prompt_allowed": False,
+            "source_anchor_return_window": {
+                "status": "available" if mode == "STRATEGY_PRESSURE_WINDOW" else "inactive",
+                "version": "source_anchor_return_window_v2_spatial_gate",
+                "policy": "bounded_spatial_source_anchor_gate",
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "formula": "Visible/source anchor and selected tail pressure may narrow low/region-proven pressure windows before latent delta is applied. High branch is not damped by tail/restart pressure alone.",
+            },
+            "spatial_carrier_preservation_map": {
+                "status": "available" if mode == "STRATEGY_PRESSURE_WINDOW" else "inactive",
+                "version": "spatial_carrier_preservation_map_v3_denoise_phase_map",
+                "policy": "cached_scene_spatial_carriers_report_first_post_window_guard",
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "active_requires": "same-scene AUTO_APPLY background_anchor_preservation evidence plus non-endpoint step-level denoise-safe window",
+                "formula": "Spatial carriers are read as local Strategy points. In post-window or endpoint denoise phases they remain report-only, because reducing background delta can preserve raw noise instead of source identity.",
+            },
+            "denoise_phase_map": {
+                "status": "available",
+                "version": "denoise_phase_map_v1_report_guard",
+                "policy": "classify high/low/post-window/endpoint before any local math may touch delta",
+                "active_control_allowed": False,
+                "future_active_candidate": "low mid-window step-level refinement only",
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "formula": "Strategy must know the denoise phase before local math acts. High birth, post-window, and endpoint phases are report-only; only low mid-window can become an active collision surface later.",
+            },
+            "noise_source_field_map": {
+                "status": "available",
+                "version": "noise_source_field_map_v1_report_only",
+                "policy": "read latent source/noise pressure without tensor mutation",
+                "active_control_allowed": False,
+                "future_active_candidate": "pre-high source/noise shaping after enough report evidence",
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "formula": "The source/noise field is read as Outcome(t-1)+ObservedBehavior(t-1) evidence before deciding whether any Strategy pressure should become active math.",
+            },
+            "noise_field_strategy_bridge": {
+                "status": "available",
+                "version": "noise_field_strategy_bridge_v1_model_attractor",
+                "policy": "route source/noise evidence to the next denoise-safe Strategy surface",
+                "active_control_allowed": False,
+                "future_active_candidate": "pre-high source/noise shaping or low mid-window refinement only",
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "formula": "NoiseFieldStrategyBridge reads the source/noise field as a bridge from Outcome+ObservedBehavior back to StrategyAttractor(model). Empty fields become no-pressure; non-empty fields name the safe future surface instead of mutating the current post-window delta.",
+            },
+            "segment_entry_latent_memory_bridge": {
+                "status": "available" if mode == "LATENT_MEMORY_BRIDGE" else "inactive",
+                "version": "segment_entry_latent_memory_bridge_v2_explicit_controls",
+                "policy": "previous latent tail returns to next segment entry before high sampler",
+                "active_control_allowed": bool(mode == "LATENT_MEMORY_BRIDGE"),
+                "branch_delta_overlay_allowed": False,
+                "controls": {
+                    "wan_alpha": float((bridge_controls or {}).get("wan_alpha", 0.10)),
+                    "concat_alpha": float((bridge_controls or {}).get("concat_alpha", 0.06)),
+                    "wan_max_step": float((bridge_controls or {}).get("wan_max_step", 0.45)),
+                    "concat_max_step": float((bridge_controls or {}).get("concat_max_step", 0.28)),
+                },
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "formula": "previous latent OutcomePrevious + explicit bounded memory delta = next Wan latent StrategyCarrier before high sampler",
+            },
             "branch_policies": branch_policies,
             "requested_strengths": {
                 "high": float(high),
                 "low": float(low),
             },
-            "formula": "One Strategy control surface chooses how local high/low pressure may become latent transition control after returning to S_global_event_route.",
+            "formula": "One Strategy control surface chooses how local high/low pressure may become latent transition control after returning to S_global_event_route. StrategyField is a bounded semantic field at high/low vector collision points; SourceAnchorReturnWindow narrows pressure when the continuation route risks turning the whole scene into motion. No prompt text injection.",
         }
         self._event_strategy_control_surface_plan_state = plan
 
         signature = json.dumps(_event_json_safe({
             "mode": mode,
+            "field_mode": field_mode,
             "high": high,
             "low": low,
+            "bridge": bridge_controls,
             "path": path,
         }), sort_keys=True, ensure_ascii=True)
         if records is not None and getattr(self, "_event_strategy_control_surface_plan_signature", "") != signature:
@@ -1101,12 +1224,277 @@ class SingularityCascadeMixin:
         pressure_intent = float(requested_strength - 1.0)
         max_window = float(branch_policy.get("pressure_window_max", 0.016) or 0.016)
         compression = float(branch_policy.get("pressure_compression", 20.0) or 20.0)
-        compressed_intent = math.tanh(pressure_intent * compression) if abs(pressure_intent) > 1e-12 else 0.0
+        background_preservation = getattr(self, "_event_background_anchor_preservation_control", {}) or {}
+        background_intent_multiplier = 1.0
+        background_window_multiplier = 1.0
+        background_temporal_multiplier = 1.0
+        background_preservation_status = str(background_preservation.get("status", "inactive") or "inactive")
+        if (
+            mode == "STRATEGY_PRESSURE_WINDOW"
+            and branch_key == "low"
+            and pressure_intent > 0.0
+            and background_preservation_status == "active"
+        ):
+            try:
+                background_intent_multiplier = float(background_preservation.get("low_positive_intent_multiplier", 1.0) or 1.0)
+            except Exception:
+                background_intent_multiplier = 1.0
+            background_intent_multiplier = max(0.25, min(1.0, background_intent_multiplier))
+            try:
+                background_window_multiplier = float(background_preservation.get("max_delta_window_multiplier", 1.0) or 1.0)
+            except Exception:
+                background_window_multiplier = 1.0
+            background_window_multiplier = max(0.25, min(1.0, background_window_multiplier))
+            try:
+                background_temporal_multiplier = float(background_preservation.get("temporal_stability_multiplier", 1.0) or 1.0)
+            except Exception:
+                background_temporal_multiplier = 1.0
+            background_temporal_multiplier = max(0.25, min(1.0, background_temporal_multiplier))
+        pressure_intent_after_background_anchor = pressure_intent * background_intent_multiplier
+        max_window_after_background_anchor = max_window * background_window_multiplier
+        compressed_intent = math.tanh(pressure_intent_after_background_anchor * compression) if abs(pressure_intent_after_background_anchor) > 1e-12 else 0.0
+
+        field_mode = str(plan.get("strategy_field_mode", "OFF") or "OFF").upper()
+        field_branch_allowed = (
+            field_mode == "DUAL_FIELD"
+            or (field_mode == "HIGH_NOISE_FIELD" and branch_key == "high")
+            or (field_mode == "LOW_REFINEMENT_FIELD" and branch_key == "low")
+        )
+        field_reportable = field_mode in ("REPORT_ONLY", "HIGH_NOISE_FIELD", "LOW_REFINEMENT_FIELD", "DUAL_FIELD")
+        field_active = bool(field_branch_allowed and mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL"))
+        field_window = float(branch_policy.get("strategy_field_window_max", max_window) or max_window)
+        field_compression = float(branch_policy.get("strategy_field_compression", compression) or compression)
+        field_intent = pressure_intent_after_background_anchor
+        if branch_key == "low" and field_intent > 0.0:
+            field_intent = field_intent * background_temporal_multiplier
+        remaining_strategy = getattr(self, "_event_cascade_remaining_strategy", {}) or {}
+        remaining_strategy_applied = False
+        remaining_strategy_multipliers = {}
+        remaining_strategy_segment = None
+        try:
+            match = re.search(r"cascade[_\s-]*(\d+)", branch_lower)
+            remaining_strategy_segment = int(match.group(1)) if match else None
+        except Exception:
+            remaining_strategy_segment = None
+        try:
+            remaining_target_segment = int(remaining_strategy.get("applies_to_segment", 0) or 0)
+        except Exception:
+            remaining_target_segment = 0
+        if (
+            isinstance(remaining_strategy, dict)
+            and remaining_target_segment > 0
+            and remaining_strategy_segment == remaining_target_segment
+            and field_active
+        ):
+            branch_multipliers = remaining_strategy.get("branch_multipliers", {}) or {}
+            try:
+                if branch_key == "high":
+                    intent_multiplier = float(branch_multipliers.get("high_field_intent_multiplier", 1.0) or 1.0)
+                    window_multiplier = float(branch_multipliers.get("high_field_window_multiplier", 1.0) or 1.0)
+                elif branch_key == "low":
+                    intent_multiplier = float(branch_multipliers.get("low_field_intent_multiplier", 1.0) or 1.0)
+                    window_multiplier = float(branch_multipliers.get("low_field_window_multiplier", 1.0) or 1.0)
+                else:
+                    intent_multiplier = 1.0
+                    window_multiplier = 1.0
+            except Exception:
+                intent_multiplier = 1.0
+                window_multiplier = 1.0
+            intent_multiplier = max(0.10, min(1.0, intent_multiplier))
+            window_multiplier = max(0.10, min(1.0, window_multiplier))
+            field_intent = field_intent * intent_multiplier
+            field_window = field_window * window_multiplier
+            remaining_strategy_applied = True
+            remaining_strategy_multipliers = {
+                "field_intent_multiplier": float(intent_multiplier),
+                "field_window_multiplier": float(window_multiplier),
+            }
+
+        def clamp01(value):
+            try:
+                out = float(value)
+            except Exception:
+                out = 0.0
+            if not math.isfinite(out):
+                out = 0.0
+            return max(0.0, min(1.0, out))
+
+        source_anchor_return_window = {
+            "status": "inactive",
+            "version": "source_anchor_return_window_v2_spatial_gate",
+            "source": "current_strategy_control_surface",
+            "branch_key": branch_key,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula_role": str(branch_policy.get("source_anchor_guard_role", "source-anchor return") or "source-anchor return"),
+            "reason": "mode_or_branch_not_active",
+            "input_pressures": {},
+            "multipliers": {
+                "pressure_intent_multiplier": 1.0,
+                "max_delta_window_multiplier": 1.0,
+                "field_intent_multiplier": 1.0,
+                "field_window_multiplier": 1.0,
+                "temporal_stability_multiplier": 1.0,
+            },
+            "formula": (
+                "SourceAnchorReturnWindow reads spatial SourceAnchor pressure, tail route pressure, "
+                "selected cut pressure, and positive branch pressure as local Strategy points. "
+                "High branch is not damped by tail/restart pressure alone; low branch can be guarded "
+                "as the decode-ready refinement carrier."
+            ),
+        }
+        if mode == "STRATEGY_PRESSURE_WINDOW" and field_active:
+            try:
+                restart_risk_pressure = clamp01(remaining_strategy.get("restart_risk", 0.0) if isinstance(remaining_strategy, dict) else 0.0)
+            except Exception:
+                restart_risk_pressure = 0.0
+            try:
+                motion_memory_pressure = clamp01(remaining_strategy.get("motion_memory_pressure", 0.0) if isinstance(remaining_strategy, dict) else 0.0)
+            except Exception:
+                motion_memory_pressure = 0.0
+            try:
+                late_cut_pressure = clamp01(remaining_strategy.get("late_cut_pressure", 0.0) if isinstance(remaining_strategy, dict) else 0.0)
+            except Exception:
+                late_cut_pressure = 0.0
+            try:
+                route_pressure = clamp01(remaining_strategy.get("route_pressure", 0.0) if isinstance(remaining_strategy, dict) else 0.0)
+            except Exception:
+                route_pressure = 0.0
+            try:
+                background_anchor_pressure = clamp01(background_preservation.get("background_anchor_pressure", 0.0) if isinstance(background_preservation, dict) else 0.0)
+            except Exception:
+                background_anchor_pressure = 0.0
+            try:
+                cached_late_pressure = clamp01(background_preservation.get("late_segment_pressure", 0.0) if isinstance(background_preservation, dict) else 0.0)
+            except Exception:
+                cached_late_pressure = 0.0
+            try:
+                top_band_pressure = clamp01(background_preservation.get("top_band_pressure", 0.0) if isinstance(background_preservation, dict) else 0.0)
+            except Exception:
+                top_band_pressure = 0.0
+            try:
+                cached_spatial_anchor_pressure = clamp01(background_preservation.get("spatial_anchor_pressure", 0.0) if isinstance(background_preservation, dict) else 0.0)
+            except Exception:
+                cached_spatial_anchor_pressure = 0.0
+            try:
+                cached_background_region_pressure = clamp01(background_preservation.get("background_region_pressure", 0.0) if isinstance(background_preservation, dict) else 0.0)
+            except Exception:
+                cached_background_region_pressure = 0.0
+            dominant_background_region = ""
+            if isinstance(background_preservation, dict):
+                dominant_background_region = str(background_preservation.get("dominant_background_region", "") or "")
+            try:
+                branch_pressure = clamp01(abs(float(pressure_intent)) / max(float(max_window), 1e-9))
+            except Exception:
+                branch_pressure = 0.0
+
+            tail_continuation_pressure = max(restart_risk_pressure, motion_memory_pressure, late_cut_pressure * route_pressure)
+            background_source_pressure = max(
+                background_anchor_pressure,
+                top_band_pressure,
+                cached_spatial_anchor_pressure,
+                cached_background_region_pressure,
+            )
+            branch_tail_pressure = tail_continuation_pressure if branch_key == "low" else 0.0
+            source_anchor_pressure = max(background_source_pressure, branch_tail_pressure)
+            late_spike_pressure = max(
+                cached_late_pressure,
+                (motion_memory_pressure if branch_key == "low" else 0.0),
+                (restart_risk_pressure * late_cut_pressure if branch_key == "low" else 0.0),
+            )
+            should_guard = (
+                background_source_pressure > 0.0
+                or late_spike_pressure > 0.0
+                or (branch_key == "low" and pressure_intent > 0.0 and branch_pressure > 0.0)
+                or (branch_key == "low" and branch_tail_pressure > 0.0)
+            )
+            if should_guard:
+                try:
+                    max_intent_compression = float(branch_policy.get("source_anchor_guard_max_intent_compression", 0.20) or 0.20)
+                except Exception:
+                    max_intent_compression = 0.20
+                try:
+                    max_window_compression = float(branch_policy.get("source_anchor_guard_max_window_compression", 0.15) or 0.15)
+                except Exception:
+                    max_window_compression = 0.15
+                max_intent_compression = max(0.0, min(0.60, max_intent_compression))
+                max_window_compression = max(0.0, min(0.45, max_window_compression))
+
+                if branch_key == "low" and pressure_intent > 0.0:
+                    intent_loss = min(max_intent_compression, 0.16 * source_anchor_pressure + 0.12 * late_spike_pressure + 0.06 * branch_pressure)
+                    window_loss = min(max_window_compression, 0.12 * source_anchor_pressure + 0.10 * late_spike_pressure + 0.04 * branch_pressure)
+                    temporal_loss = min(0.22, 0.10 * late_spike_pressure + 0.08 * top_band_pressure + 0.04 * source_anchor_pressure)
+                elif branch_key == "high":
+                    intent_loss = min(max_intent_compression, 0.10 * background_source_pressure + 0.06 * cached_late_pressure)
+                    window_loss = min(max_window_compression, 0.06 * background_source_pressure + 0.04 * cached_late_pressure)
+                    temporal_loss = min(0.16, 0.08 * cached_late_pressure + 0.04 * background_source_pressure)
+                else:
+                    intent_loss = min(max_intent_compression, 0.10 * source_anchor_pressure)
+                    window_loss = min(max_window_compression, 0.08 * source_anchor_pressure)
+                    temporal_loss = min(0.14, 0.06 * late_spike_pressure)
+
+                source_pressure_intent_multiplier = max(0.40, 1.0 - intent_loss)
+                source_window_multiplier = max(0.50, 1.0 - window_loss)
+                source_temporal_multiplier = max(0.60, 1.0 - temporal_loss)
+
+                pressure_intent_after_background_anchor *= source_pressure_intent_multiplier
+                max_window_after_background_anchor *= source_window_multiplier
+                field_intent *= source_pressure_intent_multiplier
+                field_window *= source_window_multiplier
+                background_temporal_multiplier *= source_temporal_multiplier
+                compressed_intent = math.tanh(pressure_intent_after_background_anchor * compression) if abs(pressure_intent_after_background_anchor) > 1e-12 else 0.0
+
+                source_anchor_return_window.update({
+                    "status": "active",
+                    "reason": "spatial_source_anchor_or_low_tail_pressure",
+                    "input_pressures": {
+                        "restart_risk_pressure": float(restart_risk_pressure),
+                        "motion_memory_pressure": float(motion_memory_pressure),
+                        "late_cut_pressure": float(late_cut_pressure),
+                        "route_pressure": float(route_pressure),
+                        "background_anchor_pressure": float(background_anchor_pressure),
+                        "cached_late_segment_pressure": float(cached_late_pressure),
+                        "top_band_pressure": float(top_band_pressure),
+                        "cached_spatial_anchor_pressure": float(cached_spatial_anchor_pressure),
+                        "cached_background_region_pressure": float(cached_background_region_pressure),
+                        "background_source_pressure": float(background_source_pressure),
+                        "tail_continuation_pressure": float(tail_continuation_pressure),
+                        "branch_tail_pressure": float(branch_tail_pressure),
+                        "branch_pressure": float(branch_pressure),
+                        "source_anchor_pressure": float(source_anchor_pressure),
+                        "late_spike_pressure": float(late_spike_pressure),
+                    },
+                    "dominant_background_region": dominant_background_region,
+                    "branch_guard_scope": "background_spatial_or_low_refinement",
+                    "multipliers": {
+                        "pressure_intent_multiplier": float(source_pressure_intent_multiplier),
+                        "max_delta_window_multiplier": float(source_window_multiplier),
+                        "field_intent_multiplier": float(source_pressure_intent_multiplier),
+                        "field_window_multiplier": float(source_window_multiplier),
+                        "temporal_stability_multiplier": float(source_temporal_multiplier),
+                    },
+                    "losses": {
+                        "intent_loss": float(intent_loss),
+                        "window_loss": float(window_loss),
+                        "temporal_loss": float(temporal_loss),
+                    },
+                    "policy": "current_run_spatial_source_anchor_and_low_refinement_return",
+                })
+        field_compressed_intent = math.tanh(field_intent * field_compression) if abs(field_intent) > 1e-12 else 0.0
+        field_effective_strength = 1.0 + (field_compressed_intent * field_window)
+        field_effective_strength = max(1.0 - field_window, min(1.0 + field_window, field_effective_strength))
 
         if mode == "STRATEGY_PRESSURE_WINDOW":
-            effective_strength = 1.0 + (compressed_intent * max_window)
-            effective_strength = max(1.0 - max_window, min(1.0 + max_window, effective_strength))
-            apply_policy = "bounded_pressure_window"
+            effective_strength = 1.0 + (compressed_intent * max_window_after_background_anchor * background_temporal_multiplier)
+            effective_strength = max(
+                1.0 - max_window_after_background_anchor,
+                min(1.0 + max_window_after_background_anchor, effective_strength),
+            )
+            apply_policy = (
+                "bounded_pressure_window_background_late_top_return"
+                if background_intent_multiplier < 0.999999 or background_window_multiplier < 0.999999 or background_temporal_multiplier < 0.999999
+                else "bounded_pressure_window"
+            )
         elif mode in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL"):
             effective_strength = max(0.0, min(2.0, float(requested_strength)))
             apply_policy = "raw_delta_scale" if mode == "LATENT_DELTA_SCALE" else "deep_step_delta_scale"
@@ -1114,13 +1502,135 @@ class SingularityCascadeMixin:
             effective_strength = 1.0
             apply_policy = "observe_only_no_mutation"
 
+        raw_effective_strength = float(effective_strength)
+        strategy_pressure_unfold = {
+            "status": "not_used",
+            "reason": "mode is not STRATEGY_PRESSURE_WINDOW or StrategyField is inactive",
+        }
+        if field_active:
+            if mode == "STRATEGY_PRESSURE_WINDOW":
+                global_strategy_delta = float(raw_effective_strength - 1.0)
+                local_field_delta = float(field_effective_strength - 1.0)
+                mirror_residual_delta = float(global_strategy_delta - local_field_delta)
+                previous_pressure_state = getattr(self, "_event_strategy_pressure_window_branch_state", {}) or {}
+                previous_branch_state = previous_pressure_state.get(branch_key, {}) if isinstance(previous_pressure_state, dict) else {}
+                try:
+                    previous_local_delta = float(previous_branch_state.get("local_field_delta", local_field_delta))
+                except Exception:
+                    previous_local_delta = local_field_delta
+                trajectory_delta = float(local_field_delta - previous_local_delta)
+
+                try:
+                    field_return_weight = float(branch_policy.get("pressure_field_return_weight", 0.40) or 0.40)
+                except Exception:
+                    field_return_weight = 0.40
+                try:
+                    mirror_residual_weight = float(branch_policy.get("mirror_residual_weight", 0.20) or 0.20)
+                except Exception:
+                    mirror_residual_weight = 0.20
+                try:
+                    trajectory_weight = float(branch_policy.get("trajectory_weight", 0.08) or 0.08)
+                except Exception:
+                    trajectory_weight = 0.08
+                try:
+                    relation_depth = int(branch_policy.get("recursive_relation_depth", 9) or 9)
+                except Exception:
+                    relation_depth = 9
+                try:
+                    relation_decay = float(branch_policy.get("recursive_relation_decay", 0.55) or 0.55)
+                except Exception:
+                    relation_decay = 0.55
+                try:
+                    relation_feedback_weight = float(branch_policy.get("recursive_relation_feedback_weight", 0.10) or 0.10)
+                except Exception:
+                    relation_feedback_weight = 0.10
+                try:
+                    source_anchor_return_weight = float(branch_policy.get("source_anchor_return_weight", 0.25) or 0.25)
+                except Exception:
+                    source_anchor_return_weight = 0.25
+                field_return_weight = max(0.0, min(1.0, field_return_weight))
+                mirror_residual_weight = max(0.0, min(1.0, mirror_residual_weight))
+                trajectory_weight = max(0.0, min(1.0, trajectory_weight))
+                relation_depth = max(1, min(99, relation_depth))
+                relation_decay = max(0.05, min(0.95, relation_decay))
+                relation_feedback_weight = max(0.0, min(0.25, relation_feedback_weight))
+                source_anchor_return_weight = max(0.0, min(1.0, source_anchor_return_weight))
+
+                relation_seed_delta = (
+                    global_strategy_delta
+                    + (local_field_delta * field_return_weight)
+                    + (mirror_residual_delta * mirror_residual_weight)
+                    + (trajectory_delta * trajectory_weight)
+                )
+                model_attractor_delta = (
+                    relation_seed_delta * (1.0 - source_anchor_return_weight)
+                    + global_strategy_delta * source_anchor_return_weight
+                )
+                relation_accumulator = 0.0
+                relation_current = float(model_attractor_delta)
+                for relation_index in range(1, relation_depth + 1):
+                    relation_current = math.tanh(relation_current * (1.0 + (0.01 * relation_index)))
+                    relation_accumulator += relation_current * (relation_decay ** relation_index)
+                recursive_relation_delta = float(model_attractor_delta + (relation_feedback_weight * relation_accumulator))
+                combined_limit = max_window_after_background_anchor + (field_window * field_return_weight)
+                combined_limit = max(
+                    1e-9,
+                    min(float(field_window), float(combined_limit)),
+                )
+                combined_delta = max(-combined_limit, min(combined_limit, recursive_relation_delta))
+                effective_strength = float(1.0 + combined_delta)
+                if branch_key == "high":
+                    apply_policy = "strategy_pressure_window_model_attractor_high_return"
+                elif branch_key == "low":
+                    apply_policy = "strategy_pressure_window_model_attractor_low_return"
+                else:
+                    apply_policy = "strategy_pressure_window_model_attractor_return"
+                strategy_pressure_unfold = {
+                    "status": "active",
+                    "version": "model_attractor_v1",
+                    "compressed_source_formula": "H_66_99(M_t, B_t, O_t)",
+                    "expand_compress_strategy_delta": float(global_strategy_delta),
+                    "observed_behavior_field_delta": float(local_field_delta),
+                    "mirror_residual_delta": float(mirror_residual_delta),
+                    "trajectory_delta": float(trajectory_delta),
+                    "field_return_weight": float(field_return_weight),
+                    "mirror_residual_weight": float(mirror_residual_weight),
+                    "trajectory_weight": float(trajectory_weight),
+                    "recursive_relation_depth": int(relation_depth),
+                    "recursive_relation_equivalent_depth": 99,
+                    "recursive_relation_decay": float(relation_decay),
+                    "recursive_relation_feedback_weight": float(relation_feedback_weight),
+                    "relation_seed_delta": float(relation_seed_delta),
+                    "model_attractor_delta": float(model_attractor_delta),
+                    "model_attractor_return_weight": float(source_anchor_return_weight),
+                    "relation_accumulator": float(relation_accumulator),
+                    "recursive_relation_delta": float(recursive_relation_delta),
+                    "combined_limit": float(combined_limit),
+                    "combined_delta": float(combined_delta),
+                    "combined_effective_strength": float(effective_strength),
+                    "strategy_return": "local StrategyField is unfolded through mirror residual and trajectory, then returned to the model as StrategyAttractor and closed back to S_global_event_route",
+                    "prompt_text_injection": False,
+                }
+            else:
+                effective_strength = float(field_effective_strength)
+                if branch_key == "high":
+                    apply_policy = "high_strategy_noise_field_bounded_delta"
+                elif branch_key == "low":
+                    apply_policy = "low_strategy_refinement_field_blur_guard"
+                else:
+                    apply_policy = "strategy_field_bounded_delta"
+        elif field_reportable and mode == "OBSERVE_ONLY":
+            apply_policy = f"{apply_policy}_strategy_field_report_only"
+        if str(source_anchor_return_window.get("status", "") or "") == "active":
+            apply_policy = f"{apply_policy}_source_anchor_return"
+
         coupling = getattr(self, "_event_strategy_coupling", {}) or {}
         try:
             high_relative_delta = float(coupling.get("relative_delta", 0.0) or 0.0)
         except Exception:
             high_relative_delta = 0.0
 
-        active = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL") and abs(effective_strength - 1.0) >= 1e-9
+        active = mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "DEEP_STEP_DELTA_CONTROL") and abs(effective_strength - 1.0) >= 1e-9
         rec = {
             "stage": f"EventStrategyControlSurfaceApply_{branch_name}",
             "status": "active" if active else "neutral",
@@ -1135,27 +1645,776 @@ class SingularityCascadeMixin:
             "step_schedule_factor": float(step_schedule_factor),
             "scheduled_strength": float(requested_strength),
             "pressure_intent": float(pressure_intent),
+            "pressure_intent_after_background_anchor": float(pressure_intent_after_background_anchor),
             "compressed_pressure_intent": float(compressed_intent),
             "max_delta_window": float(max_window),
+            "max_delta_window_after_background_anchor": float(max_window_after_background_anchor),
+            "raw_effective_strength_before_strategy_field": float(raw_effective_strength),
             "effective_strength": float(effective_strength),
+            "strategy_field": {
+                "mode": field_mode,
+                "status": "active" if field_active else ("report_only" if field_reportable else "off"),
+                "branch_allowed": bool(field_branch_allowed),
+                "role": str(branch_policy.get("strategy_field_role", "GenericStrategyField") or "GenericStrategyField"),
+                "policy": str(branch_policy.get("strategy_field_policy", "report_only") or "report_only"),
+                "field_intent": float(field_intent),
+                "field_compressed_intent": float(field_compressed_intent),
+                "field_window": float(field_window),
+                "field_effective_strength": float(field_effective_strength),
+                "strategy_return": "local field must return to S_global_event_route before the next node/stage",
+                "prompt_text_injection": False,
+            },
+            "cascade_remaining_strategy": {
+                "status": str(remaining_strategy.get("status", "off") if isinstance(remaining_strategy, dict) else "off"),
+                "applied": bool(remaining_strategy_applied),
+                "target_segment": int(remaining_target_segment),
+                "current_segment": int(remaining_strategy_segment) if remaining_strategy_segment is not None else None,
+                "resume_frame_index": int(remaining_strategy.get("resume_frame_index", 0) or 0) if isinstance(remaining_strategy, dict) else 0,
+                "progress_ratio": float(remaining_strategy.get("progress_ratio", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0,
+                "restart_risk": float(remaining_strategy.get("restart_risk", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0,
+                "motion_memory_pressure": float(remaining_strategy.get("motion_memory_pressure", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0,
+                "tail_observed_behavior": remaining_strategy.get("tail_observed_behavior", {}) if isinstance(remaining_strategy, dict) else {},
+                "multipliers": remaining_strategy_multipliers,
+                "prompt_text_injection": False,
+                "formula": "RemainingStrategy binds selected tail Outcome(t-1) plus tail ObservedBehavior(t-1) before next-segment field pressure returns to S_global_event_route.",
+            },
             "high_relative_delta_evidence": float(high_relative_delta),
+            "background_anchor_preservation": {
+                "status": background_preservation_status,
+                "applied": bool(
+                    background_intent_multiplier < 0.999999
+                    or background_window_multiplier < 0.999999
+                    or background_temporal_multiplier < 0.999999
+                ),
+                "low_positive_intent_multiplier": float(background_intent_multiplier),
+                "max_delta_window_multiplier": float(background_window_multiplier),
+                "temporal_stability_multiplier": float(background_temporal_multiplier),
+                "background_anchor_status": str(background_preservation.get("background_anchor_status", "") or ""),
+                "background_anchor_pressure": float(background_preservation.get("background_anchor_pressure", 0.0) or 0.0),
+                "late_segment_pressure": float(background_preservation.get("late_segment_pressure", 0.0) or 0.0),
+                "top_band_pressure": float(background_preservation.get("top_band_pressure", 0.0) or 0.0),
+                "scene_key": str(background_preservation.get("scene_key", "") or ""),
+                "policy": str(background_preservation.get("policy", "") or ""),
+                "source": str(background_preservation.get("source", "") or ""),
+            },
+            "source_anchor_return_window": source_anchor_return_window,
+            "strategy_pressure_unfold": strategy_pressure_unfold,
             "step_index": int(step_index) if step_index is not None else None,
             "window_steps": int(window_steps) if window_steps is not None else None,
-            "formula": "StrategyControlSurface(mode, branch, pressure) returns one effective_strength for latent transition control.",
+            "formula": "StrategyControlSurface(mode, branch, pressure) returns one effective_strength for latent transition control. StrategyField reads high/low as collision points: high may birth motion direction, low may refine only inside a narrow blur-safe window, both returning to S_global_event_route without prompt text injection.",
         }
         records.append(rec)
 
         if mode == "STRATEGY_PRESSURE_WINDOW":
+            try:
+                branch_state = getattr(self, "_event_strategy_pressure_window_branch_state", {}) or {}
+                if not isinstance(branch_state, dict):
+                    branch_state = {}
+                branch_state[branch_key] = {
+                    "branch_name": str(branch_name or ""),
+                    "global_strategy_delta": float(raw_effective_strength - 1.0),
+                    "local_field_delta": float(field_effective_strength - 1.0),
+                    "effective_strength": float(effective_strength),
+                    "combined_delta": float(effective_strength - 1.0),
+                    "apply_policy": str(apply_policy),
+                }
+                self._event_strategy_pressure_window_branch_state = branch_state
+            except Exception:
+                pass
             alias_rec = dict(rec)
             alias_rec["stage"] = f"EventStrategyPressureWindow_{branch_name}"
             alias_rec["status"] = "active_window" if active else "neutral_window"
-            alias_rec["policy"] = "prompt_clean_model_native_sampler_bounded_post_window_delta"
-            alias_rec["formula"] = "Local sampler pressure returns to S_global_event_route through one bounded pressure window before latent delta is applied."
+            alias_rec["policy"] = str(apply_policy)
+            alias_rec["formula"] = "Local sampler pressure is expanded from compressed Strategy through mirror residual, trajectory, and recursive relation passes, then returned to S_global_event_route before latent delta is applied."
             records.append(alias_rec)
             self._event_strategy_pressure_window_last = alias_rec
 
         self._event_strategy_control_surface_last = rec
         return rec
+
+    def _event_denoise_phase_map(
+        self,
+        branch_name,
+        records=None,
+        *,
+        step_index=None,
+        window_steps=None,
+        surface_rec=None,
+    ):
+        branch_lower = str(branch_name or "").lower()
+        if "high" in branch_lower:
+            branch_key = "high"
+        elif "low" in branch_lower:
+            branch_key = "low"
+        else:
+            branch_key = "default"
+
+        step_progress = None
+        try:
+            if step_index is not None and window_steps is not None and int(window_steps) > 0:
+                step_progress = float((int(step_index) + 1) / max(1, int(window_steps)))
+        except Exception:
+            step_progress = None
+        post_window_delta = step_progress is None
+        endpoint_band = bool(step_progress is not None and (step_progress <= 0.12 or step_progress >= 0.88))
+        if post_window_delta:
+            phase_scope = "post_window_delta"
+            progress_bucket = "post_window"
+        elif step_progress <= 0.12:
+            phase_scope = "early_endpoint_step"
+            progress_bucket = "early_endpoint"
+        elif step_progress >= 0.88:
+            phase_scope = "late_endpoint_step"
+            progress_bucket = "late_endpoint"
+        else:
+            phase_scope = "mid_window_step"
+            progress_bucket = "mid_window"
+
+        rec = {
+            "stage": f"EventDenoisePhaseMap_{branch_name}",
+            "status": "guarded_report_only",
+            "version": "denoise_phase_map_v1_report_guard",
+            "branch_name": str(branch_name or ""),
+            "branch_key": branch_key,
+            "phase_scope": phase_scope,
+            "progress_bucket": progress_bucket,
+            "step_index": int(step_index) if step_index is not None else None,
+            "window_steps": int(window_steps) if window_steps is not None else None,
+            "step_progress": float(step_progress) if step_progress is not None else None,
+            "post_window_delta": bool(post_window_delta),
+            "endpoint_band": bool(endpoint_band),
+            "strategy_control_surface": (surface_rec or {}).get("stage", "") if isinstance(surface_rec, dict) else "",
+            "strategy_control_apply_policy": (surface_rec or {}).get("apply_policy", "") if isinstance(surface_rec, dict) else "",
+            "active_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula_role": "phase placement for ObservedBehavior(delta) before Strategy pressure may become active control",
+            "formula": "Local math may act only after it knows whether this delta is event birth, endpoint/source return, post-window summary, or mid-window refinement.",
+        }
+
+        if branch_key == "high":
+            rec.update({
+                "placement": "high_birth_source_noise_report_only",
+                "reason": "high_branch_birth_denoise_phase",
+                "guard": "High branch is where the event direction is born and denoised; late/background damping here can preserve unfinished noise.",
+                "next_safe_surface": "pre_high_source_noise_field_research",
+            })
+        elif post_window_delta:
+            rec.update({
+                "placement": "post_window_report_only",
+                "reason": "post_window_endpoint_denoise_safety",
+                "guard": "Post-window delta is an integral summary without internal denoise phase evidence.",
+                "next_safe_surface": "step_level_mid_window_trace",
+            })
+        elif endpoint_band:
+            rec.update({
+                "placement": "endpoint_report_only",
+                "reason": "endpoint_step_denoise_safety",
+                "guard": "Start/end denoise steps carry source return and final cleanup; local carrier math remains report-only there.",
+                "next_safe_surface": "mid_window_low_step_refinement",
+            })
+        elif branch_key == "low":
+            rec.update({
+                "status": "candidate",
+                "placement": "low_mid_window_refinement_candidate",
+                "reason": "low_mid_window_has_denoise_phase_context",
+                "guard": "This is the first safe candidate zone for future active spatial/relation math; r103 still records it before changing behavior.",
+                "active_control_allowed": True,
+                "next_safe_surface": "mid_window_low_step_refinement",
+            })
+        else:
+            rec.update({
+                "placement": "generic_mid_window_report_only",
+                "reason": "unknown_branch_report_only",
+                "guard": "Unknown branch does not receive active local math.",
+                "next_safe_surface": "branch_role_resolution",
+            })
+
+        self._event_denoise_phase_map_last = rec
+        if records is not None:
+            try:
+                seen = getattr(self, "_event_denoise_phase_map_signatures", set())
+                if not isinstance(seen, set):
+                    seen = set()
+                signature = json.dumps(_event_json_safe({
+                    "branch_key": branch_key,
+                    "branch_name": str(branch_name or ""),
+                    "phase_scope": phase_scope,
+                    "progress_bucket": progress_bucket,
+                    "placement": rec.get("placement", ""),
+                }), sort_keys=True, ensure_ascii=True)
+                if signature not in seen:
+                    records.append(rec)
+                    seen.add(signature)
+                    self._event_denoise_phase_map_signatures = seen
+            except Exception:
+                records.append(rec)
+        return rec
+
+    def _event_noise_source_field_map(
+        self,
+        latent_state,
+        branch_name,
+        records=None,
+        *,
+        phase_map=None,
+    ):
+        branch_lower = str(branch_name or "").lower()
+        if "high" in branch_lower:
+            branch_key = "high"
+        elif "low" in branch_lower:
+            branch_key = "low"
+        else:
+            branch_key = "default"
+
+        phase_map = phase_map if isinstance(phase_map, dict) else {}
+        rec = {
+            "stage": f"EventNoiseSourceFieldMap_{branch_name}",
+            "status": "unavailable",
+            "version": "noise_source_field_map_v1_report_only",
+            "branch_name": str(branch_name or ""),
+            "branch_key": branch_key,
+            "phase_scope": str(phase_map.get("phase_scope", "") or ""),
+            "phase_placement": str(phase_map.get("placement", "") or ""),
+            "denoise_phase_active_candidate": bool(phase_map.get("active_control_allowed", False)),
+            "active_control_allowed": False,
+            "future_active_candidate": (
+                "pre_high_source_noise_shaping" if branch_key == "high"
+                else "low_mid_window_refinement" if branch_key == "low"
+                else "report_only"
+            ),
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula_role": "read source/noise field pressure before Strategy becomes local control",
+            "formula": "NoiseSourceField reads latent region energy as evidence only. It does not change tensors in r103; it tells later math where the model is already carrying source, background, and motion pressure.",
+        }
+        try:
+            import torch
+            t = self._tensor_from_latent_like(latent_state)
+            if t is None:
+                rec["reason"] = "latent_tensor_unavailable"
+                return rec
+            tf = torch.nan_to_num(t.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+            rec["latent_shape"] = list(tf.shape)
+            if tf.dim() < 2:
+                rec["reason"] = "latent_rank_too_low"
+                return rec
+
+            spatial = tf.abs()
+            if spatial.dim() > 2:
+                reduce_dims = tuple(range(0, spatial.dim() - 2))
+                energy = spatial.mean(dim=reduce_dims)
+            else:
+                energy = spatial
+            if energy.dim() != 2:
+                energy = energy.reshape(-1, energy.shape[-1])
+            h = int(energy.shape[-2])
+            w = int(energy.shape[-1])
+            if h <= 1 or w <= 1:
+                rec["reason"] = "latent_spatial_shape_too_small"
+                rec["spatial_shape"] = [h, w]
+                return rec
+
+            def band_mean(y0, y1, x0, x1):
+                y0i = max(0, min(h - 1, int(round(float(y0) * h))))
+                y1i = max(y0i + 1, min(h, int(round(float(y1) * h))))
+                x0i = max(0, min(w - 1, int(round(float(x0) * w))))
+                x1i = max(x0i + 1, min(w, int(round(float(x1) * w))))
+                return float(energy[y0i:y1i, x0i:x1i].mean().detach().cpu().item())
+
+            eps = 1e-9
+            top = band_mean(0.00, 0.25, 0.00, 1.00)
+            center = band_mean(0.25, 0.75, 0.25, 0.75)
+            bottom = band_mean(0.75, 1.00, 0.00, 1.00)
+            left = band_mean(0.00, 1.00, 0.00, 0.22)
+            right = band_mean(0.00, 1.00, 0.78, 1.00)
+            outer = float((top + bottom + left + right) / 4.0)
+            global_mean = float(energy.mean().detach().cpu().item())
+            global_std = float(energy.std(unbiased=False).detach().cpu().item())
+            flat = energy.flatten()
+            total_raw = float(flat.sum().detach().cpu().item())
+            if total_raw <= eps or global_mean <= eps:
+                rec.update({
+                    "status": "recorded_zero_field",
+                    "reason": "zero_or_flat_source_noise_field",
+                    "spatial_shape": [h, w],
+                    "region_energy": {
+                        "top": round(top, 6),
+                        "center": round(center, 6),
+                        "bottom": round(bottom, 6),
+                        "left": round(left, 6),
+                        "right": round(right, 6),
+                        "outer_mean": round(outer, 6),
+                        "global_mean": round(global_mean, 6),
+                        "global_std": round(global_std, 6),
+                    },
+                    "region_ratios": {
+                        "center_outer_ratio": 1.0,
+                        "top_center_ratio": 1.0,
+                        "field_cv": 0.0,
+                        "spatial_entropy_norm": 1.0,
+                    },
+                    "source_field_pressure": 0.0,
+                    "recommended_next_surface": "latent_field_unavailable_until_nonzero_carrier",
+                })
+                return rec
+            total = flat.sum().clamp_min(eps)
+            prob = flat / total
+            entropy_norm = float((-(prob * (prob + eps).log()).sum() / math.log(max(2, int(prob.numel())))).detach().cpu().item())
+            center_outer_ratio = float(center / max(outer, eps))
+            top_center_ratio = float(top / max(center, eps))
+            field_cv = float(global_std / max(global_mean, eps))
+            source_field_pressure = max(
+                0.0,
+                min(
+                    1.0,
+                    (min(field_cv, 2.0) / 2.0) * 0.45
+                    + min(abs(math.log(max(center_outer_ratio, eps))), 2.0) * 0.20
+                    + min(abs(math.log(max(top_center_ratio, eps))), 2.0) * 0.20
+                    + (1.0 - max(0.0, min(1.0, entropy_norm))) * 0.15,
+                ),
+            )
+            rec.update({
+                "status": "recorded",
+                "spatial_shape": [h, w],
+                "region_energy": {
+                    "top": round(top, 6),
+                    "center": round(center, 6),
+                    "bottom": round(bottom, 6),
+                    "left": round(left, 6),
+                    "right": round(right, 6),
+                    "outer_mean": round(outer, 6),
+                    "global_mean": round(global_mean, 6),
+                    "global_std": round(global_std, 6),
+                },
+                "region_ratios": {
+                    "center_outer_ratio": round(center_outer_ratio, 6),
+                    "top_center_ratio": round(top_center_ratio, 6),
+                    "field_cv": round(field_cv, 6),
+                    "spatial_entropy_norm": round(entropy_norm, 6),
+                },
+                "source_field_pressure": round(source_field_pressure, 6),
+                "recommended_next_surface": (
+                    "pre_high_source_noise_shaping_research"
+                    if branch_key == "high"
+                    else "mid_window_low_refinement_research"
+                    if bool(phase_map.get("active_control_allowed", False))
+                    else "report_only_until_step_phase_available"
+                ),
+            })
+            return rec
+        except Exception as e:
+            rec["status"] = "failed"
+            rec["error"] = str(e)
+            return rec
+        finally:
+            if records is not None:
+                try:
+                    seen = getattr(self, "_event_noise_source_field_map_signatures", set())
+                    if not isinstance(seen, set):
+                        seen = set()
+                    signature = json.dumps(_event_json_safe({
+                        "branch_key": branch_key,
+                        "branch_name": str(branch_name or ""),
+                        "phase_scope": rec.get("phase_scope", ""),
+                        "phase_placement": rec.get("phase_placement", ""),
+                        "spatial_shape": rec.get("spatial_shape", []),
+                    }), sort_keys=True, ensure_ascii=True)
+                    if signature not in seen:
+                        records.append(rec)
+                        seen.add(signature)
+                        self._event_noise_source_field_map_signatures = seen
+                except Exception:
+                    records.append(rec)
+
+    def _event_noise_field_strategy_bridge(
+        self,
+        branch_name,
+        records=None,
+        *,
+        phase_map=None,
+        noise_field_map=None,
+        surface_rec=None,
+    ):
+        branch_lower = str(branch_name or "").lower()
+        if "high" in branch_lower:
+            branch_key = "high"
+        elif "low" in branch_lower:
+            branch_key = "low"
+        else:
+            branch_key = "default"
+
+        def clamp01(value):
+            try:
+                out = float(value)
+            except Exception:
+                out = 0.0
+            if not math.isfinite(out):
+                out = 0.0
+            return max(0.0, min(1.0, out))
+
+        phase_map = phase_map if isinstance(phase_map, dict) else {}
+        noise_field_map = noise_field_map if isinstance(noise_field_map, dict) else {}
+        surface_rec = surface_rec if isinstance(surface_rec, dict) else {}
+
+        ratios = noise_field_map.get("region_ratios", {}) if isinstance(noise_field_map.get("region_ratios", {}), dict) else {}
+        try:
+            center_outer_ratio = float(ratios.get("center_outer_ratio", 1.0) or 1.0)
+        except Exception:
+            center_outer_ratio = 1.0
+        try:
+            top_center_ratio = float(ratios.get("top_center_ratio", 1.0) or 1.0)
+        except Exception:
+            top_center_ratio = 1.0
+        field_cv = clamp01(float(ratios.get("field_cv", 0.0) or 0.0) / 2.0)
+        entropy_norm = clamp01(ratios.get("spatial_entropy_norm", 1.0))
+        source_pressure = clamp01(noise_field_map.get("source_field_pressure", 0.0))
+        center_outer_pressure = clamp01(abs(math.log(max(center_outer_ratio, 1e-9))) / 2.0)
+        top_center_pressure = clamp01(abs(math.log(max(top_center_ratio, 1e-9))) / 2.0)
+        entropy_pressure = clamp01(1.0 - entropy_norm)
+        bridge_pressure = clamp01(
+            (source_pressure * 0.45)
+            + (field_cv * 0.20)
+            + (center_outer_pressure * 0.15)
+            + (top_center_pressure * 0.10)
+            + (entropy_pressure * 0.10)
+        )
+
+        phase_active = bool(phase_map.get("active_control_allowed", False))
+        noise_status = str(noise_field_map.get("status", "unavailable") or "unavailable")
+        phase_scope = str(phase_map.get("phase_scope", "") or "")
+        phase_placement = str(phase_map.get("placement", "") or "")
+        next_safe_surface = str(phase_map.get("next_safe_surface", "") or "")
+
+        rec = {
+            "stage": f"EventNoiseFieldStrategyBridge_{branch_name}",
+            "status": "report_only",
+            "version": "noise_field_strategy_bridge_v1_model_attractor",
+            "branch_name": str(branch_name or ""),
+            "branch_key": branch_key,
+            "phase_scope": phase_scope,
+            "phase_placement": phase_placement,
+            "noise_source_field_map": {
+                "stage": noise_field_map.get("stage", ""),
+                "status": noise_status,
+                "version": noise_field_map.get("version", ""),
+                "source_field_pressure": float(source_pressure),
+                "recommended_next_surface": noise_field_map.get("recommended_next_surface", ""),
+            },
+            "denoise_phase_map": {
+                "stage": phase_map.get("stage", ""),
+                "status": phase_map.get("status", ""),
+                "active_control_allowed": bool(phase_active),
+                "next_safe_surface": next_safe_surface,
+            },
+            "strategy_control_surface": {
+                "stage": surface_rec.get("stage", ""),
+                "apply_policy": surface_rec.get("apply_policy", ""),
+                "effective_strength": surface_rec.get("effective_strength", None),
+            },
+            "pressures": {
+                "source_field_pressure": float(source_pressure),
+                "field_cv_pressure": float(field_cv),
+                "center_outer_pressure": float(center_outer_pressure),
+                "top_center_pressure": float(top_center_pressure),
+                "entropy_pressure": float(entropy_pressure),
+                "bridge_pressure": float(bridge_pressure),
+            },
+            "active_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "model_attractor_route": (
+                "Outcome(t-1)+ObservedBehavior(t-1) source/noise evidence "
+                "-> StrategyAttractor(model) -> denoise-safe next surface "
+                "-> Strategy Return"
+            ),
+            "formula_role": "noise/source evidence bridge into model-centered Strategy placement",
+            "formula": "This bridge does not mutate tensors in this build. It decides whether a source/noise field is real evidence and where that evidence may safely become future math.",
+        }
+
+        if noise_status in ("recorded_zero_field", "unavailable", "failed"):
+            rec.update({
+                "status": "blocked_zero_or_unavailable_field" if noise_status == "recorded_zero_field" else "unavailable",
+                "reason": "zero_or_unavailable_noise_field_is_not_strategy_pressure",
+                "recommended_current_action": "ignore_as_active_pressure",
+                "recommended_next_surface": "wait_for_nonzero_source_noise_carrier",
+            })
+        elif branch_key == "high":
+            rec.update({
+                "status": "pre_high_candidate_report_only",
+                "reason": "high_post_window_delta_is_too_late_for_active_noise_shaping",
+                "recommended_current_action": "report_only_on_current_post_window_delta",
+                "recommended_next_surface": "pre_high_source_noise_shaping",
+                "current_surface_safe": False,
+            })
+        elif branch_key == "low" and phase_active:
+            rec.update({
+                "status": "low_mid_window_candidate_report_only",
+                "reason": "low_mid_window_has_phase_context_but_current_build_keeps_bridge_report_only",
+                "recommended_current_action": "record_candidate_before_active_step_control",
+                "recommended_next_surface": "mid_window_low_refinement",
+                "current_surface_safe": True,
+            })
+        elif branch_key == "low":
+            rec.update({
+                "status": "post_window_report_only",
+                "reason": "low_post_window_delta_is_integral_summary_not_step_control",
+                "recommended_current_action": "do_not_mutate_from_noise_bridge",
+                "recommended_next_surface": "step_level_mid_window_trace",
+                "current_surface_safe": False,
+            })
+        else:
+            rec.update({
+                "status": "generic_report_only",
+                "reason": "branch_role_unresolved",
+                "recommended_current_action": "resolve_branch_before_control",
+                "recommended_next_surface": "branch_role_resolution",
+                "current_surface_safe": False,
+            })
+
+        if records is not None:
+            try:
+                seen = getattr(self, "_event_noise_field_strategy_bridge_signatures", set())
+                if not isinstance(seen, set):
+                    seen = set()
+                signature = json.dumps(_event_json_safe({
+                    "branch_name": str(branch_name or ""),
+                    "phase_scope": phase_scope,
+                    "noise_status": noise_status,
+                    "status": rec.get("status", ""),
+                    "spatial_shape": noise_field_map.get("spatial_shape", []),
+                }), sort_keys=True, ensure_ascii=True)
+                if signature not in seen:
+                    records.append(rec)
+                    seen.add(signature)
+                    self._event_noise_field_strategy_bridge_signatures = seen
+            except Exception:
+                records.append(rec)
+        self._event_noise_field_strategy_bridge_last = rec
+        return rec
+
+    def _event_spatial_carrier_preservation_map(
+        self,
+        branch_name,
+        delta_t,
+        records,
+        *,
+        step_index=None,
+        window_steps=None,
+        surface_rec=None,
+        denoise_phase_map=None,
+    ):
+        branch_lower = str(branch_name or "").lower()
+        if "high" in branch_lower:
+            branch_key = "high"
+        elif "low" in branch_lower:
+            branch_key = "low"
+        else:
+            branch_key = "default"
+
+        def clamp01(value):
+            try:
+                out = float(value)
+            except Exception:
+                out = 0.0
+            if not math.isfinite(out):
+                out = 0.0
+            return max(0.0, min(1.0, out))
+
+        mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+        background_preservation = getattr(self, "_event_background_anchor_preservation_control", {}) or {}
+        if not isinstance(background_preservation, dict):
+            background_preservation = {}
+        status = str(background_preservation.get("status", "inactive") or "inactive")
+        spatial_pressure = clamp01(background_preservation.get("spatial_anchor_pressure", 0.0))
+        background_region_pressure = clamp01(background_preservation.get("background_region_pressure", 0.0))
+        background_anchor_pressure = clamp01(background_preservation.get("background_anchor_pressure", 0.0))
+        top_band_pressure = clamp01(background_preservation.get("top_band_pressure", 0.0))
+        late_segment_pressure = clamp01(background_preservation.get("late_segment_pressure", 0.0))
+        dominant_region = str(background_preservation.get("dominant_background_region", "") or "")
+        carrier_pressure = max(spatial_pressure, background_region_pressure, background_anchor_pressure, top_band_pressure)
+        rec = {
+            "stage": f"EventSpatialCarrierPreservationMap_{branch_name}",
+            "status": "inactive",
+            "version": "spatial_carrier_preservation_map_v3_denoise_phase_map",
+            "mode": mode,
+            "branch_name": str(branch_name or ""),
+            "branch_key": branch_key,
+            "source": "background_anchor_preservation_control",
+            "background_anchor_preservation_status": status,
+            "dominant_background_region": dominant_region,
+            "input_pressures": {
+                "spatial_anchor_pressure": float(spatial_pressure),
+                "background_region_pressure": float(background_region_pressure),
+                "background_anchor_pressure": float(background_anchor_pressure),
+                "top_band_pressure": float(top_band_pressure),
+                "late_segment_pressure": float(late_segment_pressure),
+                "carrier_pressure": float(carrier_pressure),
+            },
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula_role": "ObservedBehavior(delta) spatial carrier gate before Outcome(after)",
+            "formula": "delta_after = delta_after * spatial_carrier_gain; Strategy remains the model-centered attractor and prompt text stays untouched.",
+        }
+        if isinstance(denoise_phase_map, dict):
+            rec["denoise_phase_map"] = {
+                "stage": denoise_phase_map.get("stage", ""),
+                "status": denoise_phase_map.get("status", ""),
+                "version": denoise_phase_map.get("version", ""),
+                "phase_scope": denoise_phase_map.get("phase_scope", ""),
+                "placement": denoise_phase_map.get("placement", ""),
+                "reason": denoise_phase_map.get("reason", ""),
+                "active_control_allowed": bool(denoise_phase_map.get("active_control_allowed", False)),
+                "next_safe_surface": denoise_phase_map.get("next_safe_surface", ""),
+            }
+        gain = None
+        try:
+            step_progress = None
+            try:
+                if step_index is not None and window_steps is not None and int(window_steps) > 0:
+                    step_progress = float((int(step_index) + 1) / max(1, int(window_steps)))
+            except Exception:
+                step_progress = None
+            post_window_delta = step_progress is None
+            rec["step_index"] = int(step_index) if step_index is not None else None
+            rec["window_steps"] = int(window_steps) if window_steps is not None else None
+            rec["step_progress"] = float(step_progress) if step_progress is not None else None
+            rec["post_window_delta"] = bool(post_window_delta)
+
+            if mode != "STRATEGY_PRESSURE_WINDOW":
+                rec["reason"] = "requires_strategy_pressure_window"
+                return rec, None
+            if status != "active":
+                rec["reason"] = "no_active_cached_spatial_background_evidence"
+                return rec, None
+            if carrier_pressure < 0.20:
+                rec["reason"] = "carrier_pressure_below_threshold"
+                return rec, None
+            if isinstance(denoise_phase_map, dict) and not bool(denoise_phase_map.get("active_control_allowed", False)):
+                rec["status"] = "guarded_report_only"
+                rec["reason"] = str(denoise_phase_map.get("reason", "") or "denoise_phase_report_only")
+                rec["active_control_allowed"] = False
+                rec["guard"] = str(denoise_phase_map.get("guard", "") or "Denoise phase map does not allow active spatial carrier math here.")
+                rec["next_safe_surface"] = str(denoise_phase_map.get("next_safe_surface", "") or "")
+                return rec, None
+            if branch_key == "high":
+                rec["status"] = "guarded_report_only"
+                rec["reason"] = "high_branch_denoise_safety"
+                rec["active_control_allowed"] = False
+                rec["guard"] = "High branch still births and denoises the event; reducing background delta here can preserve raw noise."
+                return rec, None
+            if post_window_delta:
+                rec["status"] = "guarded_report_only"
+                rec["reason"] = "post_window_endpoint_denoise_safety"
+                rec["active_control_allowed"] = False
+                rec["guard"] = "Post-window delta has no internal denoise phase information; preserving background by lowering delta can freeze late/start endpoint noise."
+                return rec, None
+            if step_progress <= 0.12 or step_progress >= 0.88:
+                rec["status"] = "guarded_report_only"
+                rec["reason"] = "endpoint_step_denoise_safety"
+                rec["active_control_allowed"] = False
+                rec["guard"] = "Start/end denoise steps are endpoint/source-return phases; spatial carrier control is report-only there."
+                return rec, None
+            if delta_t is None or not hasattr(delta_t, "shape") or len(delta_t.shape) < 2:
+                rec["reason"] = "delta_tensor_unavailable"
+                return rec, None
+
+            import torch
+            h = int(delta_t.shape[-2])
+            w = int(delta_t.shape[-1])
+            if h <= 1 or w <= 1:
+                rec["reason"] = "latent_spatial_shape_too_small"
+                rec["latent_shape"] = list(delta_t.shape)
+                return rec, None
+
+            gain2d = torch.ones((h, w), dtype=torch.float32, device=delta_t.device)
+            roi_gains = []
+
+            if branch_key == "high":
+                max_attenuation = min(0.12, 0.08 * carrier_pressure + 0.04 * late_segment_pressure)
+                min_gain = 0.88
+            elif branch_key == "low":
+                max_attenuation = min(0.28, 0.18 * carrier_pressure + 0.06 * late_segment_pressure + 0.04 * top_band_pressure)
+                min_gain = 0.72
+            else:
+                max_attenuation = min(0.18, 0.12 * carrier_pressure)
+                min_gain = 0.82
+            if max_attenuation <= 1e-9:
+                rec["reason"] = "zero_attenuation"
+                return rec, None
+
+            def apply_roi(name, y0, y1, x0, x1, pressure, attenuation_scale=1.0):
+                pressure_f = clamp01(pressure)
+                if pressure_f <= 0.0:
+                    return
+                y0i = max(0, min(h - 1, int(round(float(y0) * h))))
+                y1i = max(y0i + 1, min(h, int(round(float(y1) * h))))
+                x0i = max(0, min(w - 1, int(round(float(x0) * w))))
+                x1i = max(x0i + 1, min(w, int(round(float(x1) * w))))
+                attenuation = max(0.0, min(max_attenuation, max_attenuation * pressure_f * float(attenuation_scale)))
+                region_gain = max(min_gain, 1.0 - attenuation)
+                current = gain2d[y0i:y1i, x0i:x1i]
+                gain2d[y0i:y1i, x0i:x1i] = torch.minimum(current, torch.full_like(current, float(region_gain)))
+                roi_gains.append({
+                    "name": name,
+                    "pressure": float(pressure_f),
+                    "gain": float(region_gain),
+                    "y0": int(y0i),
+                    "y1": int(y1i),
+                    "x0": int(x0i),
+                    "x1": int(x1i),
+                })
+
+            if top_band_pressure > 0.0:
+                apply_roi("top_band_background", 0.00, 0.22, 0.00, 1.00, top_band_pressure, 0.95)
+
+            dominant = dominant_region.lower()
+            if "lower" in dominant and "side" in dominant:
+                apply_roi("lower_left_side_floor", 0.58, 1.00, 0.00, 0.30, background_region_pressure or carrier_pressure, 1.00)
+                apply_roi("lower_right_side_floor", 0.58, 1.00, 0.70, 1.00, background_region_pressure or carrier_pressure, 1.00)
+            elif "left" in dominant:
+                apply_roi("left_background_carrier", 0.30, 1.00, 0.00, 0.34, background_region_pressure or carrier_pressure, 1.00)
+            elif "right" in dominant:
+                apply_roi("right_background_carrier", 0.30, 1.00, 0.66, 1.00, background_region_pressure or carrier_pressure, 1.00)
+            elif "top" in dominant:
+                apply_roi("top_background_carrier", 0.00, 0.34, 0.00, 1.00, background_region_pressure or carrier_pressure, 0.90)
+            elif background_region_pressure > 0.0:
+                apply_roi("side_background_left", 0.25, 1.00, 0.00, 0.20, background_region_pressure, 0.70)
+                apply_roi("side_background_right", 0.25, 1.00, 0.80, 1.00, background_region_pressure, 0.70)
+
+            if background_anchor_pressure > 0.0:
+                apply_roi("outer_source_anchor_left", 0.00, 1.00, 0.00, 0.12, background_anchor_pressure, 0.45)
+                apply_roi("outer_source_anchor_right", 0.00, 1.00, 0.88, 1.00, background_anchor_pressure, 0.45)
+
+            if not roi_gains:
+                rec["reason"] = "no_roi_selected"
+                return rec, None
+
+            view_shape = [1 for _ in range(len(delta_t.shape))]
+            view_shape[-2] = h
+            view_shape[-1] = w
+            gain = gain2d.view(*view_shape)
+            rec.update({
+                "status": "active",
+                "reason": "cached_spatial_carriers_bound_background_delta",
+                "policy": "soft_region_gain_multiplies_latent_delta",
+                "active_control_allowed": True,
+                "latent_shape": list(delta_t.shape),
+                "gain_shape": list(gain.shape),
+                "min_gain": float(gain2d.min().detach().cpu().item()),
+                "max_gain": float(gain2d.max().detach().cpu().item()),
+                "mean_gain": float(gain2d.mean().detach().cpu().item()),
+                "max_attenuation": float(max_attenuation),
+                "roi_gains": roi_gains,
+            })
+            return rec, gain
+        except Exception as e:
+            rec["status"] = "failed_passthrough"
+            rec["error"] = str(e)
+            return rec, None
+        finally:
+            if records is not None:
+                records.append(rec)
 
     def _apply_latent_delta_control(
         self,
@@ -1227,12 +2486,40 @@ class SingularityCascadeMixin:
             step_index=step_index,
             window_steps=window_steps,
         )
+        denoise_phase_rec = self._event_denoise_phase_map(
+            branch_name,
+            records,
+            step_index=step_index,
+            window_steps=window_steps,
+            surface_rec=surface_rec,
+        )
+        noise_source_field_rec = self._event_noise_source_field_map(
+            latent_before,
+            branch_name,
+            records,
+            phase_map=denoise_phase_rec,
+        )
+        noise_field_strategy_bridge_rec = self._event_noise_field_strategy_bridge(
+            branch_name,
+            records,
+            phase_map=denoise_phase_rec,
+            noise_field_map=noise_source_field_rec,
+            surface_rec=surface_rec,
+        )
+        noise_field_strategy_bridge_summary = {
+            "stage": noise_field_strategy_bridge_rec.get("stage", ""),
+            "status": noise_field_strategy_bridge_rec.get("status", ""),
+            "version": noise_field_strategy_bridge_rec.get("version", ""),
+            "bridge_pressure": (noise_field_strategy_bridge_rec.get("pressures", {}) or {}).get("bridge_pressure", None),
+            "recommended_next_surface": noise_field_strategy_bridge_rec.get("recommended_next_surface", ""),
+            "active_control_allowed": bool(noise_field_strategy_bridge_rec.get("active_control_allowed", False)),
+        }
         try:
             strength_runtime = float(surface_rec.get("effective_strength", 1.0))
         except Exception:
             strength_runtime = 1.0
 
-        if mode not in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "STRATEGY_PRESSURE_WINDOW") or abs(strength_runtime - 1.0) < 1e-9:
+        if mode not in ("LATENT_DELTA_SCALE", "DEEP_STEP_DELTA_CONTROL", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE") or abs(strength_runtime - 1.0) < 1e-9:
             records.append({
                 "stage": f"EventMathDeltaControl_{branch_name}",
                 "status": "bypass",
@@ -1243,6 +2530,14 @@ class SingularityCascadeMixin:
                 "coupling_multiplier": coupling_multiplier,
                 "step_schedule_factor": step_schedule_factor,
                 "strength_runtime": strength_runtime,
+                "denoise_phase_map": {
+                    "stage": denoise_phase_rec.get("stage", ""),
+                    "status": denoise_phase_rec.get("status", ""),
+                    "phase_scope": denoise_phase_rec.get("phase_scope", ""),
+                    "placement": denoise_phase_rec.get("placement", ""),
+                    "active_control_allowed": bool(denoise_phase_rec.get("active_control_allowed", False)),
+                },
+                "noise_field_strategy_bridge": noise_field_strategy_bridge_summary,
                 "step_index": int(step_index) if step_index is not None else None,
                 "window_steps": int(window_steps) if window_steps is not None else None,
                 "formula": "latent_after unchanged",
@@ -1264,6 +2559,7 @@ class SingularityCascadeMixin:
                     "coupling_multiplier": coupling_multiplier,
                     "step_schedule_factor": step_schedule_factor,
                     "strength_runtime": strength_runtime,
+                    "noise_field_strategy_bridge": noise_field_strategy_bridge_summary,
                     "reason": "missing before/after tensor",
                 })
                 return latent_after
@@ -1280,12 +2576,28 @@ class SingularityCascadeMixin:
                     "strength_runtime": strength_runtime,
                     "before_shape": list(before_t.shape),
                     "after_shape": list(after_t.shape),
+                    "noise_field_strategy_bridge": noise_field_strategy_bridge_summary,
                 })
                 return latent_after
 
             before_f = before_t.detach().float()
             after_f = after_t.detach().float()
-            controlled = before_f + (after_f - before_f) * float(strength_runtime)
+            delta_f = after_f - before_f
+            spatial_carrier_rec, spatial_carrier_gain = self._event_spatial_carrier_preservation_map(
+                branch_name,
+                delta_f,
+                records,
+                step_index=step_index,
+                window_steps=window_steps,
+                surface_rec=surface_rec,
+                denoise_phase_map=denoise_phase_rec,
+            )
+            if spatial_carrier_gain is not None:
+                controlled = before_f + delta_f * float(strength_runtime) * spatial_carrier_gain
+                spatial_formula = "controlled_after = latent_before + (latent_after - latent_before) * strength_runtime * spatial_carrier_gain"
+            else:
+                controlled = before_f + delta_f * float(strength_runtime)
+                spatial_formula = "controlled_after = latent_before + (latent_after - latent_before) * strength_runtime"
             controlled = controlled.to(dtype=after_t.dtype, device=after_t.device)
 
             if isinstance(latent_after, dict) and "samples" in latent_after:
@@ -1304,9 +2616,28 @@ class SingularityCascadeMixin:
                 "coupling_multiplier": coupling_multiplier,
                 "step_schedule_factor": step_schedule_factor,
                 "strength_runtime": strength_runtime,
+                "spatial_carrier_preservation_map": {
+                    "stage": spatial_carrier_rec.get("stage", ""),
+                    "status": spatial_carrier_rec.get("status", "not_recorded"),
+                    "version": spatial_carrier_rec.get("version", ""),
+                    "policy": spatial_carrier_rec.get("policy", ""),
+                    "dominant_background_region": spatial_carrier_rec.get("dominant_background_region", ""),
+                    "input_pressures": spatial_carrier_rec.get("input_pressures", {}),
+                    "min_gain": spatial_carrier_rec.get("min_gain", None),
+                    "mean_gain": spatial_carrier_rec.get("mean_gain", None),
+                    "max_gain": spatial_carrier_rec.get("max_gain", None),
+                },
+                "denoise_phase_map": {
+                    "stage": denoise_phase_rec.get("stage", ""),
+                    "status": denoise_phase_rec.get("status", ""),
+                    "phase_scope": denoise_phase_rec.get("phase_scope", ""),
+                    "placement": denoise_phase_rec.get("placement", ""),
+                    "active_control_allowed": bool(denoise_phase_rec.get("active_control_allowed", False)),
+                },
+                "noise_field_strategy_bridge": noise_field_strategy_bridge_summary,
                 "step_index": int(step_index) if step_index is not None else None,
                 "window_steps": int(window_steps) if window_steps is not None else None,
-                "formula": "controlled_after = latent_before + (latent_after - latent_before) * strength_runtime",
+                "formula": spatial_formula,
             })
             self._math_tensor_summary(
                 out,
@@ -1327,6 +2658,7 @@ class SingularityCascadeMixin:
                 "coupling_multiplier": coupling_multiplier,
                 "step_schedule_factor": step_schedule_factor,
                 "strength_runtime": strength_runtime,
+                "noise_field_strategy_bridge": noise_field_strategy_bridge_summary,
                 "error": str(e),
             })
             return latent_after
@@ -1716,6 +3048,14 @@ class SingularityCascadeMixin:
                 "native_step_loop_replacement": False,
                 "formula": "Math acts through one bounded Strategy pressure window after the native sampler window, then returns to S_global_event_route.",
             })
+        elif mode == "LATENT_MEMORY_BRIDGE":
+            records.append({
+                "stage": "EventMathSamplerPathPolicy",
+                "status": "native_sampler_preserved_segment_entry_latent_memory_bridge",
+                "math_control_mode": mode,
+                "native_step_loop_replacement": False,
+                "formula": "Bounded latent memory is applied before high sampler entry; high/low sampler physics stay model-native.",
+            })
         elif mode == "DEEP_STEP_DELTA_CONTROL":
             records.append({
                 "stage": "EventMathSamplerPathPolicy",
@@ -1724,6 +3064,31 @@ class SingularityCascadeMixin:
                 "native_step_loop_replacement": True,
                 "formula": "WARNING: Experimental deep-step delta control is active. High risk of noise.",
             })
+
+        self._record_sampler_route_parity_probe(
+            records,
+            f"EventRawVsSingularityParity_SamplerWindowBegin_{window.branch_name}",
+            branch_name=str(window.branch_name),
+            route_variant="native_math_loop" if use_native_math_loop else "event_sampler_core_boundary",
+            latent_before=latent,
+            latent_after=None,
+            model=model,
+            seed=getattr(window, "seed", None),
+            steps=getattr(window, "steps", None),
+            cfg=getattr(window, "cfg", None),
+            sampler_name=getattr(window, "sampler_name", None),
+            scheduler=getattr(window, "scheduler", None),
+            start_at_step=getattr(window, "start_at_step", None),
+            end_at_step=getattr(window, "end_at_step", None),
+            add_noise=getattr(window, "add_noise", None),
+            return_leftover_noise=getattr(window, "return_with_leftover_noise", None),
+            sd3_shift=getattr(window, "sd3_shift", None),
+            extra={
+                "branch_role": str(getattr(window, "branch_role", "")),
+                "math_control_mode": mode,
+                "probe_scope": "sampler_input_before_native_operation",
+            },
+        )
 
         if use_native_math_loop:
             result = self._event_sample_window_math_native(model, positive, negative, latent, window, records)
@@ -1734,6 +3099,31 @@ class SingularityCascadeMixin:
         records.extend(result.event_records)
         if not result.ok:
             raise RuntimeError(result.error or f"EventSampler {window.branch_name} failed")
+
+        self._record_sampler_route_parity_probe(
+            records,
+            f"EventRawVsSingularityParity_SamplerWindowRawAfter_{window.branch_name}",
+            branch_name=str(window.branch_name),
+            route_variant="native_math_loop" if use_native_math_loop else "event_sampler_core_boundary",
+            latent_before=latent,
+            latent_after=result.latent_after,
+            model=model,
+            seed=getattr(window, "seed", None),
+            steps=getattr(window, "steps", None),
+            cfg=getattr(window, "cfg", None),
+            sampler_name=getattr(window, "sampler_name", None),
+            scheduler=getattr(window, "scheduler", None),
+            start_at_step=getattr(window, "start_at_step", None),
+            end_at_step=getattr(window, "end_at_step", None),
+            add_noise=getattr(window, "add_noise", None),
+            return_leftover_noise=getattr(window, "return_with_leftover_noise", None),
+            sd3_shift=getattr(window, "sd3_shift", None),
+            extra={
+                "branch_role": str(getattr(window, "branch_role", "")),
+                "math_control_mode": mode,
+                "probe_scope": "sampler_output_before_delta_overlay",
+            },
+        )
 
         self._math_tensor_summary(result.latent_after, records, f"EventMath_{window.branch_name}_latent_after", reference=latent, strict=False)
 
@@ -1760,6 +3150,31 @@ class SingularityCascadeMixin:
         branch_name_lower = str(getattr(window, "branch_name", "") or "").lower()
         if "high" in branch_name_lower and mode in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW"):
             self._update_strategy_coupling_from_high(latent, controlled_latent_after, window.branch_name, records)
+
+        self._record_sampler_route_parity_probe(
+            records,
+            f"EventRawVsSingularityParity_SamplerWindowControlledAfter_{window.branch_name}",
+            branch_name=str(window.branch_name),
+            route_variant="native_math_loop" if use_native_math_loop else "event_sampler_core_boundary",
+            latent_before=latent,
+            latent_after=controlled_latent_after,
+            model=model,
+            seed=getattr(window, "seed", None),
+            steps=getattr(window, "steps", None),
+            cfg=getattr(window, "cfg", None),
+            sampler_name=getattr(window, "sampler_name", None),
+            scheduler=getattr(window, "scheduler", None),
+            start_at_step=getattr(window, "start_at_step", None),
+            end_at_step=getattr(window, "end_at_step", None),
+            add_noise=getattr(window, "add_noise", None),
+            return_leftover_noise=getattr(window, "return_with_leftover_noise", None),
+            sd3_shift=getattr(window, "sd3_shift", None),
+            extra={
+                "branch_role": str(getattr(window, "branch_role", "")),
+                "math_control_mode": mode,
+                "probe_scope": "sampler_output_after_delta_overlay",
+            },
+        )
 
         self._finite_guard(controlled_latent_after, records, f"EventFiniteGuard_{window.branch_name}_latent_after", strict=True)
         self._event_universal_stage_math(
@@ -1801,7 +3216,7 @@ class SingularityCascadeMixin:
 
         return controlled_latent_after, raw_delta_norm, delta_tensor
 
-    def _decode_tiled(self, vae, latent, tile_size, overlap, temporal_size, temporal_overlap, records):
+    def _decode_tiled(self, vae, latent, tile_size, overlap, temporal_size, temporal_overlap, records, segment_index=None, route_label=""):
         try:
             result = self._call_node_method(
                 "VAEDecodeTiled",
@@ -1827,6 +3242,22 @@ class SingularityCascadeMixin:
                 next_requirement="Output/VHS requires visible frames to package final media",
                 control_mode="REPORT_ONLY",
                 metadata={"tile_size": int(tile_size), "overlap": int(overlap), "temporal_size": int(temporal_size), "temporal_overlap": int(temporal_overlap)},
+            )
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_Decode",
+                route_kind="vae_tiled_decode",
+                input_state=latent,
+                output_state=image,
+                metadata={
+                    "segment_index": int(segment_index) if segment_index is not None else None,
+                    "route_label": str(route_label or ""),
+                    "tile_size": int(tile_size),
+                    "overlap": int(overlap),
+                    "temporal_size": int(temporal_size),
+                    "temporal_overlap": int(temporal_overlap),
+                    "vae_route_signature": self._object_route_cache_signature(vae),
+                },
             )
             return image
         except Exception as e:

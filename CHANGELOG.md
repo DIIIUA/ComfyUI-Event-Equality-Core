@@ -1,5 +1,68 @@
 # Singularity - Public Changelog
 
+## 0.1.1-r113 - Widget Order Hotfix + Tail 5 Stabilization
+
+Status: public stabilization release for current ComfyUI Desktop / modern frontend behavior.
+
+- Promotes the public build to `0.1.1-r113`.
+- Updates the visible node title to `Singularity R113`.
+- Fixes the r112 widget-order regression:
+  - ComfyUI Desktop stores widget values positionally.
+  - r112 visually reordered `node.widgets`, which could shift saved values into the wrong fields after reload.
+  - r113 keeps backend widget order stable and uses visual grouping only.
+- Removes the custom `onSerialize/widgets_values` workaround from r112.
+- Adds severe widget-drift repair for already-corrupted states, for example:
+  - `cascade_count = 0`
+  - `frames_per_cascade = 0`
+  - `width = 49`
+  - `height = 416`
+  - `fps = 608`
+  - `global_steps = NaN`
+  - `sampler_name = 123`
+- Expands the pause/continue panel to five tail-frame candidates:
+  - `Source`
+  - `Tail 1`
+  - `Tail 2`
+  - `Tail 3`
+  - `Tail 4`
+  - `Tail 5`
+  - `Result`
+- Keeps the native ComfyUI image upload button.
+- Keeps public defaults conservative:
+  - `cascade_count = 2`
+  - `pause_after_cascade_1 = true`
+  - `frames_per_cascade = 49`
+  - `width = 704`
+  - `height = 1280`
+  - `fps = 16`
+  - `seed = 123`
+  - `math_control_mode = OBSERVE_ONLY`
+  - `high_delta_strength = 1.0`
+  - `low_delta_strength = 1.0`
+  - `image_crop = wan_native`
+  - `save_video = true`
+  - `save_report = true`
+  - `use_formula_recommendation = false`
+- Keeps prompt transform prompt-pure:
+  - reports may include semantic/topology maps;
+  - formula text is not injected into the model-facing prompt.
+- Adds and preserves explicit `LATENT_MEMORY_BRIDGE` research controls:
+  - `bridge_wan_alpha`
+  - `bridge_concat_alpha`
+  - `bridge_wan_max_step`
+  - `bridge_concat_max_step`
+- Confirms the r113 runtime smoke test before public labeling:
+  - tested runtime line: `0.1.1-r113-dev`
+  - `result_status = VIDEO`
+  - `completion_gate = PASS`
+  - `EventCoreBodySummary = PASS`
+  - two cascades completed with pause/continue
+  - final video saved and stitched
+  - `adjustment_count = 0`
+  - severe widget drift repair was not triggered
+  - output video: 97 frames, 16 fps, 416 x 608 fast-test resolution
+- This is a stability and usability release. Experimental math modes remain research tools and are not guaranteed to improve every output.
+
 ## 0.1.1-r91 - Public Stabilization
 
 Status: public stabilization release after the r90 Strategy Control Surface runtime gate.

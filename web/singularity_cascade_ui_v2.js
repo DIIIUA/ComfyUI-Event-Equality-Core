@@ -1,15 +1,17 @@
-console.log("%c[Singularity UI] Extension script loaded (for browser or desktop/Electron). If you don't see this in DevTools console, the JS is not being executed in your frontend.", "color: #0f0; font-weight: bold");
-console.log("Singularity UI - overlay anchor + Comfy surface occlusion fix 20260606_1632");
-
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+
+const SINGULARITY_DEBUG_UI = false;
+const singularityDebug = (...args) => {
+    if (SINGULARITY_DEBUG_UI) console.log(...args);
+};
 
 const CLEAN_NODE_NAMES = new Set([
     "Singularity",
     "SingularityCascadeSimple",
 ]);
 const LEGACY_NODE_NAMES = new Set([]);
-const SINGULARITY_VISIBLE_NODE_TITLE = "Singularity R91";
+const SINGULARITY_VISIBLE_NODE_TITLE = "Singularity R113";
 
 const UI = {
     minWidth: 720,
@@ -100,13 +102,14 @@ const SUPPRESSED_MEDIA_WIDGET_TYPES = new Set([
 
 const GROUPS = [
     { id: "SOURCE", color: "#1d4ed8", bg: "rgba(30, 64, 175, 0.12)", names: ["source_image_file"] },
-    { id: "PROMPT", color: "#7c3aed", bg: "rgba(91, 33, 182, 0.10)", names: ["positive_prompt", "negative_prompt", "temporal_texture_lock", "prompt_transcode_mode"] },
-    { id: "CASCADE", color: "#0891b2", bg: "rgba(8, 145, 178, 0.10)", names: ["cascade_count", "frames_per_cascade", "width", "height", "fps", "seed"] },
-    { id: "SAMPLING", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step", "math_control_mode", "high_delta_strength", "low_delta_strength"] },
+    { id: "PROMPT", color: "#7c3aed", bg: "rgba(91, 33, 182, 0.10)", names: ["positive_prompt", "negative_prompt", "temporal_texture_lock"] },
+    { id: "CASCADE", color: "#0891b2", bg: "rgba(8, 145, 178, 0.10)", names: ["cascade_count", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4", "frames_per_cascade", "width", "height", "fps", "seed"] },
+    { id: "SAMPLING", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step", "math_control_mode", "high_delta_strength", "low_delta_strength", "strategy_field_mode"] },
     { id: "DECODE", color: "#059669", bg: "rgba(5, 150, 105, 0.09)", names: ["decode_tile_size", "decode_overlap", "decode_temporal_size", "decode_temporal_overlap", "image_upscale_method", "image_crop"] },
-    { id: "POST GEN", color: "#dc2626", bg: "rgba(220, 38, 38, 0.09)", names: ["save_video", "video_format", "save_report", "save_prefix"] },
-    { id: "TAIL 3", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["use_formula_recommendation", "selected_tail_index"] },
+    { id: "OUTPUT", color: "#dc2626", bg: "rgba(220, 38, 38, 0.09)", names: ["save_video", "video_format", "save_report", "save_prefix"] },
+    { id: "RESEARCH", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["sampler_trace_mode", "sampler_trace_max_steps", "use_formula_recommendation", "prompt_transcode_mode", "auto_calibration_mode", "bridge_wan_alpha", "bridge_concat_alpha", "bridge_wan_max_step", "bridge_concat_max_step", "selected_tail_index"] },
 ];
+const TAIL_UI_SLOT_COUNT = 5;
 
 function isSingularityNode(node) {
     const candidates = [
@@ -154,6 +157,7 @@ function normalizeMathControlMode(value) {
     const text = String(value ?? "").trim().toUpperCase();
     if (text === "LATENT_DELTA_SCALE") return "LATENT_DELTA_SCALE";
     if (text === "STRATEGY_PRESSURE_WINDOW") return "STRATEGY_PRESSURE_WINDOW";
+    if (text === "LATENT_MEMORY_BRIDGE") return "LATENT_MEMORY_BRIDGE";
     if (text === "DEEP_STEP_DELTA_CONTROL") return "DEEP_STEP_DELTA_CONTROL";
     return "OBSERVE_ONLY";
 }
@@ -166,6 +170,7 @@ function sanitizeMathControlWidget(node) {
         "OBSERVE_ONLY",
         "LATENT_DELTA_SCALE",
         "STRATEGY_PRESSURE_WINDOW",
+        "LATENT_MEMORY_BRIDGE",
         "DEEP_STEP_DELTA_CONTROL",
     ];
     widget.value = normalizeMathControlMode(widget.value);
@@ -213,7 +218,105 @@ function hidePublicOnlyWidgets(node) {
     }
 }
 
+const R113_DRIFT_REPAIR_DEFAULTS = {
+    cascade_count: 2,
+    pause_after_cascade_1: true,
+    pause_after_cascade_2: false,
+    pause_after_cascade_3: false,
+    pause_after_cascade_4: false,
+    frames_per_cascade: 49,
+    width: 416,
+    height: 608,
+    fps: 16,
+    seed: 123,
+    sampler_name: "euler",
+    scheduler: "simple",
+    global_steps: 4,
+    primary_cfg: 1.0,
+    secondary_cfg: 1.0,
+    primary_start_step: 0,
+    primary_end_step: 1,
+    secondary_start_step: 1,
+    secondary_end_step: 4,
+    math_control_mode: "OBSERVE_ONLY",
+    high_delta_strength: 1.0,
+    low_delta_strength: 1.0,
+    strategy_field_mode: "REPORT_ONLY",
+    decode_tile_size: 512,
+    decode_overlap: 64,
+    decode_temporal_size: 32,
+    decode_temporal_overlap: 12,
+    image_upscale_method: "nearest-exact",
+    image_crop: "disabled",
+    save_video: true,
+    video_format: "video/h264-mp4",
+    save_report: true,
+    save_prefix: "Singularity",
+    sampler_trace_mode: "OFF",
+    sampler_trace_max_steps: 64,
+    use_formula_recommendation: false,
+    prompt_transcode_mode: "REPORT_ONLY",
+    auto_calibration_mode: "OFF",
+    bridge_wan_alpha: 0.10,
+    bridge_concat_alpha: 0.06,
+    bridge_wan_max_step: 0.45,
+    bridge_concat_max_step: 0.28,
+};
+
+function numericWidgetValue(node, name) {
+    const widget = findWidget(node, name);
+    return Number(widget?.value);
+}
+
+function textWidgetValue(node, name) {
+    const widget = findWidget(node, name);
+    return String(widget?.value ?? "");
+}
+
+function repairSevereWidgetDrift(node) {
+    if (!node?.widgets?.length || node._singularityR113DriftRepaired) return;
+    const symptoms = [];
+    const cascadeCount = numericWidgetValue(node, "cascade_count");
+    const frames = numericWidgetValue(node, "frames_per_cascade");
+    const width = numericWidgetValue(node, "width");
+    const height = numericWidgetValue(node, "height");
+    const fps = numericWidgetValue(node, "fps");
+    const globalSteps = numericWidgetValue(node, "global_steps");
+    const decodeTile = numericWidgetValue(node, "decode_tile_size");
+    const decodeOverlap = numericWidgetValue(node, "decode_overlap");
+    const samplerName = textWidgetValue(node, "sampler_name").trim();
+    const videoFormat = textWidgetValue(node, "video_format").trim();
+    const highDelta = numericWidgetValue(node, "high_delta_strength");
+
+    if (!Number.isFinite(cascadeCount) || cascadeCount < 1) symptoms.push("cascade_count");
+    if (!Number.isFinite(frames) || frames < 1) symptoms.push("frames_per_cascade");
+    if (!Number.isFinite(width) || width < 64) symptoms.push("width");
+    if (!Number.isFinite(height) || height < 64) symptoms.push("height");
+    if (!Number.isFinite(fps) || fps < 1 || fps > 120) symptoms.push("fps");
+    if (!Number.isFinite(globalSteps) || globalSteps < 1) symptoms.push("global_steps");
+    if (!Number.isFinite(decodeTile) || decodeTile < 64) symptoms.push("decode_tile_size");
+    if (!Number.isFinite(decodeOverlap)) symptoms.push("decode_overlap");
+    if (!samplerName || Number.isFinite(Number(samplerName))) symptoms.push("sampler_name");
+    if (!videoFormat.includes("/")) symptoms.push("video_format");
+    if (!Number.isFinite(highDelta)) symptoms.push("high_delta_strength");
+
+    if (symptoms.length < 4) return;
+
+    for (const [name, value] of Object.entries(R113_DRIFT_REPAIR_DEFAULTS)) {
+        setWidgetValue(node, name, value);
+    }
+    node._singularityR113DriftRepaired = true;
+    node.properties = node.properties || {};
+    node.properties.singularity_r113_widget_drift_repaired = {
+        reason: "severe_positional_widget_value_drift",
+        symptoms,
+        repaired_at: new Date().toISOString(),
+    };
+    console.warn("[Singularity UI] R113 repaired severe positional widget drift", symptoms);
+}
+
 function stabilizeNodeLayout(node) {
+    repairSevereWidgetDrift(node);
     hidePublicOnlyWidgets(node);
     sanitizePromptTranscodeWidget(node);
     sanitizeMathControlWidget(node);
@@ -901,6 +1004,21 @@ function appendMediaTile(grid, options) {
             });
             tile.appendChild(el);
         }
+    } else if (options.placeholder) {
+        const placeholder = document.createElement("div");
+        setElementStyle(placeholder, {
+            width: "100%",
+            height: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            color: "rgba(255,255,255,0.24)",
+            background: "rgba(255,255,255,0.035)",
+            fontSize: "11px",
+            pointerEvents: "none",
+        });
+        placeholder.textContent = options.placeholder;
+        tile.appendChild(placeholder);
     }
 
     const label = document.createElement("div");
@@ -955,6 +1073,7 @@ function renderPauseOverlay(node, force = false) {
     const selected = Number(node._singularitySelectedTailIndex ?? -1);
     const formulaBest = Number(node._singularityFormulaBestIndex ?? 0);
     const imgs = node._singularityPauseImgs || [];
+    const tailCount = TAIL_UI_SLOT_COUNT;
 
     appendMediaTile(grid, {
         label: "Source",
@@ -962,7 +1081,9 @@ function renderPauseOverlay(node, force = false) {
         media: sourceUrl,
     });
 
-    for (let i = 0; i < 3; i++) {
+    grid.style.gridTemplateColumns = `repeat(${tailCount + 2}, minmax(0, 1fr))`;
+
+    for (let i = 0; i < tailCount; i++) {
         const img = imgs[i];
         const resumeIndex = Number(img?.__singularityResumeIndex ?? -1);
         const selectedSlot = node._singularityPaused && i === selected;
@@ -971,9 +1092,10 @@ function renderPauseOverlay(node, force = false) {
             label: resumeIndex > 0 ? `Frame ${resumeIndex}` : `Tail ${i + 1}`,
             title: resumeIndex > 0 ? `Tail candidate frame ${resumeIndex}` : `Tail candidate ${i + 1}`,
             media: img,
+            placeholder: img ? "" : "Waiting",
             selected: selectedSlot,
             advised: formulaSlot,
-            onClick: node._singularityPaused ? () => selectPauseFrame(node, i) : null,
+            onClick: node._singularityPaused && img ? () => selectPauseFrame(node, i) : null,
         });
     }
 
@@ -1119,7 +1241,7 @@ async function pollPauseStatusForNode(node) {
         if (detail.status === "paused") {
             if (!node._singularityPaused || node._singularityPauseStatusKey !== detail.__status_key) {
                 node._singularityPauseStatusKey = detail.__status_key;
-                console.log("[Singularity UI] pause state recovered by status polling", detail);
+                singularityDebug("[Singularity UI] pause state recovered by status polling", detail);
                 showPauseState(node, detail);
             } else {
                 positionPauseOverlay(node);
@@ -1192,7 +1314,7 @@ function drawGroupBackgrounds(ctx, node) {
     const oldComposite = ctx.globalCompositeOperation;
     ctx.globalCompositeOperation = "destination-over";
 
-    // Use inset width like the Tail 3 bar to reduce full-width colored group background noise.
+    // Use inset width like the Tail 5 bar to reduce full-width colored group background noise.
     const fullW = node.size?.[0] || UI.minWidth;
     const contentMargin = 20;
     const width = Math.max(100, fullW - contentMargin * 2);
@@ -1204,6 +1326,7 @@ function drawGroupBackgrounds(ctx, node) {
 
     for (let i = 0; i < widgets.length; i++) {
         const w = widgets[i];
+        if (!w || w.hidden) continue;
         const g = groupForWidget(w);
         if (!g) {
             if (current) { runs.push(current); current = null; }
@@ -1304,14 +1427,14 @@ app.registerExtension({
     async beforeRegisterNodeDef(nodeType, nodeData, app) {
         const isClean = CLEAN_NODE_NAMES.has(nodeData?.name);
         const isLegacy = LEGACY_NODE_NAMES.has(nodeData?.name);
-        console.log(`[Singularity UI] beforeRegisterNodeDef for name=${nodeData?.name}, isClean=${isClean}`);
+        singularityDebug(`[Singularity UI] beforeRegisterNodeDef for name=${nodeData?.name}, isClean=${isClean}`);
         if (!isClean && !isLegacy) return;
 
         // Custom File Upload Button ONLY
         const originalOnNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = originalOnNodeCreated?.apply(this, arguments);
-            console.log("[Singularity UI] onNodeCreated called for node", this);
+            singularityDebug("[Singularity UI] onNodeCreated called for node", this);
             applySingularityVisibleTitle(this, nodeData);
             
             // Stable min size for multiline prompts and native preview. The pause controls live in a DOM overlay below the node.
@@ -1343,26 +1466,38 @@ app.registerExtension({
 
             // Selected tail frame index (synced with green outline clicks)
             // The widget may be auto-created by Comfy (because declared in optional) or added here.
-            // We collapse its size so it takes no visual space (bar is the real Tail 3 UI), but .value is still saved/serialized for workflow persistence.
+            // We collapse its size so it takes no visual space (bar is the real Tail 5 UI), but .value is still saved/serialized for workflow persistence.
             let tailIdxWidget = this.widgets.find(w => w.name === "selected_tail_index");
             if (!tailIdxWidget) {
-                tailIdxWidget = this.addWidget("number", "tail#", "selected_tail_index", 0, {
-                    min: 0, max: 2, step: 1
+                tailIdxWidget = this.addWidget("number", "tail#", "selected_tail_index", -1, {
+                    min: -1, max: 4, step: 1
                 });
             }
             if (tailIdxWidget) {
-                // Hide visually (prevents extra spinner/widget row under TAIL 3 group), keep for data + callback sync from bar clicks.
+                tailIdxWidget.options = tailIdxWidget.options || {};
+                tailIdxWidget.options.min = -1;
+                tailIdxWidget.options.max = 4;
+                tailIdxWidget.options.step = 1;
+                tailIdxWidget.min = -1;
+                tailIdxWidget.max = 4;
+                // Old workflows may persist 0 from earlier builds. Before a live pause/click,
+                // selection must be neutral so the run button starts a new route, not a stale continue.
+                if (!this._singularityPaused) {
+                    tailIdxWidget.value = -1;
+                }
+                // Hide visually (prevents extra spinner/widget row under TAIL 5 group), keep for data + callback sync from bar clicks.
                 tailIdxWidget.label = "";
                 tailIdxWidget.hidden = true;
                 tailIdxWidget.computeSize = function() { return [0, -6]; };
             }
+            stabilizeNodeLayout(this);
 
             // Pause-aware Tail selection: no pre-chosen green before pause. Only during pause user clicks to choose, green appears then.
             removePauseOverlay(this);
             this._singularityPaused = false;
             this._singularitySelectedTailIndex = -1;  // none selected until explicit click *during* the pause
             this._singularityFormulaBestIndex = 0;
-            this._singularityTailScores = [0, 0, 0];
+            this._singularityTailScores = [0, 0, 0, 0, 0];
 
             // Force bounded size and prevent the native preview from stretching the node indefinitely.
             this.setSize([Math.max(this.size ? this.size[0] : 0, UI.minWidth), Math.max(UI.minHeight, Math.min(this.size ? this.size[1] : UI.minHeight, UI.maxHeight))]);
@@ -1479,7 +1614,7 @@ app.registerExtension({
             return false;
         };
 
-        // === Stable background groups + lightweight Tail 3 panel ===
+        // === Stable background groups + lightweight Tail 5 panel ===
         const originalOnDrawForeground = nodeType.prototype.onDrawForeground;
         nodeType.prototype.onDrawForeground = function(ctx) {
             installPrivatePreviewStore(this);
@@ -1490,6 +1625,7 @@ app.registerExtension({
 
             try {
                 suppressNativeMediaWidgets(this);
+                stabilizeNodeLayout(this);
                 // 1. Colored background bands behind widgets (Gemini's stable r29+ method)
                 // Groups stay within node bounds. Using destination-over to place behind widgets.
                 drawGroupBackgrounds(ctx, this);
@@ -1497,7 +1633,6 @@ app.registerExtension({
                 // 2. Pause Tail/MirrorCut panel + resume strip.
                 // Draw only while a pause exists. The actual controls live in a DOM overlay
                 // below the node frame so the native preview/noise cannot hide them.
-                stabilizeNodeLayout(this);
                 renderPauseOverlay(this);
             } catch (e) {}
 

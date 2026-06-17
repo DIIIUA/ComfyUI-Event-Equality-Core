@@ -102,9 +102,9 @@ from .utils.tensor_stats import compute_tensor_delta, extract_latent_samples, sa
 from .utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from .adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
-EVENT_HORIZON_BODY_VERSION = "0.1-r91"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r113"
 
 
 def _event_horizon_release_label(version):
@@ -168,7 +168,7 @@ def _normalize_selected_tail_index_value(value, default=-1):
         index = int(float(text))
     except Exception:
         return int(default)
-    if index in (-1, 0, 1, 2):
+    if index in (-1, 0, 1, 2, 3, 4):
         return index
     return int(default)
 
@@ -2715,14 +2715,28 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                     "OBSERVE_ONLY",
                     "LATENT_DELTA_SCALE",
                     "STRATEGY_PRESSURE_WINDOW",
+                    "LATENT_MEMORY_BRIDGE",
                     "DEEP_STEP_DELTA_CONTROL",
                     "observe_only",
                     "latent_delta_scale",
                     "strategy_pressure_window",
+                    "latent_memory_bridge",
                     "deep_step_delta_control",
                 ], {"default": "OBSERVE_ONLY"}),
-                "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
-                "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.0001, "round": 0.0001}),
+                "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.00001, "round": 0.000001}),
+                "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.00001, "round": 0.000001}),
+                "strategy_field_mode": ([
+                    "OFF",
+                    "REPORT_ONLY",
+                    "HIGH_NOISE_FIELD",
+                    "LOW_REFINEMENT_FIELD",
+                    "DUAL_FIELD",
+                    "off",
+                    "report_only",
+                    "high_noise_field",
+                    "low_refinement_field",
+                    "dual_field",
+                ], {"default": "OFF"}),
 
                 "decode_tile_size": ("INT", {"default": 512, "min": 64, "max": 8192, "step": 8}),
                 # Allow wider transport range; runtime normalization will clamp to safe decode constraints.
@@ -2743,23 +2757,42 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 # Tail frame selection UI layer control (always manual green outline primary)
                 "use_formula_recommendation": ("BOOLEAN", {"default": False}),
                 "prompt_transcode_mode": (_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS, {"default": "REPORT_ONLY"}),
+                "auto_calibration_mode": ([
+                    "OFF",
+                    "REPORT_ONLY",
+                    "AUTO_APPLY",
+                    "off",
+                    "report_only",
+                    "auto_apply",
+                ], {"default": "OFF"}),
+
+                # Research controls for LATENT_MEMORY_BRIDGE. They are declared
+                # at the end to preserve saved workflow widget order. R113 keeps
+                # node.widgets in backend order because ComfyUI serializes widget
+                # values positionally.
+                "bridge_wan_alpha": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 0.50, "step": 0.001, "round": 0.000001}),
+                "bridge_concat_alpha": ("FLOAT", {"default": 0.06, "min": 0.0, "max": 0.50, "step": 0.001, "round": 0.000001}),
+                "bridge_wan_max_step": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 2.0, "step": 0.001, "round": 0.000001}),
+                "bridge_concat_max_step": ("FLOAT", {"default": 0.28, "min": 0.0, "max": 2.0, "step": 0.001, "round": 0.000001}),
             },
             "optional": {
                 "secondary_model": ("MODEL",),
                 "image": ("IMAGE",),
                 "mask": ("MASK",),
-                # Synced from Tail 3 bar clicks (green outline). Explicit param (no **kwargs).
+                # Synced from Tail 5 bar clicks (green outline). Explicit param (no **kwargs).
                 # Soft transport field: Comfy Desktop can shift stale workflow widget values into it.
-                # Runtime normalization clamps real JS choices to -1/0/1/2.
+                # Runtime normalization clamps real JS choices to -1/0/1/2/3/4.
                 "selected_tail_index": ("STRING", {"default": "-1"}),
             },
             "hidden": {
                 "id": "UNIQUE_ID",
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "IMAGE", "IMAGE", "IMAGE")
-    RETURN_NAMES = ("status", "saved_video_path", "saved_report_path", "report", "tail_frame_0", "tail_frame_1", "tail_frame_2")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_NAMES = ("status", "saved_video_path", "saved_report_path", "report", "tail_frame_0", "tail_frame_1", "tail_frame_2", "tail_frame_3", "tail_frame_4")
     FUNCTION = "run"
     CATEGORY = "Singularity/Singularity"
     OUTPUT_NODE = True
@@ -2860,6 +2893,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         math_control_mode,
         high_delta_strength,
         low_delta_strength,
+        strategy_field_mode,
         decode_tile_size,
         decode_overlap,
         decode_temporal_size,
@@ -2871,6 +2905,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         sampler_trace_mode,
         sampler_trace_max_steps,
         prompt_transcode_mode="REPORT_ONLY",
+        auto_calibration_mode="OFF",
+        bridge_wan_alpha=0.10,
+        bridge_concat_alpha=0.06,
+        bridge_wan_max_step=0.45,
+        bridge_concat_max_step=0.28,
     ):
         adjustments = []
         allowed_samplers, allowed_schedulers = self._get_ksampler_allowed_values()
@@ -3026,12 +3065,19 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         math_control_mode_n = clamp_enum(
             "math_control_mode",
             math_control_mode,
-            {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "DEEP_STEP_DELTA_CONTROL"},
+            {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "DEEP_STEP_DELTA_CONTROL"},
             "OBSERVE_ONLY",
             casefold=True,
         )
-        high_delta_strength_n = clamp_float("high_delta_strength", high_delta_strength, 1.0, 0.0, 2.0, digits=4)
-        low_delta_strength_n = clamp_float("low_delta_strength", low_delta_strength, 1.0, 0.0, 2.0, digits=4)
+        high_delta_strength_n = clamp_float("high_delta_strength", high_delta_strength, 1.0, 0.0, 2.0, digits=6)
+        low_delta_strength_n = clamp_float("low_delta_strength", low_delta_strength, 1.0, 0.0, 2.0, digits=6)
+        strategy_field_mode_n = clamp_enum(
+            "strategy_field_mode",
+            strategy_field_mode,
+            {"OFF", "REPORT_ONLY", "HIGH_NOISE_FIELD", "LOW_REFINEMENT_FIELD", "DUAL_FIELD"},
+            "OFF",
+            casefold=True,
+        )
 
         decode_tile_size_n = align_to_step(
             "decode_tile_size",
@@ -3093,6 +3139,17 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 prompt_transcode_mode_n,
                 "combo_index_or_legacy_alias_normalized",
             )
+        auto_calibration_mode_n = clamp_enum(
+            "auto_calibration_mode",
+            auto_calibration_mode,
+            {"OFF", "REPORT_ONLY", "AUTO_APPLY"},
+            "OFF",
+            casefold=True,
+        )
+        bridge_wan_alpha_n = clamp_float("bridge_wan_alpha", bridge_wan_alpha, 0.10, 0.0, 0.50, digits=6)
+        bridge_concat_alpha_n = clamp_float("bridge_concat_alpha", bridge_concat_alpha, 0.06, 0.0, 0.50, digits=6)
+        bridge_wan_max_step_n = clamp_float("bridge_wan_max_step", bridge_wan_max_step, 0.45, 0.0, 2.0, digits=6)
+        bridge_concat_max_step_n = clamp_float("bridge_concat_max_step", bridge_concat_max_step, 0.28, 0.0, 2.0, digits=6)
 
         save_prefix_n = self._sanitize_save_prefix_text(save_prefix)
         if save_prefix_n != str(save_prefix or "").strip():
@@ -3127,6 +3184,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "math_control_mode": math_control_mode_n,
             "high_delta_strength": high_delta_strength_n,
             "low_delta_strength": low_delta_strength_n,
+            "strategy_field_mode": strategy_field_mode_n,
             "decode_tile_size": decode_tile_size_n,
             "decode_overlap": decode_overlap_n,
             "decode_temporal_size": decode_temporal_size_n,
@@ -3138,6 +3196,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "sampler_trace_mode": sampler_trace_mode_n,
             "sampler_trace_max_steps": sampler_trace_max_steps_n,
             "prompt_transcode_mode": prompt_transcode_mode_n,
+            "auto_calibration_mode": auto_calibration_mode_n,
+            "bridge_wan_alpha": bridge_wan_alpha_n,
+            "bridge_concat_alpha": bridge_concat_alpha_n,
+            "bridge_wan_max_step": bridge_wan_max_step_n,
+            "bridge_concat_max_step": bridge_concat_max_step_n,
             "branch_mode": "DUAL_HIGH_LOW" if dual_branch else "SINGLE",
             "cascade_mode": "SOLO_1" if cascade_count_n <= 1 else f"CASCADE_{cascade_count_n}",
         }
@@ -3157,6 +3220,477 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "adjustments": adjustments,
             "normalized_signature": normalized_signature,
             "normalized_signature_source": signature_source,
+        }
+
+    @staticmethod
+    def _normalize_auto_calibration_mode_value(value):
+        text = str(value or "OFF").strip()
+        aliases = {
+            "0": "OFF",
+            "1": "REPORT_ONLY",
+            "2": "AUTO_APPLY",
+            "off": "OFF",
+            "report_only": "REPORT_ONLY",
+            "auto_apply": "AUTO_APPLY",
+        }
+        return aliases.get(text.lower(), text.upper() if text.upper() in {"OFF", "REPORT_ONLY", "AUTO_APPLY"} else "OFF")
+
+    def _event_auto_calibration_cache_path(self):
+        try:
+            import folder_paths
+            out_dir = Path(folder_paths.get_output_directory())
+        except Exception:
+            out_dir = Path.cwd()
+        return out_dir / "Singularity_auto_calibration_cache.json"
+
+    @staticmethod
+    def _event_auto_calibration_scene_key_source(
+        *,
+        positive_prompt,
+        negative_prompt,
+        source_image_file,
+        settings,
+    ):
+        settings = settings if isinstance(settings, dict) else {}
+        key_settings = {
+            "source_image_file": str(source_image_file or ""),
+            "positive_prompt_sha256": hashlib.sha256(str(positive_prompt or "").encode("utf-8", errors="ignore")).hexdigest(),
+            "negative_prompt_sha256": hashlib.sha256(str(negative_prompt or "").encode("utf-8", errors="ignore")).hexdigest(),
+            "width": int(settings.get("width", 0) or 0),
+            "height": int(settings.get("height", 0) or 0),
+            "fps": int(settings.get("fps", 0) or 0),
+            "seed": int(settings.get("seed", 0) or 0),
+            "sampler_name": str(settings.get("sampler_name", "")),
+            "scheduler": str(settings.get("scheduler", "")),
+            "global_steps": int(settings.get("global_steps", 0) or 0),
+            "primary_cfg": round(float(settings.get("primary_cfg", 0.0) or 0.0), 4),
+            "secondary_cfg": round(float(settings.get("secondary_cfg", 0.0) or 0.0), 4),
+            "primary_start_step": int(settings.get("primary_start_step", 0) or 0),
+            "primary_end_step": int(settings.get("primary_end_step", 0) or 0),
+            "secondary_start_step": int(settings.get("secondary_start_step", 0) or 0),
+            "secondary_end_step": int(settings.get("secondary_end_step", 0) or 0),
+            "image_crop": str(settings.get("image_crop", "")),
+            "prompt_transcode_mode": str(settings.get("prompt_transcode_mode", "")),
+            "strategy_field_mode": str(settings.get("strategy_field_mode", "")),
+        }
+        return key_settings
+
+    def _event_auto_calibration_load_cache(self):
+        path = self._event_auto_calibration_cache_path()
+        try:
+            if not path.exists():
+                return {"schema_version": "singularity-auto-calibration-cache-v1", "entries": {}}
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return {"schema_version": "singularity-auto-calibration-cache-v1", "entries": {}}
+            if not isinstance(data.get("entries"), dict):
+                data["entries"] = {}
+            return data
+        except Exception:
+            return {"schema_version": "singularity-auto-calibration-cache-v1", "entries": {}}
+
+    def _event_auto_calibration_write_cache(self, data):
+        path = self._event_auto_calibration_cache_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(_event_json_safe(data), ensure_ascii=False, indent=2), encoding="utf-8")
+            return str(path)
+        except Exception:
+            return ""
+
+    def _event_auto_calibration_prepare(
+        self,
+        *,
+        mode,
+        positive_prompt,
+        negative_prompt,
+        source_image_file,
+        math_control_mode,
+        high_delta_strength,
+        low_delta_strength,
+        settings,
+    ):
+        mode_n = self._normalize_auto_calibration_mode_value(mode)
+        key_source = self._event_auto_calibration_scene_key_source(
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            source_image_file=source_image_file,
+            settings=settings,
+        )
+        scene_key = hashlib.sha256(
+            json.dumps(_event_json_safe(key_source), sort_keys=True, ensure_ascii=True).encode("utf-8")
+        ).hexdigest()[:24]
+        cache = self._event_auto_calibration_load_cache()
+        entry = cache.get("entries", {}).get(scene_key, {}) if isinstance(cache, dict) else {}
+        state = {
+            "stage": "EventAutoCalibrationPrepare",
+            "status": "disabled" if mode_n == "OFF" else "cache_miss",
+            "mode": mode_n,
+            "scene_key": scene_key,
+            "scene_key_source": key_source,
+            "cache_path": str(self._event_auto_calibration_cache_path()),
+            "cache_entry_found": bool(entry),
+            "requested": {
+                "math_control_mode": str(math_control_mode or "OBSERVE_ONLY"),
+                "high_delta_strength": float(high_delta_strength),
+                "low_delta_strength": float(low_delta_strength),
+            },
+            "applied": {},
+            "entry": entry if isinstance(entry, dict) else {},
+            "formula": "Scout run records scene-specific Strategy pressure. AUTO_APPLY may reuse only a matching scene-key recommendation on the next run.",
+        }
+        if mode_n == "REPORT_ONLY":
+            state["status"] = "report_only_cache_available" if entry else "report_only_cache_miss"
+            return state
+        if mode_n != "AUTO_APPLY":
+            return state
+
+        rec = entry.get("recommendation", {}) if isinstance(entry, dict) else {}
+        confidence = str(rec.get("confidence", "") or "").lower()
+        if not rec:
+            state["status"] = "auto_apply_cache_miss"
+            return state
+        if confidence not in {"high", "medium"}:
+            state["status"] = "auto_apply_blocked_low_confidence"
+            return state
+        try:
+            rec_high = float(rec.get("recommended_high_delta_strength", high_delta_strength))
+            rec_low = float(rec.get("recommended_low_delta_strength", low_delta_strength))
+        except Exception:
+            state["status"] = "auto_apply_blocked_invalid_cache"
+            return state
+        rec_mode = str(rec.get("recommended_math_control_mode") or "STRATEGY_PRESSURE_WINDOW").upper()
+        if rec_mode not in {"LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW"}:
+            rec_mode = "STRATEGY_PRESSURE_WINDOW"
+        rec_high = max(0.98, min(1.02, round(rec_high, 4)))
+        rec_low = max(1.0, min(1.006, round(rec_low, 4)))
+        state["status"] = "auto_applied"
+        state["applied"] = {
+            "math_control_mode": rec_mode,
+            "high_delta_strength": rec_high,
+            "low_delta_strength": rec_low,
+            "confidence": confidence,
+            "source_report_path": str(entry.get("source_report_path", "")),
+        }
+        evidence = rec.get("evidence", {}) if isinstance(rec, dict) and isinstance(rec.get("evidence", {}), dict) else {}
+        try:
+            background_pressure = float(evidence.get("background_anchor_pressure", 0.0) or 0.0)
+        except Exception:
+            background_pressure = 0.0
+        background_status = str(evidence.get("background_anchor_status", "") or "")
+        try:
+            late_segment_pressure = float(evidence.get("late_segment_pressure", evidence.get("post_seam_acceleration_score", 0.0)) or 0.0)
+        except Exception:
+            late_segment_pressure = 0.0
+        try:
+            top_band_pressure = float(evidence.get("top_band_pressure", 0.0) or 0.0)
+        except Exception:
+            top_band_pressure = 0.0
+        try:
+            spatial_anchor_pressure = float(evidence.get("spatial_anchor_pressure", 0.0) or 0.0)
+        except Exception:
+            spatial_anchor_pressure = 0.0
+        try:
+            background_region_pressure = float(evidence.get("background_region_pressure", 0.0) or 0.0)
+        except Exception:
+            background_region_pressure = 0.0
+        dominant_background_region = str(evidence.get("dominant_background_region", "") or "")
+        if (
+            background_status == "global_scene_drift_high"
+            or background_pressure >= 0.55
+            or spatial_anchor_pressure >= 0.55
+            or background_region_pressure >= 0.55
+        ):
+            background_pressure = max(0.0, min(1.0, background_pressure))
+            late_segment_pressure = max(0.0, min(1.0, late_segment_pressure))
+            top_band_pressure = max(0.0, min(1.0, top_band_pressure))
+            spatial_anchor_pressure = max(0.0, min(1.0, spatial_anchor_pressure))
+            background_region_pressure = max(0.0, min(1.0, background_region_pressure))
+            # Do not invert or replace motion. Compress the positive low-branch
+            # intent when the previous same-scene scout proved global drift.
+            spatial_pressure = max(background_pressure, spatial_anchor_pressure, background_region_pressure)
+            compression = max(0.42, min(1.0, 1.0 - 0.40 * spatial_pressure))
+            window_multiplier = max(
+                0.35,
+                min(1.0, 1.0 - 0.25 * spatial_pressure - 0.20 * late_segment_pressure - 0.12 * top_band_pressure),
+            )
+            temporal_multiplier = max(
+                0.40,
+                min(1.0, 1.0 - 0.30 * max(late_segment_pressure, top_band_pressure, background_region_pressure)),
+            )
+            state["applied"]["background_anchor_preservation"] = {
+                "status": "active",
+                "background_anchor_status": background_status,
+                "background_anchor_pressure": round(background_pressure, 6),
+                "late_segment_pressure": round(late_segment_pressure, 6),
+                "top_band_pressure": round(top_band_pressure, 6),
+                "spatial_anchor_pressure": round(spatial_anchor_pressure, 6),
+                "background_region_pressure": round(background_region_pressure, 6),
+                "dominant_background_region": dominant_background_region,
+                "low_positive_intent_multiplier": round(compression, 6),
+                "max_delta_window_multiplier": round(window_multiplier, 6),
+                "temporal_stability_multiplier": round(temporal_multiplier, 6),
+                "policy": "same_scene_cached_spatial_background_drift_compression",
+                "spatial_carrier_preservation_map": {
+                    "status": "available",
+                    "version": "spatial_carrier_preservation_map_v3_denoise_phase_map",
+                    "control_mode": "cached_soft_region_gain_with_endpoint_guard",
+                    "active_requires": "STRATEGY_PRESSURE_WINDOW with active same-scene AUTO_APPLY evidence and a non-endpoint step-level denoise-safe window",
+                    "dominant_background_region": dominant_background_region,
+                    "carrier_pressure": round(spatial_pressure, 6),
+                    "formula": "Cached spatial/background evidence becomes a soft gain map over ObservedBehavior(delta), not prompt text.",
+                },
+                "denoise_phase_map": {
+                    "status": "available",
+                    "version": "denoise_phase_map_v1_report_guard",
+                    "control_mode": "phase placement before local math control",
+                    "active_requires": "low branch plus step-level mid-window denoise phase evidence",
+                    "formula": "High birth, post-window, and endpoint phases remain report-only; low mid-window can become a future active Strategy collision surface.",
+                },
+                "noise_source_field_map": {
+                    "status": "available",
+                    "version": "noise_source_field_map_v1_report_only",
+                    "control_mode": "latent source/noise field evidence without tensor mutation",
+                    "formula": "Read source/noise region pressure before deciding whether Strategy pressure may become active math.",
+                },
+                "noise_field_strategy_bridge": {
+                    "status": "available",
+                    "version": "noise_field_strategy_bridge_v1_model_attractor",
+                    "control_mode": "route source/noise evidence to denoise-safe Strategy surfaces",
+                    "active_requires": "nonzero source/noise carrier plus pre-high shaping or low mid-window step evidence",
+                    "formula": "Noise/source evidence returns to StrategyAttractor(model) before it may become active math; zero fields remain no-pressure.",
+                },
+                "source": "EventAutoCalibrationResult.evidence",
+            }
+        return state
+
+    @staticmethod
+    def _event_auto_calibration_recommendation_from_records(records):
+        records = [r for r in (records or []) if isinstance(r, dict)]
+
+        def latest(stage):
+            for rec in reversed(records):
+                if str(rec.get("stage", "") or "") == stage:
+                    return rec
+            return {}
+
+        def clamp(value, lo, hi):
+            try:
+                out = float(value)
+            except Exception:
+                out = lo
+            return max(float(lo), min(float(hi), out))
+
+        summary = latest("EventCoreBodySummary")
+        low_card = latest("EventLowBranchRelationPressureCard")
+        frame_card = latest("EventFrameSpikeAttributionCard")
+        tail_card = latest("EventTailStrategyContinuityCard")
+        background_card = latest("EventBackgroundAnchorPreservationCard")
+        spatial_card = latest("EventSpatialAnchorMap")
+        resolver = latest("EventStrategyReturnPressureResolver")
+        matrix = latest("EventStrategyMatrix")
+
+        requested = {}
+        for rec in records:
+            if str(rec.get("stage", "") or "") == "EventMathControlSummary":
+                requested = rec
+                break
+        current_low = clamp(requested.get("low_delta_strength_requested", 1.0), 0.0, 2.0)
+        current_high = clamp(requested.get("high_delta_strength_requested", 1.0), 0.0, 2.0)
+
+        if summary.get("status") != "PASS" or not bool(summary.get("final_output_ok", False)):
+            return {
+                "status": "blocked",
+                "confidence": "low",
+                "recommended_math_control_mode": "OBSERVE_ONLY",
+                "recommended_high_delta_strength": 1.0,
+                "recommended_low_delta_strength": 1.0,
+                "reason": "Core body did not produce a clean PASS/VIDEO; keep neutral values.",
+            }
+
+        low_status = str(low_card.get("status", "") or "")
+        frame_status = str(frame_card.get("status", "") or "")
+        tail_status = str(tail_card.get("status", "") or "")
+        background_status = str(background_card.get("status", "") or "")
+        background_pressure = max(
+            clamp(background_card.get("background_anchor_pressure", 0.0), 0.0, 1.0),
+            clamp(background_card.get("global_scene_drift_score", 0.0), 0.0, 1.0),
+        )
+        background_temporal_mean = clamp(background_card.get("background_temporal_mean", 0.0), 0.0, 999.0)
+        center_background_ratio = clamp(background_card.get("center_background_ratio", 0.0), 0.0, 999.0)
+        roi_means = background_card.get("roi_temporal_means", {}) if isinstance(background_card.get("roi_temporal_means", {}), dict) else {}
+        top_band_temporal_mean = clamp(roi_means.get("top_band_background", 0.0), 0.0, 999.0)
+        top_band_pressure = clamp((top_band_temporal_mean - 6.5) / 3.0, 0.0, 1.0)
+        spatial_anchor_status = str(spatial_card.get("status", "") or "")
+        spatial_anchor_pressure = clamp(spatial_card.get("spatial_anchor_pressure", 0.0), 0.0, 1.0)
+        background_region_pressure = clamp(spatial_card.get("background_region_pressure", 0.0), 0.0, 1.0)
+        dominant_background_region = str(spatial_card.get("dominant_background_region", "") or "")
+        strategy_pressure = clamp(resolver.get("strategy_return_pressure", 0.0), 0.0, 1.0)
+        topology_sync = clamp(matrix.get("topology_sync_score", 0.5), 0.0, 1.0)
+        post_seam = clamp(summary.get("cascade_post_seam_acceleration_score", 0.0), 0.0, 1.0)
+        late_segment_pressure = post_seam if str(summary.get("cascade_post_seam_attribution", "") or "") == "late_segment_spike" else 0.0
+
+        background_hot = (
+            background_status == "global_scene_drift_high"
+            or background_pressure >= 0.55
+            or top_band_pressure >= 0.55
+            or spatial_anchor_pressure >= 0.55
+            or background_region_pressure >= 0.55
+            or (background_temporal_mean >= 4.75 and center_background_ratio < 1.45)
+        )
+        too_hot = (
+            "frame_spike_high" in frame_status
+            or "tail_strategy_high" in tail_status
+            or background_hot
+            or strategy_pressure >= 0.82
+            or post_seam >= 0.45
+        )
+        useful_pressure = (
+            "low_pressure_high" in low_status
+            or strategy_pressure >= 0.55
+            or topology_sync < 0.70
+            or background_pressure >= 0.35
+        )
+
+        recommended_low = current_low
+        reason_parts = []
+        if background_hot:
+            recommended_low = max(1.0, min(current_low, 1.0015))
+            reason_parts.append("background/top/late drift is high, so useful motion must return to SourceAnchor before low pressure grows")
+        elif too_hot:
+            recommended_low = max(1.0, min(current_low, 1.002))
+            reason_parts.append("visible/frame or seam pressure is high, so low branch is pulled toward neutral")
+        elif useful_pressure and current_low < 1.003:
+            recommended_low = 1.003
+            reason_parts.append("pressure exists without a hard seam block, so test the known safe low window")
+        elif useful_pressure and 1.003 <= current_low <= 1.005:
+            recommended_low = min(1.005, round(current_low + 0.001, 4))
+            reason_parts.append("current low window stayed bounded; next run may test one small step higher")
+        elif current_low > 1.005:
+            recommended_low = 1.003
+            reason_parts.append("requested low branch is above the safe public research window")
+        else:
+            recommended_low = 1.003
+            reason_parts.append("neutral or low-pressure run; use the conservative calibrated low candidate")
+
+        recommended_low = max(1.0, min(1.006, round(recommended_low, 4)))
+        confidence_score = 0.35
+        if summary.get("status") == "PASS":
+            confidence_score += 0.25
+        if bool(summary.get("route_complete", False)):
+            confidence_score += 0.15
+        if post_seam < 0.35:
+            confidence_score += 0.10
+        if topology_sync >= 0.45:
+            confidence_score += 0.10
+        if too_hot:
+            confidence_score -= 0.20
+        if background_hot:
+            confidence_score -= 0.10
+        confidence = "high" if confidence_score >= 0.75 else "medium" if confidence_score >= 0.50 else "low"
+
+        return {
+            "status": "recommended",
+            "confidence": confidence,
+            "confidence_score": round(max(0.0, min(1.0, confidence_score)), 4),
+            "recommended_math_control_mode": "STRATEGY_PRESSURE_WINDOW",
+            "recommended_high_delta_strength": round(max(0.98, min(1.02, current_high if abs(current_high - 1.0) > 1e-9 else 1.0)), 4),
+            "recommended_low_delta_strength": recommended_low,
+            "reason": "; ".join(reason_parts),
+            "evidence": {
+                "low_branch_status": low_status,
+                "frame_spike_status": frame_status,
+                "tail_strategy_status": tail_status,
+                "background_anchor_status": background_status,
+                "spatial_anchor_status": spatial_anchor_status,
+                "background_anchor_pressure": background_pressure,
+                "spatial_anchor_pressure": spatial_anchor_pressure,
+                "background_region_pressure": background_region_pressure,
+                "dominant_background_region": dominant_background_region,
+                "background_temporal_mean": background_temporal_mean,
+                "center_background_ratio": center_background_ratio,
+                "top_band_temporal_mean": top_band_temporal_mean,
+                "top_band_pressure": top_band_pressure,
+                "late_segment_pressure": late_segment_pressure,
+                "strategy_return_pressure": strategy_pressure,
+                "topology_sync_score": topology_sync,
+                "post_seam_acceleration_score": post_seam,
+            },
+        }
+
+    def _event_auto_calibration_finalize(self, packet, execution_records, saved_report_path="", saved_video_path=""):
+        state = getattr(self, "_event_auto_calibration_state", {}) or {}
+        mode = str(state.get("mode", "OFF") or "OFF").upper()
+        if mode == "OFF":
+            return {
+                "stage": "EventAutoCalibrationResult",
+                "status": "disabled",
+                "mode": mode,
+                "active_control_allowed": False,
+            }
+        recommendation = self._event_auto_calibration_recommendation_from_records(execution_records)
+        gate_status = ""
+        result_status = ""
+        final_output_ok = False
+        try:
+            meta = packet.get("metadata", {}) if isinstance(packet, dict) else {}
+            gate_status = str(meta.get("EventCoreBodyCompletionGate", "") or meta.get("completion_gate", "") or "").upper()
+            program_status = meta.get("event_program_status", {}) or {}
+            if isinstance(program_status, dict):
+                result_status = str(program_status.get("result_status", "") or "").upper()
+            final_output_ok = bool(meta.get("final_output_ok", False) or program_status.get("final_output_ok", False) if isinstance(program_status, dict) else False)
+        except Exception:
+            gate_status = ""
+            result_status = ""
+            final_output_ok = False
+        rec_status = str(recommendation.get("status", "") if isinstance(recommendation, dict) else "").lower()
+        rec_confidence = str(recommendation.get("confidence", "") if isinstance(recommendation, dict) else "").lower()
+        has_video = bool(str(saved_video_path or "").strip())
+        scene_key = str(state.get("scene_key", "") or "")
+        cache_write_allowed = bool(
+            scene_key
+            and has_video
+            and rec_status in ("recommended", "ok")
+            and rec_confidence in ("high", "medium")
+            and result_status in ("", "VIDEO")
+            and gate_status in ("", "PASS")
+            and (final_output_ok or has_video)
+        )
+        cache = self._event_auto_calibration_load_cache()
+        entries = cache.setdefault("entries", {})
+        if cache_write_allowed:
+            entries[scene_key] = {
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+                "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+                "source_report_path": str(saved_report_path or ""),
+                "source_video_path": str(saved_video_path or ""),
+                "scene_key_source": state.get("scene_key_source", {}),
+                "requested": state.get("requested", {}),
+                "recommendation": recommendation,
+            }
+        cache_path = self._event_auto_calibration_write_cache(cache) if cache_write_allowed else str(self._event_auto_calibration_cache_path())
+        return {
+            "stage": "EventAutoCalibrationResult",
+            "status": "cached_recommendation" if cache_write_allowed else ("missing_scene_key" if not scene_key else "cache_write_skipped"),
+            "mode": mode,
+            "scene_key": scene_key,
+            "cache_path": cache_path,
+            "cache_entry_written": bool(cache_write_allowed and cache_path),
+            "cache_write_guard": {
+                "allowed": bool(cache_write_allowed),
+                "has_video": bool(has_video),
+                "gate_status": gate_status,
+                "result_status": result_status,
+                "final_output_ok": bool(final_output_ok),
+                "recommendation_status": rec_status,
+                "recommendation_confidence": rec_confidence,
+                "policy": "do_not_overwrite_good_cache_with_cancelled_partial_or_low_confidence_runs",
+            },
+            "applied_this_run": state.get("applied", {}),
+            "recommendation": recommendation,
+            "next_run_policy": "Set auto_calibration_mode=AUTO_APPLY with the same scene-key to reuse this recommendation.",
+            "active_control_allowed": mode == "AUTO_APPLY",
+            "formula": "Calibration is a Strategy Return: this run observes route pressure, writes a scene-local recommendation, and the next run may reuse it.",
         }
 
     def run(
@@ -3186,6 +3720,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         math_control_mode,
         high_delta_strength,
         low_delta_strength,
+        strategy_field_mode,
         decode_tile_size,
         decode_overlap,
         decode_temporal_size,
@@ -3207,8 +3742,15 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         mask=None,
         use_formula_recommendation=False,
         prompt_transcode_mode="REPORT_ONLY",
-        selected_tail_index=0,
+        auto_calibration_mode="OFF",
+        bridge_wan_alpha=0.10,
+        bridge_concat_alpha=0.06,
+        bridge_wan_max_step=0.45,
+        bridge_concat_max_step=0.28,
+        selected_tail_index=-1,
         id=None,
+        prompt=None,
+        extra_pnginfo=None,
     ):
         self._event_strategy_coupling = {"low_strength_multiplier": 1.0}
         self._event_strategy_control_surface_plan_signature = ""
@@ -3240,6 +3782,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             math_control_mode=math_control_mode,
             high_delta_strength=high_delta_strength,
             low_delta_strength=low_delta_strength,
+            strategy_field_mode=strategy_field_mode,
             decode_tile_size=decode_tile_size,
             decode_overlap=decode_overlap,
             decode_temporal_size=decode_temporal_size,
@@ -3251,6 +3794,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             sampler_trace_mode=sampler_trace_mode,
             sampler_trace_max_steps=sampler_trace_max_steps,
             prompt_transcode_mode=prompt_transcode_mode,
+            auto_calibration_mode=auto_calibration_mode,
+            bridge_wan_alpha=bridge_wan_alpha,
+            bridge_concat_alpha=bridge_concat_alpha,
+            bridge_wan_max_step=bridge_wan_max_step,
+            bridge_concat_max_step=bridge_concat_max_step,
         )
         normalized = normalization.get("normalized", {})
         self._event_input_normalization = normalization
@@ -3273,6 +3821,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         math_control_mode = str(normalized.get("math_control_mode", "OBSERVE_ONLY"))
         high_delta_strength = float(normalized.get("high_delta_strength", 1.0))
         low_delta_strength = float(normalized.get("low_delta_strength", 1.0))
+        strategy_field_mode = str(normalized.get("strategy_field_mode", "OFF"))
         decode_tile_size = int(normalized.get("decode_tile_size", 512))
         decode_overlap = int(normalized.get("decode_overlap", 64))
         decode_temporal_size = int(normalized.get("decode_temporal_size", 32))
@@ -3284,6 +3833,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         sampler_trace_mode = str(normalized.get("sampler_trace_mode", "OFF"))
         sampler_trace_max_steps = int(normalized.get("sampler_trace_max_steps", 64))
         prompt_transcode_mode = str(normalized.get("prompt_transcode_mode", "REPORT_ONLY"))
+        auto_calibration_mode = str(normalized.get("auto_calibration_mode", "OFF"))
+        bridge_wan_alpha = float(normalized.get("bridge_wan_alpha", 0.10))
+        bridge_concat_alpha = float(normalized.get("bridge_concat_alpha", 0.06))
+        bridge_wan_max_step = float(normalized.get("bridge_wan_max_step", 0.45))
+        bridge_concat_max_step = float(normalized.get("bridge_concat_max_step", 0.28))
         selected_tail_index_n = _normalize_selected_tail_index_value(selected_tail_index, default=-1)
         branch_mode = str(normalized.get("branch_mode", "SINGLE"))
         cascade_mode = str(normalized.get("cascade_mode", "SOLO_1"))
@@ -3307,19 +3861,101 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             negative_prompt = (str(negative_prompt or "").rstrip() + "\n"
                 "upward moving droplets, reversing sweat, liquid moving against gravity, flickering specular noise, "
                 "jumping highlights, temporal reset, frame snap, duplicated motion boundary, jittering droplets, crawling texture")
+
+        auto_calibration_state = self._event_auto_calibration_prepare(
+            mode=auto_calibration_mode,
+            positive_prompt=positive_prompt,
+            negative_prompt=negative_prompt,
+            source_image_file=source_image_file,
+            math_control_mode=math_control_mode,
+            high_delta_strength=high_delta_strength,
+            low_delta_strength=low_delta_strength,
+            settings={
+                "cascade_count": cascade_count,
+                "frames_per_cascade": frames_per_cascade,
+                "width": width,
+                "height": height,
+                "fps": fps,
+                "seed": seed,
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
+                "global_steps": global_steps,
+                "primary_cfg": primary_cfg,
+                "secondary_cfg": secondary_cfg,
+                "primary_start_step": primary_start_step,
+                "primary_end_step": primary_end_step,
+                "secondary_start_step": secondary_start_step,
+                "secondary_end_step": secondary_end_step,
+                "image_crop": image_crop,
+                "prompt_transcode_mode": prompt_transcode_mode,
+                "strategy_field_mode": strategy_field_mode,
+                "bridge_wan_alpha": bridge_wan_alpha,
+                "bridge_concat_alpha": bridge_concat_alpha,
+                "bridge_wan_max_step": bridge_wan_max_step,
+                "bridge_concat_max_step": bridge_concat_max_step,
+            },
+        )
+        applied_calibration = auto_calibration_state.get("applied", {}) if isinstance(auto_calibration_state, dict) else {}
+        if applied_calibration:
+            math_control_mode = str(applied_calibration.get("math_control_mode", math_control_mode))
+            high_delta_strength = float(applied_calibration.get("high_delta_strength", high_delta_strength))
+            low_delta_strength = float(applied_calibration.get("low_delta_strength", low_delta_strength))
+            if isinstance(normalized, dict):
+                normalized["math_control_mode"] = math_control_mode
+                normalized["high_delta_strength"] = high_delta_strength
+                normalized["low_delta_strength"] = low_delta_strength
+                normalized["auto_calibration_mode"] = auto_calibration_mode
+
+        background_preservation = {}
+        if isinstance(applied_calibration, dict):
+            background_preservation = applied_calibration.get("background_anchor_preservation", {}) or {}
+            if not isinstance(background_preservation, dict):
+                background_preservation = {}
+        self._event_background_anchor_preservation_control = {
+            "status": str(background_preservation.get("status", "inactive") or "inactive"),
+            "source": str(background_preservation.get("source", "") or ""),
+            "background_anchor_status": str(background_preservation.get("background_anchor_status", "") or ""),
+            "background_anchor_pressure": float(background_preservation.get("background_anchor_pressure", 0.0) or 0.0),
+            "late_segment_pressure": float(background_preservation.get("late_segment_pressure", 0.0) or 0.0),
+            "top_band_pressure": float(background_preservation.get("top_band_pressure", 0.0) or 0.0),
+            "spatial_anchor_pressure": float(background_preservation.get("spatial_anchor_pressure", 0.0) or 0.0),
+            "background_region_pressure": float(background_preservation.get("background_region_pressure", 0.0) or 0.0),
+            "dominant_background_region": str(background_preservation.get("dominant_background_region", "") or ""),
+            "low_positive_intent_multiplier": float(background_preservation.get("low_positive_intent_multiplier", 1.0) or 1.0),
+            "max_delta_window_multiplier": float(background_preservation.get("max_delta_window_multiplier", 1.0) or 1.0),
+            "temporal_stability_multiplier": float(background_preservation.get("temporal_stability_multiplier", 1.0) or 1.0),
+            "spatial_carrier_preservation_map": background_preservation.get("spatial_carrier_preservation_map", {}) if isinstance(background_preservation.get("spatial_carrier_preservation_map", {}), dict) else {},
+            "policy": str(background_preservation.get("policy", "") or ""),
+            "scene_key": str(auto_calibration_state.get("scene_key", "") if isinstance(auto_calibration_state, dict) else ""),
+            "mode": str(auto_calibration_mode or "OFF").upper(),
+        }
+
         self._event_math_control_mode = str(math_control_mode or "OBSERVE_ONLY")
         self._event_delta_strengths = {
             "high": float(high_delta_strength),
             "low": float(low_delta_strength),
         }
+        self._event_latent_memory_bridge_controls = {
+            "wan_alpha": float(bridge_wan_alpha),
+            "concat_alpha": float(bridge_concat_alpha),
+            "wan_max_step": float(bridge_wan_max_step),
+            "concat_max_step": float(bridge_concat_max_step),
+        }
+        self._event_strategy_field_mode = str(strategy_field_mode or "OFF").upper()
         self._event_requested_math_controls = {
             "math_control_mode": str(math_control_mode or "OBSERVE_ONLY"),
             "high_delta_strength": float(high_delta_strength),
             "low_delta_strength": float(low_delta_strength),
+            "latent_memory_bridge": dict(self._event_latent_memory_bridge_controls),
+            "strategy_field_mode": str(strategy_field_mode or "OFF").upper(),
             "active_math_sampler_path": (
                 "unified_strategy_pressure_window"
                 if str(math_control_mode or "OBSERVE_ONLY").upper() == "STRATEGY_PRESSURE_WINDOW"
-                else "semantic_overlay_native_sampler_when_latent_delta_scale"
+                else (
+                    "segment_entry_latent_memory_bridge"
+                    if str(math_control_mode or "OBSERVE_ONLY").upper() == "LATENT_MEMORY_BRIDGE"
+                    else "semantic_overlay_native_sampler_when_latent_delta_scale"
+                )
             ),
             "high_low_strategy_carrier_coupling": True,
             "precision_step": 0.0001,
@@ -3328,7 +3964,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "sampler_trace_max_steps": int(sampler_trace_max_steps or 64),
             "prompt_transcode_mode": str(prompt_transcode_mode or "REPORT_ONLY").upper(),
             "selected_tail_index": int(selected_tail_index_n),
+            "auto_calibration_mode": str(auto_calibration_mode or "OFF").upper(),
+            "auto_calibration_scene_key": str(auto_calibration_state.get("scene_key", "") if isinstance(auto_calibration_state, dict) else ""),
+            "auto_calibration_status": str(auto_calibration_state.get("status", "") if isinstance(auto_calibration_state, dict) else ""),
         }
+        self._event_auto_calibration_state = auto_calibration_state
         self._event_sampler_trace = {
             "mode": str(sampler_trace_mode or "OFF").upper(),
             "max_steps": int(sampler_trace_max_steps or 64),
@@ -3388,7 +4028,10 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             pause_after_cascade_4=pause_after_cascade_4,
             use_formula_recommendation=bool(use_formula_recommendation),
             prompt_transcode_mode=prompt_transcode_mode,
+            auto_calibration_mode=auto_calibration_mode,
             selected_tail_index=int(selected_tail_index_n),
+            workflow_prompt=prompt,
+            workflow_extra_pnginfo=extra_pnginfo,
             output_folder_mode="DEFAULT",
             output_folder="default",
             custom_output_folder="",

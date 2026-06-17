@@ -22,7 +22,7 @@ The special feature is the pause-and-continue panel.
 When a cascade boundary is reached, Singularity shows:
 
 ```text
-Source | Tail 1 | Tail 2 | Tail 3 | Result
+Source | Tail 1 | Tail 2 | Tail 3 | Tail 4 | Tail 5 | Result
 ```
 
 You click the tail frame that should become the source for the next cascade, then press `Resume Cascade / Continue`.
@@ -40,6 +40,7 @@ This gives you direct control over the continuation point instead of letting the
 - Saves one final stitched video.
 - Saves markdown reports with runtime, cascade, motion, and delta diagnostics.
 - Keeps a clean public interface with research-only formula recommendation visible but off by default.
+- Keeps ComfyUI widget values stable after restart/save/reload.
 
 ## Why This Is Useful
 
@@ -54,27 +55,30 @@ Wan extension workflows can become messy very quickly:
 
 Singularity turns that into a controlled loop inside one node. You still make the creative decision, but the node handles the pause point, the chosen frame, continuation, final stitching, and report evidence.
 
-## r91 Public Stabilization Update
+## r113 Public Stabilization Update
 
-This r91 public stabilization update focuses on making the node cleaner, easier to install, and safer to test in modern ComfyUI Desktop.
+This r113 public stabilization update focuses on making the node cleaner, easier to install, and safer to test in modern ComfyUI Desktop.
 
-It keeps the earlier pause UI recovery work, adds the newer Strategy Control Surface reporting layer, and cleans the public node surface for fresh installs.
+It keeps the earlier pause UI recovery work, adds newer Strategy / continuity reporting layers, expands tail selection to five candidates, and fixes a widget-order issue that could make saved workflow values appear in the wrong fields after reload.
 
-New in r91:
+New in r113:
 
-- Visible title: `Singularity R91`.
-- Cleaner `math_control_mode` dropdown.
+- Visible title: `Singularity R113`.
+- Fixes ComfyUI Desktop widget value drift after save/reload.
+- Keeps backend widget order stable.
+- Adds a severe drift repair guard for already-corrupted workflow states.
+- Five tail-frame candidates instead of three.
 - Public starter node has no bundled image and no positive prompt.
 - Built-in Wan-style Chinese negative prompt remains as the starter negative prompt.
 - Two-cascade public starter route remains the default.
 - Native ComfyUI image upload button is preserved.
 - Detached Source / Tail / Result panel remains available for cascade continuation.
-- Reports now include the newer Strategy Control Surface / Strategy Matrix evidence.
+- Reports include cascade, runtime, Strategy Control Surface, Strategy Matrix, input-normalization, and completion evidence.
 - Experimental math modes remain available, but they should be treated as research tools.
 
 ## Public Default Settings
 
-The default r91 node is meant to be a clean starter:
+The default r113 node is meant to be a clean starter:
 
 ```text
 cascade_count = 2

@@ -2,7 +2,7 @@
 
 Singularity is a public-alpha ComfyUI custom node for Wan image-to-video cascade continuation.
 
-Its main job is simple: generate a Wan video segment, pause at the cascade boundary, show you the source image and three tail-frame candidates, let you choose the frame that should continue the video, resume the same run, and save one final stitched video.
+Its main job is simple: generate a Wan video segment, pause at the cascade boundary, show you the source image and five tail-frame candidates, let you choose the frame that should continue the video, resume the same run, and save one final stitched video.
 
 This is built for Wan I2V / V2V users who want longer videos without rebuilding a large continuation workflow by hand after every short clip.
 
@@ -12,7 +12,7 @@ This is built for Wan I2V / V2V users who want longer videos without rebuilding 
 - Wan I2V cascade generation.
 - Up to five cascade segments in this public alpha.
 - Optional pause after cascade 1, 2, 3, and 4.
-- A detached Source / Tail 1 / Tail 2 / Tail 3 / Result panel under the node.
+- A detached Source / Tail 1 / Tail 2 / Tail 3 / Tail 4 / Tail 5 / Result panel under the node.
 - Manual tail-frame selection before continuation.
 - Same-run continuation instead of separate unrelated segment renders.
 - One final stitched video at the end.
@@ -59,13 +59,14 @@ In a Wan High/Low setup, `primary_model` is usually the high-noise / structure m
 
 ## Current Release Notes
 
-The current public stabilization release is `0.1.1-r91`.
-
-- The visible node title includes the R-version, for example `Singularity R91`.
-- r91 is the public stabilization pass after the r90 Strategy Control Surface gate.
-- r91 cleans the visible `math_control_mode` dropdown while keeping backend compatibility with old saved workflow values.
-- r91 keeps the public starter node clean: no source image, empty positive prompt, built-in Wan-style Chinese negative prompt, reports enabled, two cascades, one pause.
-- r91 smoke-test status: two-cascade pause/continue produced `VIDEO`, `EventCoreBodySummary = PASS`, final stitched video saved, and neutral `STRATEGY_PRESSURE_WINDOW` stayed visually identical to the neutral baseline.
+- The current public stabilization release is `0.1.1-r113`.
+- The visible node title includes the R-version: `Singularity R113`.
+- r113 is a ComfyUI Desktop / modern frontend hotfix and stabilization release after the r112 widget-order regression.
+- r113 keeps ComfyUI's backend widget order stable so saved workflow values stay in the correct fields after restart/save/reload.
+- r113 adds a severe widget-drift repair guard for workflows that already show impossible shifted values, such as `width = 49`, `fps = 608`, or `global_steps = NaN`.
+- r113 keeps the public starter node clean: no source image, empty positive prompt, built-in Wan-style Chinese negative prompt, reports enabled, two cascades, one pause.
+- r113 smoke-test status: two-cascade pause/continue produced `VIDEO`, `CompletionGate = PASS`, `EventCoreBodySummary = PASS`, final stitched video saved, `adjustment_count = 0`, and no severe widget drift repair was triggered.
+- The pause panel now exposes five tail-frame slots instead of three, giving you more continuation choices.
 - `image_crop = wan_native` keeps the source image as the SourceAnchor until official Wan normalization.
 - Prompt transform modes are now prompt-pure: they build a semantic density/context map for the report, but they do not inject formula language into the CLIP prompt.
 - Cascade Continue now reuses the current clean prompt StrategyCandidate when the prompt identity is unchanged.
@@ -116,24 +117,42 @@ formula recommendation = visible, experimental, and off by default
 
 If `704 x 1280` is too heavy for your GPU, reduce the size before rendering. A lighter test size such as `416 x 608` is useful for fast debugging.
 
-## r91 Public Stabilization
+## r113 Public Stabilization
 
-r91 is the current public stabilization update.
+r113 is the current public stabilization update.
 
-It combines the pause/continue UI fixes from the earlier public alpha line with the newer r90 Strategy Control Surface reports and the cleaned public interface.
+It combines the pause/continue UI work from the earlier public alpha line with the newer Strategy reports and a critical ComfyUI Desktop widget-order fix.
 
-New and stabilized in r91:
+New and stabilized in r113:
 
-- Visible node title: `Singularity R91`.
-- Cleaner `math_control_mode` dropdown.
+- Visible node title: `Singularity R113`.
+- Backend widget order is stable again; saved workflow values should remain in the correct fields.
 - Public starter node has no bundled image and no positive prompt.
 - Built-in Wan-style Chinese negative prompt remains as the starter negative prompt.
 - Source / Tail / Result panel remains detached under the node.
+- Tail selection now shows five continuation candidate slots.
 - Native ComfyUI image upload button is preserved.
-- Same-run pause/continue still works for two-cascade and multi-cascade workflows.
+- Same-run pause/continue works for two-cascade and multi-cascade workflows.
 - Final output is one stitched video.
-- Reports include cascade, motion, delta, runtime, Strategy Matrix, and Strategy Control Surface evidence.
+- Reports include cascade, motion, delta, runtime, Strategy Matrix, Strategy Control Surface, and widget/input normalization evidence.
 - Experimental math is available, but the default remains conservative.
+
+The r113 smoke test used:
+
+```text
+runtime_version = 0.1.1-r113
+result_status = VIDEO
+CompletionGate = PASS
+cascade_count = 2
+completed_segments = 2
+frames_per_cascade = 49
+width = 416
+height = 608
+fps = 16
+adjustment_count = 0
+```
+
+The public package is labeled `0.1.1-r113`.
 
 ## r62 Pause UI Hotfix
 
@@ -165,13 +184,13 @@ The Source / Tail / Result media panel is also rendered immediately for the node
 When a pause is reached, Singularity shows a detached panel under the node:
 
 ```text
-Source | Tail 1 | Tail 2 | Tail 3 | Result
+Source | Tail 1 | Tail 2 | Tail 3 | Tail 4 | Tail 5 | Result
 ```
 
 What each tile means:
 
 - `Source`: the current source frame for the segment.
-- `Tail 1`, `Tail 2`, `Tail 3`: continuation candidates from the end of the segment.
+- `Tail 1` through `Tail 5`: continuation candidates from the end of the segment.
 - `Result`: a preview of the stitched video up to the current pause boundary when available.
 
 The selected tail is outlined in green. That selected frame becomes the source for the next cascade segment.
@@ -188,7 +207,7 @@ What you want the video to show.
 
 `negative_prompt`
 
-What you want the video to avoid. r62 includes a simple base negative prompt by default so a new node is not filled with a test scene.
+What you want the video to avoid. r113 includes a simple Wan-style base negative prompt by default so a new node is not filled with a test scene.
 
 `cascade_count`
 
@@ -226,11 +245,11 @@ At `16 fps`:
 
 `width` and `height`
 
-The generation resolution. The r62 default is a 720-class vertical setting (`704 x 1280`). Lower it if you need faster tests or have limited VRAM.
+The generation resolution. The r113 default is a 720-class vertical setting (`704 x 1280`). Lower it if you need faster tests or have limited VRAM.
 
 `seed`
 
-The random seed. r62 defaults to `123` so comparisons can start from a stable baseline.
+The random seed. r113 defaults to `123` so comparisons can start from a stable baseline.
 
 `image_crop`
 
@@ -278,7 +297,7 @@ STRATEGY_PRESSURE_WINDOW = bounded pressure-window policy inside the Strategy Co
 DEEP_STEP_DELTA_CONTROL = experimental deep research mode, high risk
 ```
 
-r62 public default is `OBSERVE_ONLY`.
+r113 public default is `OBSERVE_ONLY`.
 
 `high_delta_strength`
 
@@ -334,9 +353,9 @@ When `save_report = true`, Singularity writes a markdown report with evidence su
 
 Important: `CompletionGate = PASS` means the structural route completed and a final video exists. It does not mean the video is visually perfect. Always inspect the video.
 
-## r62 UI Fixes
+## r113 UI And Widget Fixes
 
-r62 focuses heavily on ComfyUI Desktop / modern frontend behavior:
+r113 focuses heavily on ComfyUI Desktop / modern frontend behavior:
 
 - the detached Source / Tail / Result panel appears before generation starts;
 - the panel uses the stable high overlay layer so the ComfyUI canvas does not hide it;
@@ -344,6 +363,8 @@ r62 focuses heavily on ComfyUI Desktop / modern frontend behavior:
 - the native ComfyUI image upload button is kept;
 - oversized preview noise is kept under control;
 - the research formula-recommendation toggle is visible again but off by default;
+- backend widget order is preserved to prevent save/reload value drift;
+- severe positional widget drift is detected and reset to safe defaults when possible;
 - defaults are reset for a clean public node.
 
 ## Current Limits

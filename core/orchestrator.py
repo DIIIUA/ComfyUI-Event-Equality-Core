@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r91"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R91 Public Stabilization"
-EVENT_HORIZON_BODY_VERSION = "0.1-r91"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
+EVENT_HORIZON_BODY_VERSION = "0.1-r113"
 
 
 def _event_json_safe(value, depth=0):
@@ -343,7 +343,7 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
     # No IMAGE/LATENT outputs here. IMAGE outputs caused ComfyUI/PreviewImage-style
     # behavior and made the node look like an image-producing endpoint.
     # Video/image files are saved internally; strings are the final visible outputs.
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "IMAGE", "IMAGE", "IMAGE")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "IMAGE", "IMAGE", "IMAGE", "IMAGE", "IMAGE")
     RETURN_NAMES = (
         "status",
         "saved_video_path",
@@ -352,6 +352,8 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
         "tail_frame_0",
         "tail_frame_1",
         "tail_frame_2",
+        "tail_frame_3",
+        "tail_frame_4",
     )
     FUNCTION = "run"
     CATEGORY = "Singularity/Singularity"
@@ -637,6 +639,191 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
             pass
         return tensors
 
+    def _event_tensor_probe(self, obj, *, label="", max_tensors=4, sample_size=128):
+        """
+        Report-only tensor fingerprint used for raw-vs-Singularity route parity.
+        It samples a tiny, deterministic subset of tensor values and records shape
+        and statistics without mutating the object or moving the full tensor.
+        """
+        probe = {
+            "label": str(label or ""),
+            "object_present": obj is not None,
+            "object_type": type(obj).__name__ if obj is not None else "NoneType",
+            "object_module": type(obj).__module__ if obj is not None else "",
+            "tensor_count": 0,
+            "tensors": [],
+            "probe_policy": "metadata_and_small_sample_only_no_tensor_mutation",
+        }
+        try:
+            import torch
+            tensors = self._extract_tensors_from_obj(obj, max_items=int(max_tensors))
+            probe["tensor_count"] = len(tensors)
+            for tensor_path, tensor in tensors[: int(max_tensors)]:
+                try:
+                    td = tensor.detach()
+                    tf = td.float()
+                    safe = torch.nan_to_num(tf, nan=0.0, posinf=0.0, neginf=0.0)
+                    finite = torch.isfinite(tf)
+                    total = int(tf.numel())
+                    finite_count = int(finite.sum().item()) if total else 0
+                    flat = safe.reshape(-1)
+                    sample_hash = ""
+                    sample_count = 0
+                    if total:
+                        sample_count = min(int(sample_size), total)
+                        if sample_count == 1:
+                            sample = flat[:1]
+                        else:
+                            idx = torch.linspace(
+                                0,
+                                total - 1,
+                                steps=sample_count,
+                                device=flat.device,
+                            ).round().long().clamp_(0, total - 1)
+                            sample = flat[idx]
+                        sample_np = sample.detach().cpu().numpy().astype("float32", copy=False)
+                        sample_hash = hashlib.sha256(sample_np.tobytes()).hexdigest()[:16]
+
+                    tensor_probe = {
+                        "path": str(tensor_path),
+                        "shape": [int(x) for x in list(td.shape)],
+                        "dtype": str(getattr(td, "dtype", "")),
+                        "device": str(getattr(td, "device", "")),
+                        "total": total,
+                        "finite_ratio": float(finite_count / total) if total else 1.0,
+                        "mean": float(safe.mean().item()) if total else 0.0,
+                        "std": float(safe.std().item()) if total > 1 else 0.0,
+                        "min": float(safe.min().item()) if total else 0.0,
+                        "max": float(safe.max().item()) if total else 0.0,
+                        "norm": float(torch.linalg.vector_norm(safe).item()) if total else 0.0,
+                        "sample_count": sample_count,
+                        "sample_hash": sample_hash,
+                    }
+                    stable = {
+                        "path": tensor_probe["path"],
+                        "shape": tensor_probe["shape"],
+                        "dtype": tensor_probe["dtype"],
+                        "total": tensor_probe["total"],
+                        "finite_ratio": round(tensor_probe["finite_ratio"], 8),
+                        "mean": round(tensor_probe["mean"], 8),
+                        "std": round(tensor_probe["std"], 8),
+                        "min": round(tensor_probe["min"], 8),
+                        "max": round(tensor_probe["max"], 8),
+                        "norm": round(tensor_probe["norm"], 8),
+                        "sample_hash": sample_hash,
+                    }
+                    tensor_probe["route_signature"] = hashlib.sha256(
+                        json.dumps(stable, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+                    ).hexdigest()[:16]
+                    probe["tensors"].append(tensor_probe)
+                except Exception as tensor_exc:
+                    probe["tensors"].append({
+                        "path": str(tensor_path),
+                        "status": "inspect_failed",
+                        "error": str(tensor_exc)[:240],
+                    })
+        except Exception as exc:
+            probe["status"] = "failed"
+            probe["error"] = str(exc)[:240]
+
+        stable_probe = {
+            "object_type": probe.get("object_type"),
+            "object_module": probe.get("object_module"),
+            "tensor_count": probe.get("tensor_count"),
+            "tensor_signatures": [
+                t.get("route_signature", "")
+                for t in probe.get("tensors", [])
+                if isinstance(t, dict)
+            ],
+        }
+        probe["route_signature"] = hashlib.sha256(
+            json.dumps(stable_probe, sort_keys=True, default=str).encode("utf-8", errors="ignore")
+        ).hexdigest()[:16]
+        probe.setdefault("status", "recorded")
+        return probe
+
+    def _record_raw_vs_singularity_parity_probe(
+        self,
+        records,
+        stage,
+        *,
+        route_kind,
+        input_state=None,
+        output_state=None,
+        reference_state=None,
+        metadata=None,
+    ):
+        record = {
+            "stage": str(stage),
+            "status": "recorded",
+            "probe_version": "raw_vs_singularity_parity_probe_v1",
+            "route_kind": str(route_kind),
+            "input_probe": self._event_tensor_probe(input_state, label=f"{stage}.input") if input_state is not None else None,
+            "output_probe": self._event_tensor_probe(output_state, label=f"{stage}.output") if output_state is not None else None,
+            "reference_probe": self._event_tensor_probe(reference_state, label=f"{stage}.reference") if reference_state is not None else None,
+            "metadata": _event_json_safe(metadata or {}),
+            "control_mode": "REPORT_ONLY",
+            "formula": (
+                "Raw-vs-Singularity parity reads the event boundary as "
+                "OutcomePrevious + ObservedBehavior -> StrategyCarrier -> OutcomeNext, "
+                "without mutating tensors."
+            ),
+        }
+        records.append(record)
+        return record
+
+    def _record_sampler_route_parity_probe(
+        self,
+        records,
+        stage,
+        *,
+        branch_name,
+        route_variant,
+        latent_before=None,
+        latent_after=None,
+        model=None,
+        seed=None,
+        steps=None,
+        cfg=None,
+        sampler_name=None,
+        scheduler=None,
+        start_at_step=None,
+        end_at_step=None,
+        add_noise=None,
+        return_leftover_noise=None,
+        sd3_shift=None,
+        segment_index=None,
+        extra=None,
+    ):
+        try:
+            model_probe = self._probe_operator_route_object(model, f"{branch_name}_model") if model is not None else None
+        except Exception as exc:
+            model_probe = {"status": "failed", "error": str(exc)[:240]}
+        return self._record_raw_vs_singularity_parity_probe(
+            records,
+            stage,
+            route_kind="sampler_window",
+            input_state=latent_before,
+            output_state=latent_after,
+            metadata={
+                "branch_name": str(branch_name),
+                "route_variant": str(route_variant),
+                "segment_index": int(segment_index) if segment_index is not None else None,
+                "seed": int(seed) if seed is not None else None,
+                "steps": int(steps) if steps is not None else None,
+                "cfg": float(cfg) if cfg is not None else None,
+                "sampler_name": str(sampler_name) if sampler_name is not None else "",
+                "scheduler": str(scheduler) if scheduler is not None else "",
+                "start_at_step": int(start_at_step) if start_at_step is not None else None,
+                "end_at_step": int(end_at_step) if end_at_step is not None else None,
+                "add_noise": str(add_noise) if add_noise is not None else "",
+                "return_leftover_noise": str(return_leftover_noise) if return_leftover_noise is not None else "",
+                "sd3_shift": float(sd3_shift) if sd3_shift is not None else None,
+                "model_probe": model_probe,
+                "extra": extra or {},
+            },
+        )
+
     def _finite_guard(self, obj, records, stage, strict=True):
         """
         Detect NaN/Inf tensors before black-video save.
@@ -699,7 +886,7 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
             )
         return conditioning
 
-    def _scale_image(self, image, width, height, method, crop, records):
+    def _scale_image(self, image, width, height, method, crop, records, segment_index=None, route_label=""):
         if image is None:
             records.append({"stage": "EventImageScaleStart", "status": "skipped", "reason": "no image"})
             return None
@@ -733,6 +920,23 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
                     "external_image_scale": False,
                 },
             )
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_SourcePreprocess",
+                route_kind="source_image_preprocess",
+                input_state=image,
+                output_state=image,
+                metadata={
+                    "segment_index": int(segment_index) if segment_index is not None else None,
+                    "route_label": str(route_label or ""),
+                    "wan_width": int(width),
+                    "wan_height": int(height),
+                    "method": str(method or "nearest-exact"),
+                    "crop": crop_mode,
+                    "external_image_scale": False,
+                    "interpretation": "ImageScale is intentionally skipped; WanImageToVideo receives the original source tensor.",
+                },
+            )
             return image
         try:
             result = self._call_node_method(
@@ -757,6 +961,23 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
                 next_requirement="WanImageToVideo requires scaled image, width, height, frame count and conditioning",
                 control_mode="REPORT_ONLY",
                 metadata={"width": int(width), "height": int(height), "method": str(method or "nearest-exact"), "crop": crop_mode, "external_image_scale": True},
+            )
+            self._record_raw_vs_singularity_parity_probe(
+                records,
+                "EventRawVsSingularityParity_SourcePreprocess",
+                route_kind="source_image_preprocess",
+                input_state=image,
+                output_state=scaled,
+                metadata={
+                    "segment_index": int(segment_index) if segment_index is not None else None,
+                    "route_label": str(route_label or ""),
+                    "wan_width": int(width),
+                    "wan_height": int(height),
+                    "method": str(method or "nearest-exact"),
+                    "crop": crop_mode,
+                    "external_image_scale": True,
+                    "interpretation": "ImageScale produced the source tensor handed to WanImageToVideo.",
+                },
             )
             return scaled
         except Exception as e:
@@ -809,7 +1030,9 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
             records.append({"stage": f"event_model_shift_{label}", "status": "failed", "shift": shift_value, "error": str(e)})
             raise
 
-    def _wan_image_to_video(self, positive, negative, vae, start_image, width, height, frames, batch_size, records):
+    def _wan_image_to_video(self, positive, negative, vae, start_image, width, height, frames, batch_size, records, segment_index=None, route_label=""):
+        call_signature = "positive_negative_vae_start_image_width_height_length_batch_size"
+        first_error_text = ""
         try:
             result = self._call_node_method(
                 "WanImageToVideo",
@@ -825,6 +1048,8 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
                 batch_size=int(batch_size),
             )
         except Exception as first_error:
+            call_signature = "retry_with_image_alias_and_frames_length"
+            first_error_text = str(first_error)[:300]
             records.append({"stage": "EventWanImageToVideoSeed_first_signature_failed", "status": "retrying", "error": str(first_error)})
             result = self._call_node_method(
                 "WanImageToVideo",
@@ -875,6 +1100,27 @@ class WanEventWorkflowCore(SingularityExecutionMixin, SingularityTelemetryMixin,
             next_requirement="High sampler requires latent seed as previous outcome and noise-enabled first denoise window",
             control_mode="REPORT_ONLY",
             metadata={"width": int(width), "height": int(height), "frames": int(frames), "batch_size": int(batch_size)},
+        )
+        self._record_raw_vs_singularity_parity_probe(
+            records,
+            "EventRawVsSingularityParity_WanLatentInit",
+            route_kind="wan_image_to_video_latent_init",
+            input_state=start_image,
+            output_state=seq[2],
+            metadata={
+                "segment_index": int(segment_index) if segment_index is not None else None,
+                "route_label": str(route_label or ""),
+                "width": int(width),
+                "height": int(height),
+                "frames": int(frames),
+                "batch_size": int(batch_size),
+                "call_signature": call_signature,
+                "first_signature_error": first_error_text,
+                "unwrapped_output_count": len(seq),
+                "positive_conditioning_probe": self._event_tensor_probe(seq[0], label="wan_positive_conditioning"),
+                "negative_conditioning_probe": self._event_tensor_probe(seq[1], label="wan_negative_conditioning"),
+                "vae_route_signature": self._object_route_cache_signature(vae),
+            },
         )
         return seq[0], seq[1], seq[2]
 
