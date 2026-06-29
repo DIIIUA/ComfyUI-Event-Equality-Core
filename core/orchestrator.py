@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r113"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r178"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R178 Tail 5 Continuation Gate"
+EVENT_HORIZON_BODY_VERSION = "0.1-R178"
 
 
 def _event_json_safe(value, depth=0):

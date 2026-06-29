@@ -1,84 +1,95 @@
 # Singularity for ComfyUI
 
-Singularity is a public-alpha ComfyUI custom node for Wan image-to-video cascade continuation.
+Singularity is a public-alpha ComfyUI custom node for Wan I2V / V2V cascade continuation.
 
-It is made for users who want longer Wan I2V / V2V videos without manually extracting the last frame, loading it again, making another short clip, and stitching everything later.
+Its main feature is the **Tail 5 Continuation Gate**: the workflow can pause between cascade segments, show the source image plus five tail-frame candidates, let you choose the best continuation frame, then continue the same run and save one final stitched video.
 
 In simple terms:
 
 ```text
 Generate a segment.
 Pause.
-Look at the last-frame candidates.
-Choose the best continuation frame.
+Pick the best tail frame.
 Continue the same run.
-Get one stitched final video.
+Get one stitched final video and a report.
 ```
 
-## Main Feature
+## Why This Matters
 
-The special feature is the pause-and-continue panel.
+Long Wan extension workflows usually require a lot of manual work:
 
-When a cascade boundary is reached, Singularity shows:
+- generate a short clip;
+- find a good last frame;
+- reload that frame as a new source;
+- run another clip;
+- stitch separate outputs later;
+- guess where the continuity broke.
+
+Singularity moves that loop into one node.
+
+You still make the creative decision, but the node gives you the pause point, frame candidates, continue button, final stitch, and diagnostics.
+
+## Key Features
+
+- One visible ComfyUI node: `Singularity`.
+- Wan I2V cascade generation.
+- Up to five cascade segments in the current public alpha.
+- Optional pause after cascade 1, 2, 3, and 4.
+- Tail 5 Continuation Gate:
+  - `Source`
+  - `Tail 1`
+  - `Tail 2`
+  - `Tail 3`
+  - `Tail 4`
+  - `Tail 5`
+  - `Result`
+- Manual tail-frame selection with a green outline.
+- Same-run continuation after selecting a frame.
+- One final stitched video.
+- Markdown runtime report.
+- Public-safe default: `Observe Only`, neutral deltas, reports on, trace off.
+
+## Named Function Layers
+
+**Tail 5 Continuation Gate**  
+The frame-choice layer. You choose which tail frame should become the next segment source.
+
+**Same-Run Cascade Stitch**  
+The final-output layer. The node saves one stitched video instead of leaving you with separate segment clips.
+
+**Observer Math Baseline**  
+The safe default. It records what happened without intentionally changing generation tensors.
+
+**Prompt-Pure Strategy Map**  
+Prompt analysis stays report-side. The public default does not inject formula text into the model-facing prompt.
+
+**Completion Report Gate**  
+The report tells you whether the route completed. `CompletionGate = PASS` means a final video exists; it is not a visual-quality guarantee.
+
+**Seam And Drift Diagnostics**  
+The report can show cascade seam jumps, motion spikes, tail/source continuity pressure, and other clues about where the continuation changed.
+
+## R178 Update
+
+Version:
 
 ```text
-Source | Tail 1 | Tail 2 | Tail 3 | Tail 4 | Tail 5 | Result
+0.1.1-r178
+Singularity R178
+Tail 5 Continuation Gate
 ```
 
-You click the tail frame that should become the source for the next cascade, then press `Resume Cascade / Continue`.
+R178 updates the public surface:
 
-This gives you direct control over the continuation point instead of letting the workflow blindly continue from a bad or unstable frame.
+- cleaner visible mode names;
+- grouped UI sections;
+- hidden internal transport controls;
+- native ComfyUI image upload preserved;
+- Tail 5 panel stabilized for pause/continue;
+- clean public baseline with no active generation-math mutation;
+- improved report evidence for continuation, seam, and public-readiness checks.
 
-## What It Does
-
-- Adds one visible ComfyUI node: `Singularity`.
-- Generates Wan I2V video segments.
-- Supports up to five cascade segments in the current public alpha.
-- Can pause after cascade 1, 2, 3, or 4.
-- Lets you manually pick the tail frame for the next segment.
-- Continues the same running workflow.
-- Saves one final stitched video.
-- Saves markdown reports with runtime, cascade, motion, and delta diagnostics.
-- Keeps a clean public interface with research-only formula recommendation visible but off by default.
-- Keeps ComfyUI widget values stable after restart/save/reload.
-
-## Why This Is Useful
-
-Wan extension workflows can become messy very quickly:
-
-- many repeated sampler groups;
-- manual last-frame extraction;
-- separate output clips;
-- manual stitching;
-- unclear continuity between segments;
-- hard-to-compare prompt, seed, and delta changes.
-
-Singularity turns that into a controlled loop inside one node. You still make the creative decision, but the node handles the pause point, the chosen frame, continuation, final stitching, and report evidence.
-
-## r113 Public Stabilization Update
-
-This r113 public stabilization update focuses on making the node cleaner, easier to install, and safer to test in modern ComfyUI Desktop.
-
-It keeps the earlier pause UI recovery work, adds newer Strategy / continuity reporting layers, expands tail selection to five candidates, and fixes a widget-order issue that could make saved workflow values appear in the wrong fields after reload.
-
-New in r113:
-
-- Visible title: `Singularity R113`.
-- Fixes ComfyUI Desktop widget value drift after save/reload.
-- Keeps backend widget order stable.
-- Adds a severe drift repair guard for already-corrupted workflow states.
-- Five tail-frame candidates instead of three.
-- Public starter node has no bundled image and no positive prompt.
-- Built-in Wan-style Chinese negative prompt remains as the starter negative prompt.
-- Two-cascade public starter route remains the default.
-- Native ComfyUI image upload button is preserved.
-- Detached Source / Tail / Result panel remains available for cascade continuation.
-- Reports include cascade, runtime, Strategy Control Surface, Strategy Matrix, input-normalization, and completion evidence.
-- Experimental math modes remain available, but they should be treated as research tools.
-
-## Public Default Settings
-
-The default r113 node is meant to be a clean starter:
+## Public Defaults
 
 ```text
 cascade_count = 2
@@ -88,64 +99,28 @@ width = 704
 height = 1280
 fps = 16
 seed = 123
-math_control_mode = OBSERVE_ONLY
+math_control_mode = Observe Only
 high_delta_strength = 1.0
 low_delta_strength = 1.0
-image_crop = wan_native
+strategy_field_mode = OFF
+sampler_trace_mode = OFF
+prompt_transcode_mode = Report Only
 save_video = true
 save_report = true
-sampler_trace_mode = OFF
 ```
 
-If `704 x 1280` is too heavy for your GPU, lower the resolution before rendering.
+If the default resolution is too heavy, lower it before rendering. A small test size such as `416 x 608` is useful for fast comparisons.
 
-## About The Math
+## Important Notes
 
-The project studies generation as an event:
-
-```text
-Outcome(t-1) + ObservedBehavior(t-1)
-= Strategy(t)
-= ObservedBehavior(t+1) + Outcome(t+1)
-```
-
-For a normal user, this means the node tries to make the source image, prompt meaning, model interpretation, sampler route, latent motion, and visible video easier to inspect as one connected process.
-
-The math is not a magic quality button. It is a way to observe, compare, and carefully test how generation changes.
-
-Use `OBSERVE_ONLY` for a clean baseline.
-
-Use `LATENT_DELTA_SCALE` only when intentionally testing delta behavior.
-
-Use `STRATEGY_PRESSURE_WINDOW` when intentionally testing bounded pressure-intent math. With `high_delta_strength = 1.0` and `low_delta_strength = 1.0`, it remains neutral.
-
-Avoid `DEEP_STEP_DELTA_CONTROL` unless you are doing research and accept that it can break output.
-
-## What Is Drift?
-
-Drift means the video moves away from your intended result.
-
-Examples:
-
-- the source image stops being respected;
-- the subject identity changes;
-- the prompt becomes ignored;
-- motion becomes unstable;
-- the next cascade does not continue naturally;
-- experimental math settings make the image noisy or broken.
-
-Singularity helps you notice and compare drift. It does not guarantee that every video will be perfect.
-
-## Important Public Alpha Notes
-
-- This is not a final production release.
-- Current public cascade limit is 5.
-- Infinite cascades and prompt-per-cascade scheduling are future work.
+- This is a public alpha.
 - The node is Wan-first.
 - Models are not included.
+- Current public cascade limit is 5.
 - Heavy resolutions require more VRAM and time.
-- Always inspect the final video, not only the report.
-- `CompletionGate = PASS` means the route completed and a final video exists, not that the video is visually perfect.
+- Always inspect the final MP4.
+- `CompletionGate = PASS` means the route completed, not that the video is artistically perfect.
+- Research modes are available, but they can change or break the output.
 
 ## Recommended First Test
 
@@ -155,14 +130,11 @@ pause_after_cascade_1 = true
 frames_per_cascade = 49
 fps = 16
 seed = 123
-math_control_mode = OBSERVE_ONLY
+math_control_mode = Observe Only
+sampler_trace_mode = OFF
+prompt_transcode_mode = Report Only
 save_video = true
 save_report = true
 ```
 
-Pick a source image, write a clear prompt, generate, choose a tail frame when the panel appears, continue, then inspect the final stitched video.
-
-## Short Summary
-
-Singularity is a Wan I2V cascade continuation node for ComfyUI. It pauses between cascade stages, lets you choose the continuation frame, resumes the same run, stitches the final video, and writes diagnostics so you can understand the result instead of guessing.
-
+Run the workflow, choose the best tail frame at the pause, continue, then review the final stitched video and report.

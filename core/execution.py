@@ -112,9 +112,9 @@ except Exception:
     def throw_exception_if_processing_interrupted():
         return None
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r113"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r178"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R178 Tail 5 Continuation Gate"
+EVENT_HORIZON_BODY_VERSION = "0.1-R178"
 TAIL_CANDIDATE_COUNT = 5
 _SINGULARITY_PAUSE_STATES = {}
 
@@ -363,6 +363,205 @@ def _event_core_preferred_media_dirs(media_type="video"):
 
 
 class SingularityExecutionMixin:
+    def _event_public_surface_contract(
+        self,
+        *,
+        input_normalization=None,
+        strategy_control_plan=None,
+        source_image_file="",
+        image=None,
+        save_video=True,
+        save_report=True,
+        use_formula_recommendation=False,
+        prompt_transcode_mode="REPORT_ONLY",
+        auto_calibration_mode="OFF",
+    ):
+        input_normalization = input_normalization if isinstance(input_normalization, dict) else {}
+        strategy_control_plan = strategy_control_plan if isinstance(strategy_control_plan, dict) else {}
+        normalized = input_normalization.get("normalized", {})
+        normalized = normalized if isinstance(normalized, dict) else {}
+
+        def norm_text(value, default=""):
+            text = str(value if value is not None else default).strip()
+            return text if text else str(default)
+
+        def upper_value(name, default=""):
+            return norm_text(normalized.get(name, default), default).upper()
+
+        def bool_value(name, fallback=False):
+            value = normalized.get(name, fallback)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
+        def int_value(name, fallback=0):
+            try:
+                return int(normalized.get(name, fallback))
+            except Exception:
+                return int(fallback)
+
+        def float_value(name, fallback=0.0):
+            try:
+                value = float(normalized.get(name, fallback))
+                return value if math.isfinite(value) else float(fallback)
+            except Exception:
+                return float(fallback)
+
+        def issue(reason, evidence=None):
+            out = {"reason": str(reason or "unknown")}
+            if evidence is not None:
+                out["evidence"] = evidence
+            return out
+
+        safe_public_modes = {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "SELECTED_TAIL_SOURCE_RECONSTRUCTION"}
+        research_modes = {"STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "PRESSURE_PIXEL_REWEIGHTING", "SOURCE_NOISE_FIELD_SHAPING", "MAX_RISK_STRATEGY_RING", "DEEP_STEP_DELTA_CONTROL"}
+        public_default_profile = {
+            "math_control_mode": "OBSERVE_ONLY",
+            "strategy_field_mode": "OFF",
+            "sampler_trace_mode": "OFF",
+            "prompt_transcode_mode": "REPORT_ONLY",
+            "auto_calibration_mode": "OFF",
+            "use_formula_recommendation": False,
+            "temporal_texture_lock": False,
+            "high_delta_strength": 1.0,
+            "low_delta_strength": 1.0,
+            "save_video": True,
+            "save_report": True,
+        }
+
+        math_mode = upper_value("math_control_mode", getattr(self, "_event_math_control_mode", "OBSERVE_ONLY"))
+        strategy_field_mode = upper_value("strategy_field_mode", "OFF")
+        sampler_trace_mode = upper_value("sampler_trace_mode", getattr(self, "_event_sampler_trace", {}).get("mode", "OFF"))
+        prompt_mode = upper_value("prompt_transcode_mode", prompt_transcode_mode)
+        auto_mode = upper_value("auto_calibration_mode", auto_calibration_mode)
+        high_delta = float_value("high_delta_strength", getattr(self, "_event_delta_strengths", {}).get("high", 1.0))
+        low_delta = float_value("low_delta_strength", getattr(self, "_event_delta_strengths", {}).get("low", 1.0))
+        cascade_count = int_value("cascade_count", 1)
+        frames_per_cascade = int_value("frames_per_cascade", 49)
+        width = int_value("width", 0)
+        height = int_value("height", 0)
+        temporal_texture_lock = bool_value("temporal_texture_lock", False)
+        save_video_b = bool(save_video)
+        save_report_b = bool(save_report)
+        source_file = norm_text(source_image_file, "none")
+        source_present = bool(image is not None) or source_file.lower() not in ("", "none")
+        active_allowed = bool(strategy_control_plan.get("active_control_allowed", False))
+        active_path = norm_text(strategy_control_plan.get("active_generation_math_path", "observe_only"), "observe_only")
+
+        pause_flags = {
+            "pause_after_cascade_1": bool_value("pause_after_cascade_1", False),
+            "pause_after_cascade_2": bool_value("pause_after_cascade_2", False),
+            "pause_after_cascade_3": bool_value("pause_after_cascade_3", False),
+            "pause_after_cascade_4": bool_value("pause_after_cascade_4", False),
+        }
+        default_deviations = []
+        current_modes = {
+            "math_control_mode": math_mode,
+            "strategy_field_mode": strategy_field_mode,
+            "sampler_trace_mode": sampler_trace_mode,
+            "prompt_transcode_mode": prompt_mode,
+            "auto_calibration_mode": auto_mode,
+            "use_formula_recommendation": bool(use_formula_recommendation),
+            "temporal_texture_lock": temporal_texture_lock,
+            "high_delta_strength": high_delta,
+            "low_delta_strength": low_delta,
+            "save_video": save_video_b,
+            "save_report": save_report_b,
+        }
+        for key, expected in public_default_profile.items():
+            actual = current_modes.get(key)
+            if isinstance(expected, float):
+                differs = abs(float(actual or 0.0) - expected) > 1e-9
+            else:
+                differs = actual != expected
+            if differs:
+                default_deviations.append({"field": key, "expected": expected, "actual": actual})
+
+        blockers = []
+        warnings = []
+        research_flags = []
+        if not source_present:
+            warnings.append(issue("source_image_not_selected", {"source_image_file": source_file, "image_input_present": bool(image is not None)}))
+        if not save_video_b:
+            warnings.append(issue("save_video_disabled"))
+        if not save_report_b:
+            warnings.append(issue("save_report_disabled"))
+        if math_mode in research_modes:
+            research_flags.append(issue("research_math_mode_selected", {"math_control_mode": math_mode, "active_generation_math_path": active_path}))
+        elif math_mode not in safe_public_modes:
+            warnings.append(issue("unclassified_math_mode_selected", {"math_control_mode": math_mode}))
+        if active_allowed and math_mode not in safe_public_modes:
+            research_flags.append(issue("active_research_control_surface_allowed", {"math_control_mode": math_mode, "active_generation_math_path": active_path}))
+        if math_mode == "LATENT_DELTA_SCALE" and (abs(high_delta - 1.0) > 1e-9 or abs(low_delta - 1.0) > 1e-9):
+            warnings.append(issue("non_neutral_latent_delta_scale", {"high_delta_strength": high_delta, "low_delta_strength": low_delta}))
+        if strategy_field_mode not in ("OFF", "REPORT_ONLY"):
+            research_flags.append(issue("active_strategy_field_mode_selected", {"strategy_field_mode": strategy_field_mode}))
+        elif strategy_field_mode == "REPORT_ONLY":
+            warnings.append(issue("strategy_field_report_diagnostic_enabled"))
+        if sampler_trace_mode not in ("", "OFF"):
+            warnings.append(issue("sampler_trace_diagnostic_enabled", {"sampler_trace_mode": sampler_trace_mode}))
+        if prompt_mode not in ("REPORT_ONLY", "OFF"):
+            warnings.append(issue("prompt_transform_surface_enabled", {"prompt_transcode_mode": prompt_mode}))
+        if auto_mode == "AUTO_APPLY":
+            research_flags.append(issue("auto_calibration_auto_apply_enabled"))
+        elif auto_mode == "REPORT_ONLY":
+            warnings.append(issue("auto_calibration_report_diagnostic_enabled"))
+        if bool(use_formula_recommendation):
+            warnings.append(issue("formula_tail_recommendation_enabled"))
+        if temporal_texture_lock:
+            warnings.append(issue("temporal_texture_lock_enabled_untested_public_toggle"))
+        if cascade_count > 1 and not any(pause_flags.values()):
+            warnings.append(issue("multi_cascade_without_pause", {"cascade_count": cascade_count, "pause_flags": pause_flags}))
+        if width <= 0 or height <= 0 or frames_per_cascade <= 0:
+            blockers.append(issue("invalid_public_dimensions_or_frames", {"width": width, "height": height, "frames_per_cascade": frames_per_cascade}))
+
+        if blockers:
+            status = "invalid_public_surface"
+            severity = "BLOCKED"
+            next_action = "Fix invalid UI/default values before treating this run as public evidence."
+        elif research_flags:
+            status = "research_mode"
+            severity = "RESEARCH"
+            next_action = "Use this run for internal math evidence; make a safe-mode comparison before release."
+        elif warnings:
+            status = "public_warning"
+            severity = "WARNING"
+            next_action = "Surface is structurally safe, but review warnings and inspect the mp4 before release."
+        else:
+            status = "public_safe"
+            severity = "PASS"
+            next_action = "Public surface is clean; final readiness still depends on CompletionGate and video inspection."
+
+        return {
+            "stage": "EventPublicSurfaceContract",
+            "status": status,
+            "severity": severity,
+            "contract_version": "public_surface_contract_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "formula": "UI controls are Strategy carriers; this contract classifies public-safe, warning, and research surfaces before final readiness.",
+            "control_mode": "REPORT_ONLY",
+            "does_not_change_generation": True,
+            "source_present": source_present,
+            "source_image_file": source_file,
+            "cascade_count": cascade_count,
+            "frames_per_cascade": frames_per_cascade,
+            "width": width,
+            "height": height,
+            "pause_flags": pause_flags,
+            "current_modes": current_modes,
+            "public_default_profile": public_default_profile,
+            "default_deviations": default_deviations,
+            "blockers": blockers,
+            "warnings": warnings,
+            "research_flags": research_flags,
+            "safe_public_modes": sorted(safe_public_modes),
+            "research_modes": sorted(research_modes),
+            "next_action": next_action,
+        }
+
     def _save_image_attempt(self, image, save_prefix, records):
         result = self._call_node_method("SaveImage", ["save_images"], images=image, filename_prefix=str(save_prefix or "Singularity"))
         records.append({"stage": "EventSaveFrames", "status": "ok", "result": str(result)[:300]})
@@ -879,7 +1078,15 @@ class SingularityExecutionMixin:
             policy = "strategy_pressure_window_keeps_cfg_native"
         elif mode == "LATENT_MEMORY_BRIDGE":
             policy = "latent_memory_bridge_keeps_cfg_native"
-        elif mode not in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "DEEP_STEP_DELTA_CONTROL"):
+        elif mode == "PRESSURE_PIXEL_REWEIGHTING":
+            policy = "pressure_pixel_reweighting_keeps_cfg_native"
+        elif mode == "SELECTED_TAIL_SOURCE_RECONSTRUCTION":
+            policy = "selected_tail_source_reconstruction_keeps_cfg_native"
+        elif mode == "SOURCE_NOISE_FIELD_SHAPING":
+            policy = "source_noise_field_shaping_keeps_cfg_native_risk_lives_in_pre_high_seed"
+        elif mode == "MAX_RISK_STRATEGY_RING":
+            policy = "max_risk_strategy_ring_keeps_cfg_native_risk_lives_in_latent_entry"
+        elif mode not in ("LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "PRESSURE_PIXEL_REWEIGHTING", "SELECTED_TAIL_SOURCE_RECONSTRUCTION", "SOURCE_NOISE_FIELD_SHAPING", "MAX_RISK_STRATEGY_RING", "DEEP_STEP_DELTA_CONTROL"):
             policy = "mode_keeps_cfg_native"
 
         records.append({
@@ -894,7 +1101,7 @@ class SingularityExecutionMixin:
             "cfg_multiplier": multiplier,
             "adjusted_cfg": adjusted_cfg,
             "policy": policy,
-            "formula": "CFG is preserved in LATENT_DELTA_SCALE, STRATEGY_PRESSURE_WINDOW, and LATENT_MEMORY_BRIDGE; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
+            "formula": "CFG is preserved in LATENT_DELTA_SCALE, STRATEGY_PRESSURE_WINDOW, LATENT_MEMORY_BRIDGE, PRESSURE_PIXEL_REWEIGHTING, SELECTED_TAIL_SOURCE_RECONSTRUCTION, SOURCE_NOISE_FIELD_SHAPING, and MAX_RISK_STRATEGY_RING; raw delta is ObservedBehavior evidence and delta strength belongs to latent transition control.",
         })
         return adjusted_cfg
 
@@ -1348,7 +1555,8 @@ class SingularityExecutionMixin:
         try:
             import torch
 
-            t = self._tensor_from_latent_like(frames)
+            tensor_reader = getattr(self, "_tensor_from_latent_like", None)
+            t = tensor_reader(frames) if callable(tensor_reader) else frames
             if t is None or not hasattr(t, "dim") or t.dim() != 4:
                 card.update({"status": "bad_shape", "shape": list(getattr(frames, "shape", [])) if hasattr(frames, "shape") else None})
                 return card
@@ -1838,6 +2046,7 @@ class SingularityExecutionMixin:
                 "current_active_negative_signature": ctx.get("current_active_negative_signature", ""),
                 "current_active_positive_normalized_signature": ctx.get("current_active_positive_normalized_signature", ""),
                 "last_runtime_prompt_update_applies_to_segment": ctx.get("last_runtime_prompt_update_applies_to_segment", None),
+                "semantic_phase_window": ctx.get("semantic_phase_window", {}) if isinstance(ctx.get("semantic_phase_window", {}), dict) else {},
             }
             record = {
                 "stage": "EventCascadeStrategyContinuityProbe",
@@ -2065,6 +2274,7 @@ class SingularityExecutionMixin:
         resume_frame_index,
         frames_per_cascade,
         frames=None,
+        cascade_execution_plan=None,
         records,
     ):
         """
@@ -2084,9 +2294,10 @@ class SingularityExecutionMixin:
         positive = str(positive_prompt or "").lower()
         negative = str(negative_prompt or "").lower()
         text = f"{positive}\n{negative}"
-        frames = max(1, int(frames_per_cascade or 1))
+        frame_tensor = frames
+        frames_per_segment = max(1, int(frames_per_cascade or 1))
         resume = max(1, int(resume_frame_index or 1))
-        progress = clamp(resume / float(frames))
+        progress = clamp(resume / float(frames_per_segment))
         remaining = clamp(1.0 - progress)
 
         motion_terms = {
@@ -2122,7 +2333,7 @@ class SingularityExecutionMixin:
         late_cut_pressure = clamp((progress - 0.55) / 0.45)
         restart_risk = clamp(route_pressure * late_cut_pressure)
         tail_observed_behavior = self._compute_cascade_tail_observed_behavior(
-            frames,
+            frame_tensor,
             resume_frame_index=resume,
             records=records,
         )
@@ -2131,6 +2342,57 @@ class SingularityExecutionMixin:
         except Exception:
             tail_motion_energy = 0.0
         motion_memory_pressure = clamp(tail_motion_energy * late_cut_pressure * route_pressure)
+        plan = cascade_execution_plan if isinstance(cascade_execution_plan, dict) else {}
+        try:
+            requested_segments = max(1, int(plan.get("requested_segments", 1) or 1))
+        except Exception:
+            requested_segments = 1
+        try:
+            pause_segment_i = max(1, int(pause_segment_index or 1))
+        except Exception:
+            pause_segment_i = 1
+        try:
+            next_segment_i = max(1, int(next_segment_index or 1))
+        except Exception:
+            next_segment_i = 1
+        requested_segments = max(requested_segments, next_segment_i)
+        segment_span = 1.0 / float(max(1, requested_segments))
+        global_cut_phase = clamp(((pause_segment_i - 1) + progress) / float(max(1, requested_segments)))
+        next_segment_start_phase = clamp((next_segment_i - 1) / float(max(1, requested_segments)))
+        next_segment_end_phase = clamp(next_segment_i / float(max(1, requested_segments)))
+        remaining_global_phase = clamp(1.0 - global_cut_phase)
+        local_phase_overlap = clamp(
+            (next_segment_end_phase - max(global_cut_phase, next_segment_start_phase))
+            / max(segment_span, 1.0e-6)
+        )
+        semantic_reentry_pressure = clamp(
+            (route_pressure * 0.42)
+            + (late_cut_pressure * 0.22)
+            + (motion_memory_pressure * 0.22)
+            + (endpoint_pressure * 0.14)
+        )
+        semantic_phase_window = {
+            "status": "active" if semantic_reentry_pressure >= 0.18 and next_segment_i > 1 else "watch",
+            "window_version": "semantic_phase_window_v1_runtime_carrier",
+            "pause_segment_index": int(pause_segment_i),
+            "applies_to_segment": int(next_segment_i),
+            "requested_segments": int(requested_segments),
+            "global_cut_phase": float(global_cut_phase),
+            "next_segment_start_phase": float(next_segment_start_phase),
+            "next_segment_end_phase": float(next_segment_end_phase),
+            "remaining_global_phase": float(remaining_global_phase),
+            "local_phase_overlap": float(local_phase_overlap),
+            "semantic_reentry_pressure": float(semantic_reentry_pressure),
+            "local_window_strength": float(clamp(semantic_reentry_pressure * local_phase_overlap)),
+            "tail_motion_energy": float(tail_motion_energy),
+            "model_facing_prompt_text": "unchanged",
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula": (
+                "The selected tail cut defines a local Strategy window: global event phase already observed "
+                "must not be reborn as a full prompt event on the next segment."
+            ),
+        }
         # The later the selected cut is, the less the next high branch should birth
         # a new full route. Low stays close to neutral and only refines continuity.
         high_field_intent_multiplier = 1.0 - (0.72 * restart_risk)
@@ -2141,11 +2403,11 @@ class SingularityExecutionMixin:
         memory = {
             "stage": "EventCascadeRemainingStrategy",
             "status": "active" if route_pressure > 0.0 else "neutral",
-            "strategy_version": "cascade_remaining_strategy_v1",
+            "strategy_version": "cascade_remaining_strategy_v2_tail_observed",
             "pause_segment_index": int(pause_segment_index or 1),
             "applies_to_segment": int(next_segment_index or 1),
             "resume_frame_index": int(resume),
-            "frames_per_cascade": int(frames),
+            "frames_per_cascade": int(frames_per_segment),
             "progress_ratio": float(progress),
             "remaining_ratio": float(remaining),
             "rotation_pressure": float(rotation_pressure),
@@ -2159,6 +2421,7 @@ class SingularityExecutionMixin:
             "restart_risk": float(restart_risk),
             "tail_observed_behavior": tail_observed_behavior,
             "motion_memory_pressure": float(motion_memory_pressure),
+            "semantic_phase_window": semantic_phase_window,
             "branch_multipliers": {
                 "high_field_intent_multiplier": float(max(0.18, min(1.0, high_field_intent_multiplier))),
                 "high_field_window_multiplier": float(max(0.35, min(1.0, high_field_window_multiplier))),
@@ -2199,7 +2462,8 @@ class SingularityExecutionMixin:
         try:
             import torch
 
-            t = self._tensor_from_latent_like(frames)
+            tensor_reader = getattr(self, "_tensor_from_latent_like", None)
+            t = tensor_reader(frames) if callable(tensor_reader) else frames
             if t is None or not hasattr(t, "dim"):
                 if records is not None:
                     records.append({"stage": "EventCascadeTailObservedBehavior", **neutral})
@@ -2282,6 +2546,8 @@ class SingularityExecutionMixin:
         positive_prompt,
         remaining_strategy,
         applies_to_segment,
+        global_positive_prompt=None,
+        cascade_execution_plan=None,
         preserve_prompt_carrier=False,
         preserve_reason="",
         records=None,
@@ -2293,10 +2559,12 @@ class SingularityExecutionMixin:
         the next segment's StrategyCandidate with a local continuation route when
         the global prompt would otherwise restart the full cascade event.
         """
-        raw = str(positive_prompt or "").strip()
+        raw = str(global_positive_prompt if global_positive_prompt is not None else positive_prompt or "").strip()
+        current = str(positive_prompt or "").strip()
         if not raw:
-            return raw, {"status": "empty_prompt"}
+            return current, {"status": "empty_prompt"}
         strategy = remaining_strategy if isinstance(remaining_strategy, dict) else {}
+        plan = cascade_execution_plan if isinstance(cascade_execution_plan, dict) else {}
         try:
             restart_risk = float(strategy.get("restart_risk", 0.0) or 0.0)
             progress = float(strategy.get("progress_ratio", 0.0) or 0.0)
@@ -2307,32 +2575,65 @@ class SingularityExecutionMixin:
             progress = 0.0
             rotation_pressure = 0.0
             motion_pressure = 0.0
+
+        try:
+            requested_segments = max(1, int(plan.get("requested_segments", 1) or 1))
+        except Exception:
+            requested_segments = 1
+        try:
+            segment_i = max(1, int(applies_to_segment or 1))
+        except Exception:
+            segment_i = 1
+        phase_ratio = max(0.0, min(1.0, (segment_i - 1) / float(max(1, requested_segments - 1))))
+        if segment_i <= 1:
+            phase_id = "entry"
+        elif requested_segments > 1 and segment_i >= requested_segments:
+            phase_id = "final"
+        elif phase_ratio >= 0.66:
+            phase_id = "late"
+        elif phase_ratio >= 0.33:
+            phase_id = "middle"
+        else:
+            phase_id = "early"
+
         if preserve_prompt_carrier:
+            active_signature = hashlib.sha256(current.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            base_signature = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
             summary = {
                 "status": "skipped_same_prompt_strategy_carrier_preserved",
-                "transform_version": "cascade_phase_prompt_transform_v2_same_prompt_guard",
-                "applies_to_segment": int(applies_to_segment),
+                "transform_version": "cascade_phase_prompt_transform_v7_same_prompt_guard",
+                "wan_prompt_method": "interaction_first_current_state",
+                "applies_to_segment": int(segment_i),
+                "requested_segments": int(requested_segments),
+                "phase_id": phase_id,
+                "phase_ratio": float(phase_ratio),
                 "restart_risk": float(restart_risk),
                 "progress_ratio": float(progress),
                 "motion_pressure": float(motion_pressure),
-                "preserve_reason": str(preserve_reason or "same_prompt_identity_reused"),
-                "prompt_continuity_reused": True,
+                "preserve_prompt_carrier": True,
+                "preserve_reason": str(preserve_reason or ""),
+                "base_positive_signature": base_signature,
+                "active_positive_signature": active_signature,
                 "positive_prompt_changed": False,
+                "positive_prompt_length": int(len(current or raw)),
+                "positive_prompt_text": current or raw,
+                "phase_prompt_preview": (current or raw)[:900],
                 "prompt_text_injection_allowed": False,
                 "semantic_math_in_prompt_allowed": False,
-                "policy": "same_prompt_preserve_clean_strategy_candidate",
+                "policy": "same_prompt_strategy_carrier_preserved_no_phase_rewrite",
                 "formula": (
-                    "Continue reused the same prompt identity; RemainingStrategy stays numeric, "
-                    "and the original clean StrategyCandidate is not rewritten for the next segment."
+                    "Continue sent the same StrategyCandidate identity; RemainingStrategy stays in numeric/report space, "
+                    "and the model-facing prompt carrier is not phase-rewritten again."
                 ),
             }
             if records is not None:
                 records.append({"stage": "EventCascadePhasePromptTransform", **summary})
-            return raw, summary
-        if restart_risk < 0.35 or motion_pressure <= 0.0:
+            return current or raw, summary
+
+        if restart_risk < 0.20 and motion_pressure <= 0.0 and requested_segments <= 1:
             summary = {
                 "status": "not_needed",
-                "applies_to_segment": int(applies_to_segment),
+                "applies_to_segment": int(segment_i),
                 "restart_risk": float(restart_risk),
                 "progress_ratio": float(progress),
                 "motion_pressure": float(motion_pressure),
@@ -2340,86 +2641,256 @@ class SingularityExecutionMixin:
             }
             if records is not None:
                 records.append({"stage": "EventCascadePhasePromptTransform", **summary})
-            return raw, summary
+            return current or raw, summary
 
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", raw) if s.strip()]
-        restart_terms = (
-            "begins", "begin ", "starts from", "starts ", "video starts",
-            "completes the full 360", "full 360", "360-degree rotation",
-            "returns precisely", "return precisely", "returns to the original",
-            "starting frame", "original front-facing pose", "from the reference image",
-            "exact same reference", "same reference photo", "first frame",
-        )
-        keep = []
-        for sentence in sentences:
-            lower = sentence.lower()
-            if any(term in lower for term in restart_terms):
-                continue
-            keep.append(sentence)
-        if not keep:
-            keep = sentences[:2]
+        if not sentences:
+            sentences = [raw]
 
+        raw_lower = raw.lower()
+        anchor_terms = (
+            "reference image", "same ", "same,", "same.", "identity", "continuity",
+            "fixed camera", "no camera", "same lighting", "same framing", "preserve",
+            "keep ", "exact current state", "starting image", "source image",
+        )
+        mutable_anchor_terms = (
+            "robe", "dress", "shirt", "pants", "panties", "bra", "clothing",
+            "cloth", "fabric", "remove", "removing", "pull", "pulls", "slide",
+            "slides", "lift", "lifts", "fall", "falls", "open", "closed",
+        )
+        early_terms = (
+            "begins", "begin ", "starts", "start ", "early", "first", "initial",
+            "removing the upper", "upper layer", "robe off", "off her shoulders",
+            "from the reference", "current state",
+        )
+        middle_terms = (
+            "continues", "continue", "slow", "smooth", "steady", "controlled",
+            "hands", "body", "hips", "turning", "rotation", "motion",
+            "while", "as she", "now wearing",
+        )
+        late_terms = (
+            "toward the end", "end of the video", "final", "finally", "then",
+            "pull", "pulls", "down", "remove", "removing the lower", "lower part",
+            "naked", "returns", "return", "endpoint", "final pose", "complete",
+        )
+        explicit_early_markers = (
+            "at the beginning", "beginning", "early in the video", "early",
+            "first", "initial", "starts", "start ", "begins", "begin ",
+        )
+        explicit_middle_markers = (
+            "after ", "afterwards", "once ", "then ", "she then", "continues",
+            "continue", "while ", "as she", "middle",
+        )
+        explicit_final_markers = (
+            "toward the end", "at the end", "end of the video", "finally",
+            "final pose", "endpoint", "at the final", "last",
+        )
+
+        anchor_sentences = []
+        frozen_anchor_sentences = []
+        action_sentences = []
+        for idx, sentence in enumerate(sentences):
+            lower = sentence.lower()
+            if (
+                any(term in lower for term in anchor_terms)
+                and not any(term in lower for term in late_terms)
+                and len(anchor_sentences) < 4
+            ):
+                if any(term in lower for term in mutable_anchor_terms):
+                    frozen_anchor_sentences.append(sentence)
+                else:
+                    anchor_sentences.append(sentence)
+            else:
+                action_sentences.append((idx, sentence, lower))
+
+        if not action_sentences:
+            action_sentences = [(idx, sentence, sentence.lower()) for idx, sentence in enumerate(sentences)]
+
+        def score_sentence(lower, terms):
+            return sum(1 for term in terms if term in lower)
+
+        def has_any_marker(lower, markers):
+            return any(term in lower for term in markers)
+
+        def positional_window():
+            # Sequential prompts are usually written in chronological order.
+            # Use that order as the primary topology, then let markers refine it.
+            total = max(1, len(action_sentences))
+            start = int(math.floor((segment_i - 1) * total / float(max(1, requested_segments))))
+            end = int(math.ceil(segment_i * total / float(max(1, requested_segments))))
+            end = max(start + 1, min(total, end))
+            return [(idx, sentence, lower) for idx, sentence, lower in action_sentences[start:end]]
+
+        if phase_id in ("early", "entry"):
+            phase_terms = early_terms
+            phase_name = "early phase"
+        elif phase_id == "middle":
+            phase_terms = middle_terms
+            phase_name = "middle phase"
+        elif phase_id == "late":
+            phase_terms = late_terms
+            phase_name = "late phase"
+        else:
+            phase_terms = late_terms
+            phase_name = "final phase"
+
+        if phase_id == "middle":
+            max_selected_sentences = 2
+            phase_pressure = 0.58
+        elif phase_id in ("late", "final"):
+            max_selected_sentences = 2
+            phase_pressure = 0.66
+        else:
+            max_selected_sentences = 2
+            phase_pressure = 0.50
+        if requested_segments >= 4:
+            max_selected_sentences = 1
+
+        ordered_window = positional_window()
+        explicit_final_candidates = [
+            (idx, sentence, lower) for idx, sentence, lower in action_sentences
+            if has_any_marker(lower, explicit_final_markers)
+            and not has_any_marker(lower, explicit_early_markers)
+        ]
+        explicit_early_candidates = [
+            (idx, sentence, lower) for idx, sentence, lower in action_sentences
+            if has_any_marker(lower, explicit_early_markers)
+        ]
+        explicit_middle_candidates = [
+            (idx, sentence, lower) for idx, sentence, lower in action_sentences
+            if has_any_marker(lower, explicit_middle_markers)
+            and not has_any_marker(lower, explicit_early_markers)
+            and not has_any_marker(lower, explicit_final_markers)
+        ]
+
+        selected = []
+        selection_strategy = "ordered_window"
+        if phase_id in ("early", "entry") and explicit_early_candidates:
+            selected = [(idx, sentence) for idx, sentence, _lower in explicit_early_candidates[:max_selected_sentences]]
+            selection_strategy = "explicit_early_marker"
+        elif phase_id == "middle":
+            filtered_window = [
+                (idx, sentence, lower) for idx, sentence, lower in ordered_window
+                if not has_any_marker(lower, explicit_early_markers)
+                and not has_any_marker(lower, explicit_final_markers)
+            ]
+            if filtered_window:
+                selected = [(idx, sentence) for idx, sentence, _lower in filtered_window[:max_selected_sentences]]
+                selection_strategy = "ordered_middle_window"
+            elif explicit_middle_candidates:
+                selected = [(idx, sentence) for idx, sentence, _lower in explicit_middle_candidates[:max_selected_sentences]]
+                selection_strategy = "explicit_middle_marker"
+        elif phase_id == "late":
+            filtered_window = [
+                (idx, sentence, lower) for idx, sentence, lower in ordered_window
+                if not has_any_marker(lower, explicit_early_markers)
+                and not has_any_marker(lower, explicit_final_markers)
+            ]
+            if filtered_window:
+                selected = [(idx, sentence) for idx, sentence, _lower in filtered_window[:max_selected_sentences]]
+                selection_strategy = "ordered_late_window"
+            elif explicit_middle_candidates:
+                selected = [(idx, sentence) for idx, sentence, _lower in explicit_middle_candidates[-max_selected_sentences:]]
+                selection_strategy = "fallback_late_middle_marker"
+        elif phase_id == "final" and explicit_final_candidates:
+            selected = [(idx, sentence) for idx, sentence, _lower in explicit_final_candidates[-max_selected_sentences:]]
+            selection_strategy = "explicit_final_marker"
+
+        if not selected:
+            selected = [(idx, sentence) for idx, sentence, _lower in ordered_window]
+            selection_strategy = "ordered_window_fallback"
+
+        selected_sentences = [sentence for _idx, sentence in selected[:max_selected_sentences]]
+        if not selected_sentences:
+            selected_sentences = [action_sentences[min(len(action_sentences) - 1, max(0, segment_i - 1))][1]]
+        selected_text_lower = " ".join(sentence.lower() for sentence in selected_sentences)
+
+        stable_anchor_text = (
+            "The selected resume frame is the current scene state: camera, framing, pose, identity, "
+            "object placement, lighting, background, and material state continue from this frame."
+        )
+        copied_anchor_text = " ".join(anchor_sentences[:2]).strip()
+        anchor_density = 0.80 if copied_anchor_text else 0.68
+        if copied_anchor_text:
+            anchor_text = f"{copied_anchor_text} {stable_anchor_text}".strip()
+        else:
+            anchor_text = stable_anchor_text
         tail_behavior = strategy.get("tail_observed_behavior", {}) if isinstance(strategy, dict) else {}
         direction_hint = str(tail_behavior.get("direction_hint", "existing direction") if isinstance(tail_behavior, dict) else "existing direction")
-        has_rotation_route = rotation_pressure > 0.0
-        late_phase = progress >= 0.85
-        if late_phase:
+        rotation_markers = (
+            "rotate", "rotation", "turn", "turning", "360", "spins", "spin", "axis"
+        )
+        raw_has_rotation_route = any(term in raw_lower for term in rotation_markers)
+        selected_has_rotation_route = any(term in selected_text_lower for term in rotation_markers)
+        has_rotation_route = bool(selected_has_rotation_route and rotation_pressure > 0.0)
+        late_phase = phase_id in ("late", "final") or progress >= 0.85
+        if phase_id == "final":
             local_motion_sentence = (
-                "Treat the selected resume frame as a late phase of the event. "
-                "Do not perform the earlier middle actions again; continue only the remaining motion needed to converge toward the described endpoint. "
+                "Earlier phases are already established. Carry the remaining local motion forward from this frame "
+                "and settle into the endpoint as one continuous interaction. "
             )
         elif has_rotation_route:
             local_motion_sentence = (
                 "Continue the already established rotation in the same direction from this exact pose phase. "
-                "Do not reverse the turn and do not restart the earlier part of the motion. "
+                "The turn advances as one continuous path from the current alignment. "
             )
         else:
             local_motion_sentence = (
-                "Continue the already established action and object relationships from this exact temporal phase. "
-                "Do not reverse, reset, duplicate, or restart the earlier part of the event. "
+                f"Continue from the selected resume frame as the {phase_name} of the same event. "
+                "Advance one local mechanism from the current alignment into its visible reaction and settled endpoint. "
             )
         phase_text = (
-            "Start this cascade segment from the selected resume frame as the current state, not from the original first frame. "
+            "Read the selected resume frame first. "
             + local_motion_sentence +
-            "Use the selected frame as the local anchor, preserve identity, camera, background continuity, and object relationships, "
-            "and move toward the remaining endpoint of the same event with smooth continuity."
+            "Keep the active motion, contact or alignment, material response, and final hold connected as one Wan I2V continuation."
         )
-        if late_phase:
-            keep_scored = []
-            middle_terms = (
-                "as ", "begins", "begin", "starts", "start", "revealing", "reveals",
-                "lift", "lifts", "lower", "lowers", "gradually", "slowly",
-                "while", "when ", "during", "into view", "back rotates into view",
-            )
-            endpoint_terms = (
-                "endpoint", "continuity", "same state", "returns", "return",
-                "preserve", "same", "fixed camera", "no camera", "identity",
-                "smooth", "consistent", "natural extension",
-            )
-            for sentence in keep:
-                lower = sentence.lower()
-                endpoint_score = sum(1 for term in endpoint_terms if term in lower)
-                middle_score = sum(1 for term in middle_terms if term in lower)
-                if endpoint_score >= middle_score:
-                    keep_scored.append(sentence)
-            if keep_scored:
-                keep = keep_scored
-        transformed = " ".join([phase_text] + keep).strip()
+
+        pieces = [anchor_text, phase_text] + selected_sentences
+        transformed = " ".join(piece for piece in pieces if str(piece or "").strip()).strip()
+        if not transformed:
+            transformed = current or raw
+
+        active_signature = hashlib.sha256(transformed.encode("utf-8", errors="ignore")).hexdigest()[:16]
+        base_signature = hashlib.sha256(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
         summary = {
-            "status": "applied",
-            "transform_version": "cascade_phase_prompt_transform_v1",
-            "applies_to_segment": int(applies_to_segment),
+            "status": "applied" if transformed != current else "already_current_phase",
+            "transform_version": "cascade_phase_prompt_transform_v6_wan_interaction_first",
+            "wan_prompt_method": "interaction_first_current_state",
+            "wan_prompt_chain": "IMAGE_STATE -> missing_perception -> one_operator -> contact_or_alignment_reaction -> endpoint",
+            "applies_to_segment": int(segment_i),
+            "requested_segments": int(requested_segments),
+            "phase_id": phase_id,
+            "phase_ratio": float(phase_ratio),
             "restart_risk": float(restart_risk),
             "progress_ratio": float(progress),
             "motion_pressure": float(motion_pressure),
             "rotation_specific": bool(has_rotation_route),
+            "raw_has_rotation_route": bool(raw_has_rotation_route),
+            "selected_has_rotation_route": bool(selected_has_rotation_route),
+            "phase_pressure": float(phase_pressure),
+            "anchor_density": float(anchor_density),
             "late_phase": bool(late_phase),
             "direction_hint": direction_hint,
-            "removed_restart_sentence_count": int(max(0, len(sentences) - len(keep))),
-            "positive_prompt_changed": transformed != raw,
+            "preserve_prompt_carrier": bool(preserve_prompt_carrier),
+            "preserve_reason": str(preserve_reason or ""),
+            "base_positive_signature": base_signature,
+            "active_positive_signature": active_signature,
+            "anchor_sentence_count": int(len(anchor_sentences)),
+            "frozen_anchor_sentence_count": int(len(frozen_anchor_sentences)),
+            "selection_strategy": selection_strategy,
+            "explicit_early_candidate_count": int(len(explicit_early_candidates)),
+            "explicit_middle_candidate_count": int(len(explicit_middle_candidates)),
+            "explicit_final_candidate_count": int(len(explicit_final_candidates)),
+            "selected_sentence_indices": [int(idx) for idx, _sentence in selected[:max_selected_sentences]],
+            "selected_sentence_count": int(len(selected_sentences)),
+            "positive_prompt_changed": transformed != current,
+            "positive_prompt_length": int(len(transformed)),
+            "positive_prompt_text": transformed,
+            "phase_prompt_preview": transformed[:900],
             "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
             "policy": "clean_segment_strategy_transform_replace_not_append",
-            "formula": "Global Strategy is locally re-read after a pause: the next prompt carrier describes the remaining route, not a fresh full event.",
+            "formula": "Global prompt StrategyCandidate is re-windowed for the next cascade phase; the carrier is replaced by a clean local phase prompt, not appended with formula prose.",
         }
         if records is not None:
             records.append({"stage": "EventCascadePhasePromptTransform", **summary})
@@ -2436,9 +2907,162 @@ class SingularityExecutionMixin:
                 "applies_to_segment": int(memory.get("applies_to_segment", 0) or 0),
                 "resume_frame_index": int(memory.get("resume_frame_index", 0) or 0),
                 "restart_risk": float(memory.get("restart_risk", 0.0) or 0.0),
+                "semantic_phase_window": memory.get("semantic_phase_window", {}),
                 "branch_multipliers": memory.get("branch_multipliers", {}),
-                "formula": "RemainingStrategy is bound to the next segment Strategy Control Surface before sampler execution.",
+                "formula": "RemainingStrategy and its semantic phase window are bound to the next segment Strategy Control Surface before sampler execution.",
             })
+
+    def _activate_cascade_boundary_background_anchor_control(
+        self,
+        *,
+        frames,
+        remaining_strategy,
+        pause_segment_index,
+        next_segment_index,
+        records=None,
+    ):
+        """
+        Turn the selected cascade tail into early spatial/background evidence.
+
+        The final background card is useful for reports, but it arrives after the
+        sampler has already made its decision. This boundary control is bound
+        immediately after a pause/trim, before the next cascade sampler starts.
+        """
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        strategy = remaining_strategy if isinstance(remaining_strategy, dict) else {}
+        card = self._event_background_anchor_preservation_card(frames, records=None)
+        card_for_report = dict(card) if isinstance(card, dict) else {}
+        card_for_report["stage"] = "EventCascadeBoundaryBackgroundAnchorCard"
+        card_for_report["pause_segment_index"] = int(pause_segment_index or 1)
+        card_for_report["applies_to_segment"] = int(next_segment_index or 1)
+        card_for_report["report_timing"] = "pre_next_sampler"
+
+        mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+        field_mode = str(getattr(self, "_event_strategy_field_mode", "OFF") or "OFF").upper()
+        field_active = field_mode in ("HIGH_NOISE_FIELD", "LOW_REFINEMENT_FIELD", "DUAL_FIELD")
+        late_segment_pressure = clamp01(strategy.get("late_cut_pressure", 0.0))
+
+        roi_means = card.get("roi_temporal_means", {}) if isinstance(card, dict) and isinstance(card.get("roi_temporal_means", {}), dict) else {}
+        background_roi_names = [
+            "top_left_background",
+            "top_right_background",
+            "top_band_background",
+            "left_side_floor",
+            "right_side_floor",
+            "lower_side_floor",
+        ]
+        dominant_region = ""
+        dominant_value = 0.0
+        for name in background_roi_names:
+            value = safe_float(roi_means.get(name, 0.0))
+            if value >= dominant_value:
+                dominant_region = name
+                dominant_value = value
+
+        background_drift_score = clamp01(card.get("background_drift_score", 0.0) if isinstance(card, dict) else 0.0)
+        weak_separation_score = clamp01(card.get("weak_center_background_separation_score", 0.0) if isinstance(card, dict) else 0.0)
+        global_scene_drift_score = clamp01(card.get("global_scene_drift_score", 0.0) if isinstance(card, dict) else 0.0)
+        top_band_pressure = clamp01((safe_float(roi_means.get("top_band_background", 0.0)) - 3.25) / 2.0)
+        background_region_pressure = clamp01((dominant_value - 3.25) / 2.0)
+        background_anchor_pressure = max(background_drift_score, weak_separation_score, global_scene_drift_score)
+        spatial_anchor_pressure = max(background_drift_score, background_region_pressure, top_band_pressure)
+
+        active = (
+            mode == "STRATEGY_PRESSURE_WINDOW"
+            and field_active
+            and isinstance(card, dict)
+            and str(card.get("status", "") or "") not in ("not_available", "bad_shape", "not_enough_frames", "failed_nonfatal")
+        )
+        low_positive_intent_multiplier = 1.0 - min(
+            0.16,
+            0.08 * background_anchor_pressure
+            + 0.05 * top_band_pressure
+            + 0.03 * late_segment_pressure,
+        )
+        max_delta_window_multiplier = 1.0 - min(
+            0.14,
+            0.06 * spatial_anchor_pressure
+            + 0.06 * background_region_pressure
+            + 0.02 * late_segment_pressure,
+        )
+        temporal_stability_multiplier = 1.0 - min(
+            0.14,
+            0.05 * spatial_anchor_pressure
+            + 0.05 * top_band_pressure
+            + 0.04 * late_segment_pressure,
+        )
+
+        control = {
+            "status": "active" if active else "report_only",
+            "version": "cascade_boundary_background_anchor_control_v1",
+            "source": "selected_tail_visible_frames_before_next_sampler",
+            "pause_segment_index": int(pause_segment_index or 1),
+            "applies_to_segment": int(next_segment_index or 1),
+            "background_anchor_status": str(card.get("status", "unknown") if isinstance(card, dict) else "unknown"),
+            "background_anchor_pressure": float(background_anchor_pressure),
+            "late_segment_pressure": float(late_segment_pressure),
+            "top_band_pressure": float(top_band_pressure),
+            "spatial_anchor_pressure": float(spatial_anchor_pressure),
+            "background_region_pressure": float(background_region_pressure),
+            "dominant_background_region": str(dominant_region),
+            "low_positive_intent_multiplier": float(max(0.78, min(1.0, low_positive_intent_multiplier))),
+            "max_delta_window_multiplier": float(max(0.80, min(1.0, max_delta_window_multiplier))),
+            "temporal_stability_multiplier": float(max(0.80, min(1.0, temporal_stability_multiplier))),
+            "spatial_carrier_preservation_map": {
+                "source_card_stage": card_for_report.get("stage", ""),
+                "background_temporal_mean": card.get("background_temporal_mean", 0.0) if isinstance(card, dict) else 0.0,
+                "center_temporal_mean": card.get("center_temporal_mean", 0.0) if isinstance(card, dict) else 0.0,
+                "center_background_ratio": card.get("center_background_ratio", 0.0) if isinstance(card, dict) else 0.0,
+                "global_scene_drift_score": float(global_scene_drift_score),
+            },
+            "policy": "bind_selected_tail_background_evidence_before_next_sampler",
+            "mode": mode,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula_role": "selected tail Outcome(t-1) background/space evidence -> next sampler StrategyCarrier guard",
+            "formula": (
+                "The chosen tail is read before the next cascade as background/source evidence. "
+                "This gives SpatialCarrierPreservationMap real pre-sampler evidence instead of a final report-only card."
+            ),
+        }
+        if not active:
+            control["reason"] = "requires_strategy_pressure_window_and_strategy_field_or_valid_frame_card"
+
+        self._event_background_anchor_preservation_control = control
+        if records is not None:
+            records.append(card_for_report)
+            records.append({
+                "stage": "EventCascadeBoundaryBackgroundAnchorControlBind",
+                "status": control["status"],
+                "version": control["version"],
+                "pause_segment_index": control["pause_segment_index"],
+                "applies_to_segment": control["applies_to_segment"],
+                "background_anchor_status": control["background_anchor_status"],
+                "input_pressures": {
+                    "background_anchor_pressure": control["background_anchor_pressure"],
+                    "spatial_anchor_pressure": control["spatial_anchor_pressure"],
+                    "background_region_pressure": control["background_region_pressure"],
+                    "top_band_pressure": control["top_band_pressure"],
+                    "late_segment_pressure": control["late_segment_pressure"],
+                },
+                "multipliers": {
+                    "low_positive_intent_multiplier": control["low_positive_intent_multiplier"],
+                    "max_delta_window_multiplier": control["max_delta_window_multiplier"],
+                    "temporal_stability_multiplier": control["temporal_stability_multiplier"],
+                },
+                "dominant_background_region": control["dominant_background_region"],
+                "formula": control["formula"],
+            })
+        return control
 
     def _record_segment_strategy_carrier(self, records, *, segment_index, positive_prompt, negative_prompt, context=None):
         context = context if isinstance(context, dict) else {}
@@ -2456,14 +3080,24 @@ class SingularityExecutionMixin:
         changed_positive = bool(previous_positive_signature and positive_signature != previous_positive_signature)
         changed_negative = bool(previous_negative_signature and negative_signature != previous_negative_signature)
         prompt_source = str(context.get("prompt_source") or ("launch_time" if segment_index_i == 1 else "previous_segment"))
+        semantic_phase_window = context.get("semantic_phase_window", {})
+        if not isinstance(semantic_phase_window, dict):
+            semantic_phase_window = {}
 
         record = {
             "stage": "EventSegmentStrategyCarrierReview",
             "status": "recorded",
-            "review_version": "segment_strategy_carrier_review_v1",
+            "review_version": "segment_strategy_carrier_review_v2_semantic_phase_window",
             "segment_index": segment_index_i,
             "prompt_source": prompt_source,
             "prompt_transcode_mode": str(context.get("prompt_transcode_mode") or ""),
+            "semantic_phase_window": {
+                "status": semantic_phase_window.get("status", ""),
+                "applies_to_segment": semantic_phase_window.get("applies_to_segment", None),
+                "semantic_reentry_pressure": semantic_phase_window.get("semantic_reentry_pressure", None),
+                "local_window_strength": semantic_phase_window.get("local_window_strength", None),
+                "model_facing_prompt_text": semantic_phase_window.get("model_facing_prompt_text", "unchanged"),
+            },
             "active_positive_signature": positive_signature,
             "active_negative_signature": negative_signature,
             "previous_active_positive_signature": previous_positive_signature,
@@ -2473,6 +3107,8 @@ class SingularityExecutionMixin:
             "changed_from_previous_segment": bool(changed_positive or changed_negative),
             "positive_prompt_length": len(positive_text),
             "negative_prompt_length": len(negative_text),
+            "positive_prompt_text": positive_text,
+            "negative_prompt_text": negative_text,
             "last_runtime_prompt_update_applies_to_segment": context.get("last_runtime_prompt_update_applies_to_segment", None),
             "formula": (
                 "Segment prompt text is the local StrategyCarrier before CLIP encoding; "
@@ -3025,6 +3661,7 @@ class SingularityExecutionMixin:
                     "prompt_continuity_policy": ctx.get("prompt_continuity_policy", ""),
                     "current_active_positive_signature": ctx.get("current_active_positive_signature", ""),
                     "current_active_negative_signature": ctx.get("current_active_negative_signature", ""),
+                    "semantic_phase_window": ctx.get("semantic_phase_window", {}) if isinstance(ctx.get("semantic_phase_window", {}), dict) else {},
                 },
                 "control_mode": "REPORT_ONLY",
                 "active_control_allowed": False,
@@ -3064,12 +3701,14 @@ class SingularityExecutionMixin:
         strategy_carrier_context=None,
     ):
         """
-        r113 bounded active research surface.
+        r157 bounded active research surface.
 
         The visible selected frame can be exact while WanImageToVideo rebuilds a
-        fresh hidden latent entry. This bridge gives the next segment's first
-        latent slice a small, clamped memory of the previous segment latent tail.
-        It is intentionally not a full latent replacement.
+        fresh hidden latent entry. A first-slice-only bridge can disappear from
+        the final video because cascade concat drops the duplicate first frame.
+        This bridge therefore carries a tiny decayed tail memory across a short
+        entry latent window, then attenuates itself when the latent carriers are
+        too far apart. It is intentionally not a full latent replacement.
         """
         if records is None:
             records = []
@@ -3176,7 +3815,7 @@ class SingularityExecutionMixin:
             except Exception as e:
                 return {"status": "failed", "error": str(e)[:240]}
 
-        def _blend_first_slice(base_tensor, previous_tail, *, alpha, max_step):
+        def _blend_entry_window(base_tensor, previous_tail, *, alpha, max_step, window_slices, weight_floor=0.0, region_weight=None):
             try:
                 import torch
                 if base_tensor is None or previous_tail is None:
@@ -3189,39 +3828,163 @@ class SingularityExecutionMixin:
                         "status": "unsupported_shape",
                         "shape": [int(x) for x in list(base_tensor.shape)] if hasattr(base_tensor, "shape") else None,
                     }
-                current_first = base_tensor[:, :, :1, :, :]
+                requested_window = max(1, int(window_slices or 1))
+                entry_window = max(1, min(requested_window, int(base_tensor.shape[2])))
+                current_window = base_tensor[:, :, :entry_window, :, :]
                 target = previous_tail.to(device=base_tensor.device, dtype=torch.float32)
-                current_f = torch.nan_to_num(current_first.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
-                if list(current_f.shape) != list(target.shape):
+                current_f = torch.nan_to_num(current_window.detach().float(), nan=0.0, posinf=0.0, neginf=0.0)
+                if hasattr(target, "dim") and target.dim() == 5 and int(target.shape[2]) == 1 and entry_window > 1:
+                    target_window = target.expand(-1, -1, entry_window, -1, -1).clone()
+                else:
+                    target_window = target
+                if list(current_f.shape) != list(target_window.shape):
                     return base_tensor, {
                         "status": "shape_mismatch",
                         "current_shape": [int(x) for x in list(current_f.shape)],
-                        "target_shape": [int(x) for x in list(target.shape)],
+                        "target_shape": [int(x) for x in list(target_window.shape)],
+                        "requested_window_slices": int(requested_window),
+                        "entry_window_slices": int(entry_window),
                     }
-                raw_delta = torch.nan_to_num(target - current_f, nan=0.0, posinf=0.0, neginf=0.0)
+                raw_delta = torch.nan_to_num(target_window - current_f, nan=0.0, posinf=0.0, neginf=0.0)
                 bounded_delta = torch.clamp(raw_delta, min=-float(max_step), max=float(max_step))
-                memory_delta = bounded_delta * float(alpha)
+                weight_floor = max(0.0, min(1.0, float(weight_floor or 0.0)))
+                if entry_window > 1:
+                    weights = torch.linspace(
+                        1.0,
+                        1.0 / float(entry_window),
+                        entry_window,
+                        device=base_tensor.device,
+                        dtype=torch.float32,
+                    ).view(1, 1, entry_window, 1, 1)
+                    if weight_floor > 0.0:
+                        weights = torch.maximum(
+                            weights,
+                            torch.full_like(weights, float(weight_floor)),
+                        )
+                else:
+                    weights = torch.ones((1, 1, 1, 1, 1), device=base_tensor.device, dtype=torch.float32)
+                region_record = {"status": "inactive"}
+                if region_weight is not None:
+                    try:
+                        region = region_weight.to(device=base_tensor.device, dtype=torch.float32)
+                        if list(region.shape[-2:]) == list(current_f.shape[-2:]) and region.dim() == 5:
+                            region = torch.nan_to_num(region, nan=1.0, posinf=1.0, neginf=1.0)
+                            region = torch.clamp(region, min=0.0, max=1.0)
+                            region_record = {
+                                "status": "applied",
+                                "shape": [int(x) for x in list(region.shape)],
+                                "min": float(region.min().item()),
+                                "max": float(region.max().item()),
+                                "mean": float(region.mean().item()),
+                            }
+                        else:
+                            region_record = {
+                                "status": "shape_mismatch",
+                                "region_shape": [int(x) for x in list(region.shape)],
+                                "current_shape": [int(x) for x in list(current_f.shape)],
+                            }
+                            region = None
+                    except Exception as e:
+                        region_record = {"status": "failed", "error": str(e)[:240]}
+                        region = None
+                else:
+                    region = None
+                memory_delta = bounded_delta * float(alpha) * weights
+                if region is not None:
+                    memory_delta = memory_delta * region
                 out = base_tensor.clone()
-                out[:, :, :1, :, :] = (current_f + memory_delta).to(dtype=base_tensor.dtype, device=base_tensor.device)
-                first_after = out[:, :, :1, :, :]
+                out[:, :, :entry_window, :, :] = (current_f + memory_delta).to(dtype=base_tensor.dtype, device=base_tensor.device)
+                window_after = out[:, :, :entry_window, :, :]
                 return out, {
                     "status": "applied",
                     "alpha": float(alpha),
                     "max_step": float(max_step),
+                    "requested_window_slices": int(requested_window),
+                    "entry_window_slices": int(entry_window),
+                    "selected_tail_source_weight_floor": float(weight_floor),
+                    "decay_weights": [float(x) for x in weights.reshape(-1).detach().cpu().tolist()],
+                    "region_weight": region_record,
                     "raw_delta_abs_mean": float(raw_delta.abs().mean().item()),
                     "raw_delta_max_abs": float(raw_delta.abs().max().item()),
                     "bounded_delta_abs_mean": float(bounded_delta.abs().mean().item()),
                     "bounded_delta_max_abs": float(bounded_delta.abs().max().item()),
                     "memory_delta_abs_mean": float(memory_delta.abs().mean().item()),
                     "memory_delta_max_abs": float(memory_delta.abs().max().item()),
-                    "before_metric": _compare(target, current_first),
-                    "after_metric": _compare(target, first_after),
+                    "before_metric": _compare(target_window, current_window),
+                    "after_metric": _compare(target_window, window_after),
                 }
             except Exception as e:
                 return base_tensor, {
                     "status": "failed",
                     "error": str(e)[:240],
                 }
+
+        def _make_selected_tail_region_weight(base_tensor, pressure, semantic_phase_pressure=0.0):
+            try:
+                import torch
+                if base_tensor is None or not (hasattr(base_tensor, "dim") and base_tensor.dim() == 5):
+                    return None, {"status": "unavailable", "reason": "unsupported_tensor"}
+                h = int(base_tensor.shape[-2])
+                w = int(base_tensor.shape[-1])
+                if h <= 1 or w <= 1:
+                    return None, {"status": "unavailable", "reason": "too_small"}
+                pressure = max(0.0, min(1.0, float(pressure or 0.0)))
+                semantic_phase_pressure = max(0.0, min(1.0, float(semantic_phase_pressure or 0.0)))
+                yy = torch.linspace(0.0, 1.0, h, device=base_tensor.device, dtype=torch.float32).view(1, 1, 1, h, 1)
+                xx = torch.linspace(0.0, 1.0, w, device=base_tensor.device, dtype=torch.float32).view(1, 1, 1, 1, w)
+                center = torch.clamp(
+                    1.0
+                    - torch.pow((xx - 0.50).abs() / 0.42, 4)
+                    - torch.pow((yy - 0.58).abs() / 0.52, 4),
+                    min=0.0,
+                    max=1.0,
+                )
+                top_guard = torch.clamp((0.34 - yy) / 0.34, min=0.0, max=1.0)
+                edge_guard = torch.clamp(((xx - 0.50).abs() - 0.34) / 0.16, min=0.0, max=1.0)
+                weight = (
+                    0.80
+                    + (0.18 + 0.04 * pressure + 0.02 * semantic_phase_pressure) * center
+                    - (0.10 + 0.08 * pressure + 0.10 * semantic_phase_pressure) * top_guard
+                    - (0.06 + 0.05 * pressure + 0.04 * semantic_phase_pressure) * edge_guard
+                )
+                weight = torch.clamp(weight, min=0.56, max=1.0)
+                center_mask = (center >= 0.50)
+                top_mask = (yy.expand_as(weight) <= 0.22)
+                edge_mask = (edge_guard.expand_as(weight) >= 0.50)
+
+                def _masked_mean(mask):
+                    try:
+                        values = weight[mask]
+                        if values.numel() <= 0:
+                            return None
+                        return float(values.mean().item())
+                    except Exception:
+                        return None
+
+                record = {
+                    "status": "active",
+                    "guard_version": "selected_tail_regional_guard_v1_background_protected",
+                    "policy": "center/action weighted, top/background/edge protected",
+                    "shape": [1, 1, 1, h, w],
+                    "pressure": float(pressure),
+                    "semantic_phase_pressure": float(semantic_phase_pressure),
+                    "min": float(weight.min().item()),
+                    "max": float(weight.max().item()),
+                    "mean": float(weight.mean().item()),
+                    "center_mean": _masked_mean(center_mask.expand_as(weight)),
+                    "top_band_mean": _masked_mean(top_mask),
+                    "edge_mean": _masked_mean(edge_mask),
+                    "prompt_text_injection_allowed": False,
+                    "semantic_math_in_prompt_allowed": False,
+                    "formula": (
+                        "Selected-tail Strategy returns through a spatially guarded carrier: action/contact center may inherit tail pressure, "
+                        "while top/background/edge/detail regions receive reduced echo pressure. R177 restores the R173 baseline "
+                        "edge guard when semantic phase tensor control is fenced to report-only."
+                    ),
+                }
+                return weight, record
+            except Exception as e:
+                return None, {"status": "failed", "error": str(e)[:240]}
 
         def _control_float(controls, key, default, min_value, max_value):
             try:
@@ -3230,6 +3993,59 @@ class SingularityExecutionMixin:
             except Exception:
                 out = float(default)
             return max(float(min_value), min(float(max_value), out))
+
+        def _context_digest(ctx):
+            if not isinstance(ctx, dict):
+                return {}
+            allowed = [
+                "prompt_source",
+                "prompt_transcode_mode",
+                "prompt_continuity_reused",
+                "prompt_continuity_policy",
+                "launch_raw_positive_signature",
+                "launch_raw_negative_signature",
+                "launch_raw_positive_normalized_signature",
+                "launch_raw_negative_normalized_signature",
+                "launch_active_positive_signature",
+                "launch_active_negative_signature",
+                "launch_active_positive_normalized_signature",
+                "launch_active_negative_normalized_signature",
+                "current_active_positive_signature",
+                "current_active_negative_signature",
+                "current_active_positive_normalized_signature",
+                "current_active_negative_normalized_signature",
+                "current_positive_prompt_transformed",
+                "current_negative_prompt_transformed",
+                "current_positive_prompt_sanitized",
+                "current_negative_prompt_sanitized",
+                "last_runtime_prompt_update_applies_to_segment",
+                "semantic_phase_window_applies_to_segment",
+                "last_active_positive_signature",
+                "last_active_negative_signature",
+                "last_segment_index",
+                "last_prompt_source",
+            ]
+            digest = {k: ctx.get(k) for k in allowed if k in ctx}
+            phase_window = ctx.get("semantic_phase_window", {})
+            if isinstance(phase_window, dict):
+                digest["semantic_phase_window"] = {
+                    "status": phase_window.get("status", ""),
+                    "applies_to_segment": phase_window.get("applies_to_segment", None),
+                    "semantic_reentry_pressure": phase_window.get("semantic_reentry_pressure", None),
+                    "local_window_strength": phase_window.get("local_window_strength", None),
+                    "global_cut_phase": phase_window.get("global_cut_phase", None),
+                    "remaining_global_phase": phase_window.get("remaining_global_phase", None),
+                }
+            digest["conditioning_cache_present"] = bool(ctx.get("conditioning_cache"))
+            try:
+                digest["conditioning_cache_key_count"] = len(ctx.get("conditioning_cache") or {})
+            except Exception:
+                digest["conditioning_cache_key_count"] = None
+            if "phase_strategy_base_positive_prompt" in ctx:
+                text = str(ctx.get("phase_strategy_base_positive_prompt") or "")
+                digest["phase_strategy_base_positive_signature"] = ctx.get("phase_strategy_base_positive_signature", "")
+                digest["phase_strategy_base_positive_length"] = len(text)
+            return digest
 
         try:
             mode = str(getattr(self, "_event_math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
@@ -3242,27 +4058,256 @@ class SingularityExecutionMixin:
             low_strength = 1.0
 
         bridge_controls = getattr(self, "_event_latent_memory_bridge_controls", {}) or {}
+        remaining_strategy = getattr(self, "_event_cascade_remaining_strategy", {}) or {}
+        try:
+            restart_risk = float(remaining_strategy.get("restart_risk", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0
+        except Exception:
+            restart_risk = 0.0
+        try:
+            progress_ratio = float(remaining_strategy.get("progress_ratio", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0
+        except Exception:
+            progress_ratio = 0.0
+        restart_risk = max(0.0, min(1.0, restart_risk))
+        progress_ratio = max(0.0, min(1.0, progress_ratio))
+        try:
+            remaining_applies_to_segment = int(remaining_strategy.get("applies_to_segment", 0) or 0) if isinstance(remaining_strategy, dict) else 0
+        except Exception:
+            remaining_applies_to_segment = 0
+        remaining_strategy_matches_segment = bool(
+            int(segment_index or 0) > 1
+            and remaining_applies_to_segment == int(segment_index or 0)
+        )
+        if not remaining_strategy_matches_segment:
+            restart_risk = 0.0
+            progress_ratio = 0.0
+        try:
+            route_pressure = float(remaining_strategy.get("route_pressure", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0
+        except Exception:
+            route_pressure = 0.0
+        try:
+            late_cut_pressure = float(remaining_strategy.get("late_cut_pressure", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0
+        except Exception:
+            late_cut_pressure = 0.0
+        try:
+            motion_memory_pressure = float(remaining_strategy.get("motion_memory_pressure", 0.0) or 0.0) if isinstance(remaining_strategy, dict) else 0.0
+        except Exception:
+            motion_memory_pressure = 0.0
+        route_pressure = max(0.0, min(1.0, route_pressure))
+        late_cut_pressure = max(0.0, min(1.0, late_cut_pressure))
+        motion_memory_pressure = max(0.0, min(1.0, motion_memory_pressure))
+        if not remaining_strategy_matches_segment:
+            route_pressure = 0.0
+            late_cut_pressure = 0.0
+            motion_memory_pressure = 0.0
+        selected_tail_source_pressure = max(
+            restart_risk,
+            motion_memory_pressure,
+            route_pressure * late_cut_pressure,
+        )
+        selected_tail_source_pressure = max(0.0, min(1.0, selected_tail_source_pressure))
+        semantic_phase_window = remaining_strategy.get("semantic_phase_window", {}) if isinstance(remaining_strategy, dict) else {}
+        if not isinstance(semantic_phase_window, dict):
+            semantic_phase_window = {}
+        try:
+            semantic_phase_window_strength = float(semantic_phase_window.get("local_window_strength", 0.0) or 0.0)
+        except Exception:
+            semantic_phase_window_strength = 0.0
+        try:
+            semantic_reentry_pressure = float(semantic_phase_window.get("semantic_reentry_pressure", 0.0) or 0.0)
+        except Exception:
+            semantic_reentry_pressure = 0.0
+        semantic_phase_window_strength = max(0.0, min(1.0, semantic_phase_window_strength))
+        semantic_reentry_pressure = max(0.0, min(1.0, semantic_reentry_pressure))
+        semantic_phase_matches_segment = bool(
+            int(segment_index or 0) > 1
+            and int(semantic_phase_window.get("applies_to_segment", 0) or 0) == int(segment_index or 0)
+        )
+        semantic_phase_tensor_control_allowed = False
+        selected_tail_source_weight_floor = 0.0
+        if int(segment_index or 0) > 1 and selected_tail_source_pressure > 0.0:
+            # R171 keeps alpha/window stable and lowers the global floor cap
+            # slightly; region weights decide where selected-tail echo may act.
+            selected_tail_source_weight_floor = min(0.60, 0.50 + 0.12 * selected_tail_source_pressure)
+        selected_tail_source_carrier = {
+            "status": "active" if selected_tail_source_pressure > 0.0 and int(segment_index or 0) > 1 else "inactive",
+            "carrier_version": "selected_tail_source_strategy_carrier_v2_regional_guard",
+            "segment_index": int(segment_index) if segment_index is not None else None,
+            "remaining_strategy_matches_segment": bool(remaining_strategy_matches_segment),
+            "remaining_strategy_applies_to_segment": int(remaining_applies_to_segment),
+            "resume_frame_index": int(remaining_strategy.get("resume_frame_index", 0) or 0) if isinstance(remaining_strategy, dict) else 0,
+            "progress_ratio": float(progress_ratio),
+            "route_pressure": float(route_pressure),
+            "late_cut_pressure": float(late_cut_pressure),
+            "restart_risk": float(restart_risk),
+            "motion_memory_pressure": float(motion_memory_pressure),
+            "selected_tail_source_pressure": float(selected_tail_source_pressure),
+            "post_drop_decay_floor": float(selected_tail_source_weight_floor),
+            "regional_guard": {"status": "pending_concat_latent"},
+            "tail_observed_behavior": remaining_strategy.get("tail_observed_behavior", {}) if isinstance(remaining_strategy, dict) else {},
+            "semantic_phase_window": semantic_phase_window,
+            "semantic_phase_window_matches_segment": bool(semantic_phase_matches_segment),
+            "semantic_phase_window_strength": float(semantic_phase_window_strength),
+            "semantic_reentry_pressure": float(semantic_reentry_pressure),
+            "semantic_phase_tensor_control_allowed": bool(semantic_phase_tensor_control_allowed),
+            "alpha_changed": False,
+            "entry_window_changed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "formula": (
+                "Selected tail visible Outcome(t-1) and its motion ObservedBehavior(t-1) bind the next segment entry "
+                "StrategyCarrier by preserving the post-drop temporal echo decay, not by rewriting prompt text."
+            ),
+        }
 
         previous_tail = _latent_time_slice(previous_segment_latent, "last")
         wan_samples = self._tensor_from_latent_like(wan_latent)
         wan_first = _latent_time_slice(wan_latent, "first")
         concat_latent = _find_named_tensor(wan_positive, "concat_latent_image")
         concat_first = _latent_time_slice(concat_latent, "first")
-        active_requested = bool(mode == "LATENT_MEMORY_BRIDGE" and int(segment_index or 0) > 1)
-        available = bool(previous_tail is not None and wan_first is not None)
+        max_risk_requested = bool(mode == "MAX_RISK_STRATEGY_RING")
+        source_noise_micro_bridge_requested = bool(mode == "SOURCE_NOISE_FIELD_SHAPING" and int(segment_index or 0) > 1)
+        active_requested = bool(
+            mode in ("LATENT_MEMORY_BRIDGE", "MAX_RISK_STRATEGY_RING")
+            and int(segment_index or 0) > 1
+        ) or source_noise_micro_bridge_requested
+        available = bool(
+            previous_tail is not None
+            and (
+                concat_first is not None
+                if source_noise_micro_bridge_requested
+                else wan_first is not None
+            )
+        )
 
         wan_alpha = _control_float(bridge_controls, "wan_alpha", 0.10, 0.0, 0.50)
         concat_alpha = _control_float(bridge_controls, "concat_alpha", 0.06, 0.0, 0.50)
         wan_max_step = _control_float(bridge_controls, "wan_max_step", 0.45, 0.0, 2.0)
         concat_max_step = _control_float(bridge_controls, "concat_max_step", 0.28, 0.0, 2.0)
+        if source_noise_micro_bridge_requested:
+            # R170 keeps the R168/R169 model-facing carrier split. R161/R162 showed that Wan seed
+            # pressure alone is weak/invisible, while concat_latent_image is a real
+            # StrategyCarrier into the model. Keep this micro package concat-only.
+            wan_alpha = 0.0
+            concat_alpha = 0.008
+            wan_max_step = 0.0
+            concat_max_step = 0.035
+            if semantic_phase_matches_segment and semantic_phase_window_strength > 0.0:
+                # R177: R174/R175 proved this carrier reaches generation, but both
+                # alpha-up and alpha-down slightly worsened seam pressure. Keep the
+                # semantic phase window as report evidence only and preserve the
+                # R173 region guard baseline until a better active surface is chosen.
+                semantic_phase_tensor_control_allowed = False
+        selected_tail_region_weight = None
+        selected_tail_region_guard = {"status": "inactive"}
+        if source_noise_micro_bridge_requested and concat_latent is not None and selected_tail_source_pressure > 0.0:
+            selected_tail_region_weight, selected_tail_region_guard = _make_selected_tail_region_weight(
+                concat_latent,
+                selected_tail_source_pressure,
+                0.0,
+            )
+        selected_tail_source_carrier["regional_guard"] = selected_tail_region_guard
+        entry_window_slices = 1
+        if int(segment_index or 0) > 1:
+            if restart_risk >= 0.52 or progress_ratio >= 0.75:
+                entry_window_slices = 3
+            elif restart_risk >= 0.25 or progress_ratio >= 0.50:
+                entry_window_slices = 2
+        if source_noise_micro_bridge_requested:
+            # The first decoded entry frame is usually dropped during cascade concat.
+            # A two-slice micro echo lets the bridge reach the first visible post-seam frame
+            # without using the heavy research LATENT_MEMORY_BRIDGE route.
+            entry_window_slices = 2
+        alpha_multiplier = 0.70 + (0.30 * restart_risk)
+        base_effective_wan_alpha = max(0.0, min(0.50, wan_alpha * alpha_multiplier))
+        base_effective_concat_alpha = max(0.0, min(0.50, concat_alpha * alpha_multiplier))
+        before_wan_metric = _compare(previous_tail, wan_first)
+        before_concat_metric = _compare(previous_tail, concat_first)
+
+        def _metric_abs_mean(metric):
+            try:
+                if isinstance(metric, dict) and metric.get("status") == "ok":
+                    return float(metric.get("abs_mean", 0.0) or 0.0)
+            except Exception:
+                return None
+            return None
+
+        def _metric_band(metric):
+            try:
+                if isinstance(metric, dict) and metric.get("status") == "ok":
+                    return str(metric.get("band", "unknown") or "unknown")
+            except Exception:
+                return "unknown"
+            return "unknown"
+
+        wan_before_abs = _metric_abs_mean(before_wan_metric)
+        concat_before_abs = _metric_abs_mean(before_concat_metric)
+        mismatch_values = [v for v in (wan_before_abs, concat_before_abs) if v is not None]
+        max_before_abs_mean = max(mismatch_values) if mismatch_values else 0.0
+        mismatch_bands = [_metric_band(before_wan_metric), _metric_band(before_concat_metric)]
+        alpha_guard_wan = 1.0
+        alpha_guard_concat = 1.0
+        guarded_entry_window_slices = int(entry_window_slices)
+        guard_status = "open"
+        guard_reason = "latent carriers are within admissible bridge range"
+        if "strong_shift" in mismatch_bands or max_before_abs_mean >= 0.75:
+            if max_before_abs_mean >= 1.25:
+                guard_status = "hard_guard_strong_latent_mismatch"
+                alpha_guard_wan = 0.0
+                alpha_guard_concat = 0.0
+                guarded_entry_window_slices = min(guarded_entry_window_slices, 1)
+                guard_reason = (
+                    "previous tail and next entry latent are too far apart; the standard bridge records the Strategy return "
+                    "but skips tensor mutation instead of forcing a correction spike"
+                )
+            else:
+                guard_status = "soft_guard_strong_latent_mismatch"
+                alpha_guard_wan = 0.35
+                alpha_guard_concat = 0.45
+                guarded_entry_window_slices = min(guarded_entry_window_slices, 2)
+                guard_reason = (
+                    "previous tail and next entry latent are visibly shifted; bridge pressure narrows before high sampler"
+                )
+        effective_wan_alpha = max(0.0, min(0.50, base_effective_wan_alpha * alpha_guard_wan))
+        effective_concat_alpha = max(0.0, min(0.50, base_effective_concat_alpha * alpha_guard_concat))
+        entry_window_slices = int(guarded_entry_window_slices)
+        max_risk_hard_guard_override = False
+        source_noise_micro_hard_guard_override = False
+        if max_risk_requested and guard_status == "hard_guard_strong_latent_mismatch" and active_requested:
+            max_risk_hard_guard_override = True
+            effective_wan_alpha = max(
+                effective_wan_alpha,
+                min(0.006, max(0.001, base_effective_wan_alpha * 0.08)),
+            )
+            effective_concat_alpha = max(
+                effective_concat_alpha,
+                min(0.004, max(0.001, base_effective_concat_alpha * 0.08)),
+            )
+            entry_window_slices = 1
+            guard_reason = (
+                f"{guard_reason}; MAX_RISK_STRATEGY_RING explicitly overrides the hard guard with tiny "
+                "single-slice alpha for A/B research"
+            )
+        if source_noise_micro_bridge_requested and guard_status == "hard_guard_strong_latent_mismatch" and active_requested:
+            source_noise_micro_hard_guard_override = True
+            effective_wan_alpha = 0.0
+            effective_concat_alpha = max(
+                effective_concat_alpha,
+                min(0.0012, max(0.0008, base_effective_concat_alpha * 0.10)),
+            )
+            entry_window_slices = 2
+            guard_reason = (
+                f"{guard_reason}; SOURCE_NOISE_MICRO_CONCAT_ONLY overrides the hard guard with tiny "
+                "two-slice post-drop concat alpha for seam A/B while leaving Wan seed entry native"
+            )
 
         record = {
             "stage": "EventSegmentEntryLatentMemoryBridge",
             "status": "inactive_mode",
-            "bridge_version": "segment_entry_latent_memory_bridge_v2_explicit_controls",
+            "bridge_version": "segment_entry_latent_memory_bridge_v12_regional_tail_guard",
             "segment_index": int(segment_index) if segment_index is not None else None,
             "mode": mode,
             "control_mode": mode,
+            "source_noise_micro_bridge_requested": bool(source_noise_micro_bridge_requested),
             "active_control_allowed": bool(active_requested),
             "prompt_text_injection_allowed": False,
             "semantic_math_in_prompt_allowed": False,
@@ -3273,31 +4318,94 @@ class SingularityExecutionMixin:
             },
             "bridge_controls": {
                 "source": "explicit_widgets",
+                "package": "SOURCE_NOISE_MICRO_CONCAT_ONLY" if source_noise_micro_bridge_requested else "MAX_RISK" if max_risk_requested else "RESEARCH",
+                "micro_bridge_surface": "wan_positive.concat_latent_image" if source_noise_micro_bridge_requested else "wan_latent_and_concat_latent",
                 "wan_alpha": float(wan_alpha),
                 "concat_alpha": float(concat_alpha),
                 "wan_max_step": float(wan_max_step),
                 "concat_max_step": float(concat_max_step),
+                "base_effective_wan_alpha": float(base_effective_wan_alpha),
+                "base_effective_concat_alpha": float(base_effective_concat_alpha),
+                "effective_wan_alpha": float(effective_wan_alpha),
+                "effective_concat_alpha": float(effective_concat_alpha),
+                "entry_window_slices": int(entry_window_slices),
+                "post_drop_entry_echo": bool(source_noise_micro_bridge_requested and int(entry_window_slices) >= 2),
+                "selected_tail_source_carrier": selected_tail_source_carrier,
+                "semantic_phase_window_carrier": {
+                    "status": (
+                        "report_only"
+                        if source_noise_micro_bridge_requested
+                        and semantic_phase_matches_segment
+                        and not semantic_phase_tensor_control_allowed
+                        else semantic_phase_window.get("status", "")
+                    ),
+                    "matches_segment": bool(semantic_phase_matches_segment),
+                    "semantic_reentry_pressure": float(semantic_reentry_pressure),
+                    "local_window_strength": float(semantic_phase_window_strength),
+                    "alpha_policy": "report_only_rejected_after_r174_r175" if source_noise_micro_bridge_requested and semantic_phase_matches_segment else "inactive",
+                    "tensor_control_allowed": bool(semantic_phase_tensor_control_allowed),
+                    "rejection_reason": "R174 alpha-up and R175 alpha-down both failed to reduce seam pressure on concat_latent_image",
+                    "prompt_text_injection_allowed": False,
+                    "semantic_math_in_prompt_allowed": False,
+                },
+                "alpha_multiplier_from_remaining_strategy": float(alpha_multiplier),
+                "admissibility_guard": {
+                    "status": guard_status,
+                    "reason": guard_reason,
+                    "max_risk_hard_guard_override": bool(max_risk_hard_guard_override),
+                    "source_noise_micro_hard_guard_override": bool(source_noise_micro_hard_guard_override),
+                    "wan_before_abs_mean": wan_before_abs,
+                    "concat_before_abs_mean": concat_before_abs,
+                    "max_before_abs_mean": float(max_before_abs_mean),
+                    "wan_before_band": mismatch_bands[0],
+                    "concat_before_band": mismatch_bands[1],
+                    "alpha_guard_wan": float(alpha_guard_wan),
+                    "alpha_guard_concat": float(alpha_guard_concat),
+                    "guarded_entry_window_slices": int(entry_window_slices),
+                },
                 "meaning": (
                     "These controls tune the latent-memory bridge only. "
-                    "They no longer reuse high_delta_strength/low_delta_strength."
+                    "They no longer reuse high_delta_strength/low_delta_strength. "
+                    "R171 SOURCE_NOISE_MICRO_CONCAT_ONLY uses fixed tiny concat alpha/max-step values only under SOURCE_NOISE_FIELD_SHAPING "
+                    "to test seam-entry continuity without enabling the heavier bridge UI route. It keeps a tiny concat two-slice "
+                    "post-drop signal even under the hard guard while leaving Wan seed entry native. R168 made that micro route concat-only "
+                    "because R167 changed output but did not improve seam and slightly reduced detail; R169 kept the alpha stable and "
+                    "extended the echo to the first visible post-drop entry frame. R170 added a selected-tail source decay floor; "
+                    "R171 keeps the same alpha/window but protects top/background/edge regions with a regional multiplier so the chosen tail "
+                    "Strategy returns mainly through the action/contact carrier. LATENT_MEMORY_BRIDGE keeps "
+                    "hard latent mismatch report-only; MAX_RISK_STRATEGY_RING may override that guard with a tiny "
+                    "single-slice ring."
                 ),
             },
             "bridge_params": {
-                "wan_latent_alpha": float(wan_alpha),
+                "wan_latent_alpha": float(effective_wan_alpha),
                 "wan_latent_max_step": float(wan_max_step),
-                "concat_latent_alpha": float(concat_alpha),
+                "concat_latent_alpha": float(effective_concat_alpha),
                 "concat_latent_max_step": float(concat_max_step),
-                "temporal_scope": "first_latent_slice_only",
+                "temporal_scope": "decayed_entry_latent_window",
+                "entry_window_slices": int(entry_window_slices),
+                "first_frame_drop_rationale": (
+                    "Cascade concat drops the duplicate first visible frame, so a first-slice-only memory may not reach "
+                    "the visible seam. The short entry window carries the same Strategy into the first post-drop frames."
+                ),
             },
             "before_metrics": {
-                "previous_tail_vs_wan_first": _compare(previous_tail, wan_first),
-                "previous_tail_vs_concat_first": _compare(previous_tail, concat_first),
+                "previous_tail_vs_wan_first": before_wan_metric,
+                "previous_tail_vs_concat_first": before_concat_metric,
             },
-            "strategy_carrier_context": strategy_carrier_context if isinstance(strategy_carrier_context, dict) else {},
+            "strategy_carrier_context": _context_digest(strategy_carrier_context),
             "formula": (
-                "Bounded latent-memory bridge: previous latent tail contributes a small clamped first-slice memory "
-                "to the next segment Wan latent entry before high sampler. R113 keeps this as its own Strategy-return "
-                "surface instead of coupling it to high/low delta scale."
+                "Bounded latent-memory bridge: previous latent tail contributes a small clamped decayed entry-window "
+                "memory to the next segment Wan latent entry before high sampler. R167 adds a source-noise micro echo "
+                "for SOURCE_NOISE_FIELD_SHAPING so seam continuity can be tested separately from central detail carrier. "
+                "R167 fixes the micro echo so the hard guard clamps it to a tiny single-slice signal instead of zeroing it. "
+                "R168 isolated that experiment to the model-facing concat_latent_image carrier and left Wan seed entry native. "
+                "R169 keeps alpha stable but uses a two-slice post-drop entry echo so the Strategy return can reach the first visible post-seam frame. "
+                "R170 kept alpha/window stable and let selected-tail source pressure raise only the decay floor of the second post-drop slice. "
+                "R171 keeps that route but adds a background-protected regional multiplier to the concat echo. "
+                "The standard route has a hard admissibility stop: "
+                "when carrier states are too far apart, the bridge records evidence and returns tensors unchanged. "
+                "MAX_RISK_STRATEGY_RING can explicitly override that stop with a tiny single-slice ring."
             ),
         }
 
@@ -3313,18 +4421,66 @@ class SingularityExecutionMixin:
 
         if not available:
             record["status"] = "unavailable"
-            record["reason"] = "previous tail or Wan latent first slice missing"
+            record["reason"] = (
+                "previous tail or concat latent first slice missing"
+                if source_noise_micro_bridge_requested
+                else "previous tail or Wan latent first slice missing"
+            )
+            records.append(record)
+            return wan_positive, wan_negative, wan_latent
+
+        if (
+            guard_status == "hard_guard_strong_latent_mismatch"
+            and not max_risk_hard_guard_override
+            and not source_noise_micro_hard_guard_override
+        ):
+            record.update({
+                "status": "hard_guard_report_only",
+                "active_tensor_mutation_applied": False,
+                "wan_latent_bridge": {
+                    "status": "skipped_by_hard_guard",
+                    "reason": guard_reason,
+                    "alpha": float(effective_wan_alpha),
+                    "entry_window_slices": int(entry_window_slices),
+                },
+                "concat_latent_bridge": {
+                    "status": "skipped_by_hard_guard",
+                    "reason": guard_reason,
+                    "alpha": float(effective_concat_alpha),
+                    "entry_window_slices": int(entry_window_slices),
+                },
+                "concat_latent_replaced": False,
+                "after_metrics": {
+                    "previous_tail_vs_wan_first": before_wan_metric,
+                    "previous_tail_vs_concat_first": before_concat_metric,
+                },
+                "policy": "hard_guard_no_tensor_mutation_when_latent_mismatch_is_too_large",
+                "next_route": (
+                    "Hard guard prevented active bridge pressure. Compare against OBSERVE_ONLY; if seam remains high, "
+                    "move to source/visible selected-tail Strategy reconstruction or sampler-entry route, not stronger latent blending."
+                ),
+            })
             records.append(record)
             return wan_positive, wan_negative, wan_latent
 
         bridged_wan_latent = wan_latent
-        bridged_wan_samples, wan_bridge = _blend_first_slice(
-            wan_samples,
-            previous_tail,
-            alpha=wan_alpha,
-            max_step=wan_max_step,
-        )
-        wan_applied = bool(isinstance(wan_bridge, dict) and wan_bridge.get("status") == "applied")
+        if source_noise_micro_bridge_requested:
+            wan_bridge = {
+                "status": "disabled_concat_only",
+                "reason": "R171 SOURCE_NOISE_MICRO_CONCAT_ONLY leaves Wan seed entry native and moves the selected-tail echo to a background-protected concat post-drop entry window",
+                "alpha": float(effective_wan_alpha),
+                "entry_window_slices": int(entry_window_slices),
+            }
+            wan_applied = False
+        else:
+            bridged_wan_samples, wan_bridge = _blend_entry_window(
+                wan_samples,
+                previous_tail,
+                alpha=effective_wan_alpha,
+                max_step=wan_max_step,
+                window_slices=entry_window_slices,
+            )
+            wan_applied = bool(isinstance(wan_bridge, dict) and wan_bridge.get("status") == "applied")
         if wan_applied:
             if isinstance(wan_latent, dict) and "samples" in wan_latent:
                 bridged_wan_latent = dict(wan_latent)
@@ -3336,11 +4492,14 @@ class SingularityExecutionMixin:
         concat_bridge = {"status": "unavailable"}
         concat_replaced = False
         if concat_latent is not None:
-            bridged_concat, concat_bridge = _blend_first_slice(
+            bridged_concat, concat_bridge = _blend_entry_window(
                 concat_latent,
                 previous_tail,
-                alpha=concat_alpha,
+                alpha=effective_concat_alpha,
                 max_step=concat_max_step,
+                window_slices=entry_window_slices,
+                weight_floor=selected_tail_source_weight_floor if source_noise_micro_bridge_requested else 0.0,
+                region_weight=selected_tail_region_weight if source_noise_micro_bridge_requested else None,
             )
             if isinstance(concat_bridge, dict) and concat_bridge.get("status") == "applied":
                 bridged_wan_positive, concat_replaced = _replace_named_tensor(
@@ -3351,6 +4510,8 @@ class SingularityExecutionMixin:
 
         record.update({
             "status": "applied" if wan_applied or concat_replaced else "not_applied",
+            "max_risk_hard_guard_override": bool(max_risk_hard_guard_override),
+            "source_noise_micro_hard_guard_override": bool(source_noise_micro_hard_guard_override),
             "wan_latent_bridge": wan_bridge,
             "concat_latent_bridge": concat_bridge,
             "concat_latent_replaced": bool(concat_replaced),
@@ -3358,7 +4519,15 @@ class SingularityExecutionMixin:
                 "previous_tail_vs_wan_first": _compare(previous_tail, _latent_time_slice(bridged_wan_latent, "first")),
                 "previous_tail_vs_concat_first": _compare(previous_tail, _latent_time_slice(_find_named_tensor(bridged_wan_positive, "concat_latent_image"), "first")),
             },
-            "policy": "bounded_first_slice_memory_return_before_high_sampler",
+            "policy": (
+                "max_risk_strategy_ring_single_slice_hard_guard_override"
+                if max_risk_hard_guard_override
+                else (
+                    "source_noise_micro_concat_only_post_drop_two_slice_hard_guard_override"
+                    if source_noise_micro_hard_guard_override
+                    else "bounded_post_drop_entry_memory_return_before_high_sampler"
+                )
+            ),
             "next_route": (
                 "Compare against r110 neutral run. If seam motion improves without background/identity noise, "
                 "promote to a narrower configurable research surface; otherwise reduce alpha or move to sampler-entry pressure."
@@ -3466,6 +4635,14 @@ class SingularityExecutionMixin:
             wan_latent=wan_latent,
             records=records,
             strategy_carrier_context=strategy_carrier_context,
+        )
+        wan_positive, wan_latent = self._event_source_noise_birth_shaping(
+            wan_latent,
+            records,
+            segment_index=segment_index,
+            route_label=segment_label,
+            source_image=scaled_image,
+            wan_positive=wan_positive,
         )
         self._stage_delay(stage_delay_seconds, records, f"cascade_{segment_index}_after_wan_image_to_video")
 
@@ -3677,6 +4854,7 @@ class SingularityExecutionMixin:
                 "EventMathStrategyCarrierCoupling",
                 "EventMathDualBranchDeltaCoupling",
                 "EventMath_decoded_frame_motion",
+                "EventPixelRegionMotionMap",
                 "EventUniversalMath_EventTextEncodePositive",
                 "EventUniversalMath_EventTextEncodeNegative",
                 "EventUniversalMath_EventImageScaleStart",
@@ -3696,6 +4874,14 @@ class SingularityExecutionMixin:
                 "EventCoreBodyConsistencyAudit",
                 "EventCoreBodyStageOrderAudit",
                 "EventCoreBodyCompletionGate",
+                "EventVisibleMotionStrategyReturnGate",
+                "EventTrueRegionTopologyEvidence",
+                "EventFractalStrategyIntersectionMap",
+                "EventRegionWeightedFractalStrategyReturn",
+                "EventPixelRegionMotionMap",
+                "EventActionBackgroundSeparationEvidence",
+                "EventPixelPressureDisagreementReview",
+                "EventPressurePixelReweightingProposal",
                 "EventCoreBodySummary",
                 "EventCoreBodyReportCard",
                 "EventCoreBodyFinalize",
@@ -3785,6 +4971,19 @@ class SingularityExecutionMixin:
             "precision_step": 0.0001,
             "precision_round": 0.0001,
         })
+        execution_records.append(self._event_public_surface_contract(
+            input_normalization=input_normalization,
+            strategy_control_plan=strategy_control_plan,
+            source_image_file=source_image_file,
+            image=image,
+            save_video=save_video,
+            save_report=save_report,
+            use_formula_recommendation=use_formula_recommendation,
+            prompt_transcode_mode=prompt_transcode_mode,
+            auto_calibration_mode=auto_calibration_mode,
+        ))
+        if hasattr(self, "_event_public_package_static_scan"):
+            execution_records.append(self._event_public_package_static_scan())
         execution_records.append({
             "stage": "EventUniversalPipelineMap",
             "status": "recorded",
@@ -4166,6 +5365,8 @@ class SingularityExecutionMixin:
             "current_negative_prompt_sanitized": bool(negative_prompt_sanitized),
             "launch_prompt_transcode_mode": prompt_transcode_mode_n,
             "last_runtime_prompt_update_applies_to_segment": None,
+            "phase_strategy_base_positive_prompt": positive_prompt,
+            "phase_strategy_base_positive_signature": active_positive_signature,
         }
 
         def _prompt_text_signature(text):
@@ -4228,6 +5429,16 @@ class SingularityExecutionMixin:
                 if isinstance(local_packet, dict)
                 else {}
             )
+            local_topology_map = (
+                local_packet.get("object_topology_map", {})
+                if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
+                else {}
+            )
+            local_relation_ontology = (
+                local_packet.get("object_relation_ontology", {})
+                if isinstance(local_packet, dict) and isinstance(local_packet.get("object_relation_ontology", {}), dict)
+                else {}
+            )
 
             return active_positive, active_negative, {
                 "prompt_transcode_mode": mode_n,
@@ -4247,26 +5458,18 @@ class SingularityExecutionMixin:
                 "prompt_idempotence_action": local_idempotence.get("idempotence_action", "") if isinstance(local_idempotence, dict) else "",
                 "strategy_transform_stripped_character_count": local_idempotence.get("stripped_character_count", 0) if isinstance(local_idempotence, dict) else 0,
                 "semantic_density_context_map": local_density_map if isinstance(local_density_map, dict) else {},
-                "object_relation_ontology_status": (
-                    local_packet.get("object_relation_ontology", {}).get("status", "")
-                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_relation_ontology", {}), dict)
-                    else ""
-                ),
-                "object_topology_status": (
-                    local_packet.get("object_topology_map", {}).get("status", "")
-                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
-                    else ""
-                ),
-                "contact_depth_axis_recommended": (
-                    bool(local_packet.get("object_topology_map", {}).get("contact_depth_axis_recommended", False))
-                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
-                    else False
-                ),
-                "contact_depth_axis_hint": (
-                    local_packet.get("object_topology_map", {}).get("contact_depth_axis_hint", "")
-                    if isinstance(local_packet, dict) and isinstance(local_packet.get("object_topology_map", {}), dict)
-                    else ""
-                ),
+                "object_relation_ontology_status": local_relation_ontology.get("status", ""),
+                "object_relation_strategy_point": local_relation_ontology.get("strategy_point", ""),
+                "object_relation_sentence_count": len(local_relation_ontology.get("positive_strategy_sentences", []) or []),
+                "object_topology_status": local_topology_map.get("status", ""),
+                "object_topology_pressure_score": local_topology_map.get("topology_pressure_score", 0.0),
+                "contact_pressure_score": local_topology_map.get("contact_pressure_score", 0.0),
+                "rigidity_confidence_score": local_topology_map.get("rigidity_confidence_score", 0.0),
+                "flexibility_pressure_score": local_topology_map.get("flexibility_pressure_score", 0.0),
+                "rigidity_lock_recommended": bool(local_topology_map.get("rigidity_lock_recommended", False)),
+                "rigid_object_count": int(local_topology_map.get("rigid_object_count", 0) or 0),
+                "contact_depth_axis_recommended": bool(local_topology_map.get("contact_depth_axis_recommended", False)),
+                "contact_depth_axis_hint": local_topology_map.get("contact_depth_axis_hint", ""),
             }
 
         def _apply_runtime_prompt_update(prompt_update, pause_segment_index, applies_to_segment):
@@ -4542,8 +5745,17 @@ class SingularityExecutionMixin:
                     "existing_strategy_transform_detected": False,
                     "prompt_idempotence_action": "reuse_existing_active_strategy_carrier",
                     "strategy_transform_stripped_character_count": 0,
+                    "semantic_density_context_map": semantic_density_context_map if isinstance(semantic_density_context_map, dict) else {},
                     "object_relation_ontology_status": object_relation_ontology.get("status", "") if isinstance(object_relation_ontology, dict) else "",
+                    "object_relation_strategy_point": object_relation_ontology.get("strategy_point", "") if isinstance(object_relation_ontology, dict) else "",
+                    "object_relation_sentence_count": len(object_relation_ontology.get("positive_strategy_sentences", []) or []) if isinstance(object_relation_ontology, dict) else 0,
                     "object_topology_status": object_topology_map.get("status", "") if isinstance(object_topology_map, dict) else "",
+                    "object_topology_pressure_score": object_topology_map.get("topology_pressure_score", 0.0) if isinstance(object_topology_map, dict) else 0.0,
+                    "contact_pressure_score": object_topology_map.get("contact_pressure_score", 0.0) if isinstance(object_topology_map, dict) else 0.0,
+                    "rigidity_confidence_score": object_topology_map.get("rigidity_confidence_score", 0.0) if isinstance(object_topology_map, dict) else 0.0,
+                    "flexibility_pressure_score": object_topology_map.get("flexibility_pressure_score", 0.0) if isinstance(object_topology_map, dict) else 0.0,
+                    "rigidity_lock_recommended": bool(object_topology_map.get("rigidity_lock_recommended", False)) if isinstance(object_topology_map, dict) else False,
+                    "rigid_object_count": int(object_topology_map.get("rigid_object_count", 0) or 0) if isinstance(object_topology_map, dict) else 0,
                     "contact_depth_axis_recommended": bool(object_topology_map.get("contact_depth_axis_recommended", False)) if isinstance(object_topology_map, dict) else False,
                     "contact_depth_axis_hint": object_topology_map.get("contact_depth_axis_hint", "") if isinstance(object_topology_map, dict) else "",
                     "prompt_continuity_reused": True,
@@ -4628,6 +5840,8 @@ class SingularityExecutionMixin:
                 route_policy = "runtime_prompt_payload_at_continue_click"
                 update_status = "applied"
                 update_formula = "Continue carried a changed per-cascade prompt Strategy; the next segment is encoded from the clean local prompt while semantic math remains a density/context map."
+                segment_strategy_carrier_context["phase_strategy_base_positive_prompt"] = next_positive
+                segment_strategy_carrier_context["phase_strategy_base_positive_signature"] = transform_summary.get("active_positive_signature", "")
 
             positive_prompt = next_positive
             negative_prompt = next_negative
@@ -4897,6 +6111,14 @@ class SingularityExecutionMixin:
                     positive, negative, vae, scaled_image, width, height, frames, batch_size, execution_records,
                     segment_index=1,
                     route_label="first_body",
+                )
+                wan_positive, wan_latent = self._event_source_noise_birth_shaping(
+                    wan_latent,
+                    execution_records,
+                    segment_index=1,
+                    route_label="first_body",
+                    source_image=scaled_image,
+                    wan_positive=wan_positive,
                 )
                 self._stage_delay(stage_delay_seconds, execution_records, "after_wan_image_to_video")
 
@@ -5320,19 +6542,31 @@ class SingularityExecutionMixin:
                         resume_frame_index=resume_frame_index,
                         frames_per_cascade=frames,
                         frames=generated_frames,
+                        cascade_execution_plan=cascade_execution_plan,
                         records=execution_records,
                     )
+                    segment_strategy_carrier_context["semantic_phase_window"] = remaining_strategy.get("semantic_phase_window", {})
+                    segment_strategy_carrier_context["semantic_phase_window_applies_to_segment"] = remaining_strategy.get("applies_to_segment", 0)
                     self._activate_cascade_remaining_strategy(remaining_strategy, execution_records)
+                    self._activate_cascade_boundary_background_anchor_control(
+                        frames=generated_frames,
+                        remaining_strategy=remaining_strategy,
+                        pause_segment_index=1,
+                        next_segment_index=start_segment,
+                        records=execution_records,
+                    )
                     if str(prompt_transcode_mode_n or "").upper() == "TRANSFORM_PROMPT":
                         phase_positive, phase_summary = self._build_cascade_phase_prompt_transform(
                             positive_prompt=positive_prompt,
                             remaining_strategy=remaining_strategy,
                             applies_to_segment=start_segment,
+                            global_positive_prompt=segment_strategy_carrier_context.get("phase_strategy_base_positive_prompt", positive_prompt),
+                            cascade_execution_plan=cascade_execution_plan,
                             preserve_prompt_carrier=bool(segment_strategy_carrier_context.get("prompt_continuity_reused", False)),
                             preserve_reason=str(segment_strategy_carrier_context.get("prompt_continuity_policy", "")),
                             records=execution_records,
                         )
-                        if phase_summary.get("status") == "applied" and phase_positive != positive_prompt:
+                        if phase_summary.get("status") in ("applied", "already_current_phase") and phase_positive != positive_prompt:
                             positive_prompt = phase_positive
                             segment_strategy_carrier_context["prompt_source"] = "cascade_phase_prompt_transform"
                             segment_strategy_carrier_context["current_active_positive_signature"] = _prompt_text_signature(positive_prompt)
@@ -5469,19 +6703,31 @@ class SingularityExecutionMixin:
                                 resume_frame_index=resume_frame_index,
                                 frames_per_cascade=frames,
                                 frames=next_frames,
+                                cascade_execution_plan=cascade_execution_plan,
                                 records=execution_records,
                             )
+                            segment_strategy_carrier_context["semantic_phase_window"] = remaining_strategy.get("semantic_phase_window", {})
+                            segment_strategy_carrier_context["semantic_phase_window_applies_to_segment"] = remaining_strategy.get("applies_to_segment", 0)
                             self._activate_cascade_remaining_strategy(remaining_strategy, execution_records)
+                            self._activate_cascade_boundary_background_anchor_control(
+                                frames=next_frames,
+                                remaining_strategy=remaining_strategy,
+                                pause_segment_index=segment_index,
+                                next_segment_index=int(segment_index) + 1,
+                                records=execution_records,
+                            )
                             if str(prompt_transcode_mode_n or "").upper() == "TRANSFORM_PROMPT":
                                 phase_positive, phase_summary = self._build_cascade_phase_prompt_transform(
                                     positive_prompt=positive_prompt,
                                     remaining_strategy=remaining_strategy,
                                     applies_to_segment=int(segment_index) + 1,
+                                    global_positive_prompt=segment_strategy_carrier_context.get("phase_strategy_base_positive_prompt", positive_prompt),
+                                    cascade_execution_plan=cascade_execution_plan,
                                     preserve_prompt_carrier=bool(segment_strategy_carrier_context.get("prompt_continuity_reused", False)),
                                     preserve_reason=str(segment_strategy_carrier_context.get("prompt_continuity_policy", "")),
                                     records=execution_records,
                                 )
-                                if phase_summary.get("status") == "applied" and phase_positive != positive_prompt:
+                                if phase_summary.get("status") in ("applied", "already_current_phase") and phase_positive != positive_prompt:
                                     positive_prompt = phase_positive
                                     segment_strategy_carrier_context["prompt_source"] = "cascade_phase_prompt_transform"
                                     segment_strategy_carrier_context["current_active_positive_signature"] = _prompt_text_signature(positive_prompt)
@@ -5508,6 +6754,29 @@ class SingularityExecutionMixin:
                         execution_records,
                         frames_per_cascade=int(frames),
                     )
+                    self._cascade_seam_impulse_review(
+                        segment_batches,
+                        generated_frames,
+                        execution_records,
+                        frames_per_cascade=int(frames),
+                    )
+                    self._tail_next_source_strategy_continuity_proposal(
+                        segment_batches,
+                        generated_frames,
+                        execution_records,
+                        frames_per_cascade=int(frames),
+                    )
+                    self._cascade_seam_phase_classifier(
+                        segment_batches,
+                        generated_frames,
+                        execution_records,
+                        frames_per_cascade=int(frames),
+                    )
+                    self._cascade_semantic_phase_schedule_proposal(
+                        execution_records,
+                        requested_segments=requested_cascade_count,
+                    )
+                    self._event_dual_math_package_summary(execution_records)
                     completed_segments = len(segment_batches)
                     execution_records.append({
                         "stage": "SingularityCascadeEnd",
@@ -5811,15 +7080,36 @@ class SingularityExecutionMixin:
                             "error": str(e),
                             "active_control_allowed": False,
                         })
+                if hasattr(self, "_event_public_release_candidate_manifest"):
+                    execution_records.append(self._event_public_release_candidate_manifest(
+                        packet,
+                        execution_records,
+                        saved_report_path=saved_report_path,
+                        saved_video_path=saved_video_path,
+                    ))
                 report = build_markdown_report(packet)
                 report_size = self._rewrite_report_file(saved_report_path, report)
             except Exception as e:
                 execution_records.append({"stage": "EventSaveReport", "status": "failed", "error": str(e), "runtime_version": EVENT_HORIZON_RUNTIME_VERSION})
                 saved_report_path = ""
+                if hasattr(self, "_event_public_release_candidate_manifest"):
+                    execution_records.append(self._event_public_release_candidate_manifest(
+                        packet,
+                        execution_records,
+                        saved_report_path=saved_report_path,
+                        saved_video_path=saved_video_path,
+                    ))
         else:
             report = ""
             saved_report_path = ""
             execution_records.append({"stage": "EventSaveReport", "status": "disabled_by_user", "runtime_version": EVENT_HORIZON_RUNTIME_VERSION})
+            if hasattr(self, "_event_public_release_candidate_manifest"):
+                execution_records.append(self._event_public_release_candidate_manifest(
+                    packet,
+                    execution_records,
+                    saved_report_path=saved_report_path,
+                    saved_video_path=saved_video_path,
+                ))
 
         # Preview model:
         # - source_preview always shows the input/source.

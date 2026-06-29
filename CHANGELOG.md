@@ -1,5 +1,119 @@
 # Singularity - Public Changelog
 
+## 0.1.1-r178 - Tail 5 Continuation Gate
+
+Status: public-alpha release for current ComfyUI Desktop / modern frontend behavior.
+
+This release promotes the current public build to `0.1.1-r178`.
+
+Main name for the new public-facing functionality:
+
+```text
+Tail 5 Continuation Gate
+```
+
+The Tail 5 Continuation Gate is the pause-and-select layer that shows:
+
+```text
+Source | Tail 1 | Tail 2 | Tail 3 | Tail 4 | Tail 5 | Result
+```
+
+You choose the tail frame that should become the next segment source, then continue the same run and receive one stitched final video.
+
+### New / Updated In R178
+
+- Promotes the public build to `0.1.1-r178`.
+- Updates the runtime label to `Singularity R178 Tail 5 Continuation Gate`.
+- Keeps the visible node title as `Singularity R178`.
+- Cleans the public UI surface with stable groups:
+  - `SOURCE`
+  - `PROMPT`
+  - `TIMELINE`
+  - `SAMPLER`
+  - `MATH`
+  - `DECODE`
+  - `OUTPUT`
+  - `LAB`
+- Replaces raw mode names with readable labels while preserving backend compatibility:
+  - `Observe Only`
+  - `Latent Delta Scale`
+  - `Strategy Pressure Window`
+  - `Latent Memory Bridge`
+  - `Pressure Pixel Reweighting`
+  - `Tail Source Reconstruction`
+  - `Source Noise Field Shaping`
+  - `Max Risk Strategy Ring`
+  - `Deep Step Delta Control`
+- Keeps old uppercase/lowercase workflow values valid through runtime normalization.
+- Hides internal transport widgets from the public first surface:
+  - `selected_tail_index`
+  - `sampler_trace_max_steps`
+  - latent bridge micro-control fields.
+- Preserves the native ComfyUI image upload button.
+- Keeps fresh-node public defaults conservative:
+  - `math_control_mode = Observe Only`
+  - `strategy_field_mode = OFF`
+  - `prompt_transcode_mode = Report Only`
+  - `sampler_trace_mode = OFF`
+  - `high_delta_strength = 1.0`
+  - `low_delta_strength = 1.0`
+  - `save_video = true`
+  - `save_report = true`
+- Keeps prompt analysis prompt-pure:
+  - reports may contain strategy/topology evidence;
+  - formula prose is not injected into the model-facing prompt.
+- Keeps experimental math modes available, but not as public defaults.
+
+### Named Function Layers
+
+- `Tail 5 Continuation Gate`: manual continuation-frame selection at cascade boundaries.
+- `Same-Run Cascade Stitch`: one final stitched output from one running workflow.
+- `Observer Math Baseline`: safe default reporting without intentional tensor mutation.
+- `Prompt-Pure Strategy Map`: prompt relation evidence without prompt text injection.
+- `Completion Report Gate`: structural route proof, not visual-quality proof.
+- `Seam And Drift Diagnostics`: report evidence for seam jumps, visible motion spikes, and continuation drift.
+
+### Validation Evidence
+
+R178 source/install validation before release preparation:
+
+- Python compile check passed for the runtime modules.
+- Frontend JavaScript syntax check passed.
+- Source-to-installed hash parity passed after sync with `mismatch_count = 0`.
+- User-run UI proof:
+  - report: `Singularity_20260628_164338_090559.md`
+  - video: `Singularity_00156.mp4`
+  - `result_status = VIDEO`
+  - `CompletionGate = PASS`
+  - friendly label `Transform Prompt` normalized to `TRANSFORM_PROMPT`.
+- User-run clean baseline:
+  - report: `Singularity_20260628_210919_188243.md`
+  - video: `Singularity_00157.mp4`
+  - `math_control_mode = OBSERVE_ONLY`
+  - `prompt_transcode_mode = REPORT_ONLY`
+  - `sampler_trace_mode = OFF`
+  - active generation math surfaces = `0`
+  - active generation graph edges = `0`
+  - `result_status = VIDEO`
+  - `CompletionGate = PASS`
+- Installed-node public smoke after release label promotion:
+  - report: `Singularity_20260629_205310_649694.md`
+  - video: `Singularity_00158.mp4`
+  - runtime: `0.1.1-r178 / Singularity R178 Tail 5 Continuation Gate`
+  - output: 416x608, 16 fps, 97 frames, 6.0625 seconds
+  - `result_status = VIDEO`
+  - `CompletionGate = PASS`
+  - active generation graph edges = `0`
+
+### Known Public Alpha Limits
+
+- Current public cascade limit is 5.
+- The node is Wan-first.
+- Models are not included.
+- `CompletionGate = PASS` confirms structural completion, not visual perfection.
+- Seam diagnostics can still report warnings even when the final video is saved correctly.
+- Research modes can change or break output and should be tested with fixed seeds.
+
 ## 0.1.1-r113 - Widget Order Hotfix + Tail 5 Stabilization
 
 Status: public stabilization release for current ComfyUI Desktop / modern frontend behavior.

@@ -11,7 +11,7 @@ const CLEAN_NODE_NAMES = new Set([
     "SingularityCascadeSimple",
 ]);
 const LEGACY_NODE_NAMES = new Set([]);
-const SINGULARITY_VISIBLE_NODE_TITLE = "Singularity R113";
+const SINGULARITY_VISIBLE_NODE_TITLE = "Singularity R178";
 
 const UI = {
     minWidth: 720,
@@ -87,7 +87,17 @@ const CANCEL_ALL_ROUTE = "/singularity/cascade/cancel";
 const STATUS_ROUTE = "/singularity/cascade/status/";
 const STATUS_POLL_MS = 1200;
 const PROMPT_WIDGET_NAMES = new Set(["positive_prompt", "negative_prompt"]);
-const PUBLIC_HIDDEN_WIDGET_NAMES = new Set([]);
+const PUBLIC_HIDDEN_WIDGET_NAMES = new Set([
+    "selected_tail_index",
+    "sampler_trace_max_steps",
+    "bridge_wan_alpha",
+    "bridge_concat_alpha",
+    "bridge_wan_max_step",
+    "bridge_concat_max_step",
+]);
+const PUBLIC_HIDDEN_WIDGET_SAFE_VALUES = {
+    selected_tail_index: -1,
+};
 const SUPPRESSED_MEDIA_WIDGET_NAMES = new Set([
     "$$canvas-image-preview",
     "vhslatentpreview",
@@ -101,15 +111,38 @@ const SUPPRESSED_MEDIA_WIDGET_TYPES = new Set([
 ]);
 
 const GROUPS = [
-    { id: "SOURCE", color: "#1d4ed8", bg: "rgba(30, 64, 175, 0.12)", names: ["source_image_file"] },
-    { id: "PROMPT", color: "#7c3aed", bg: "rgba(91, 33, 182, 0.10)", names: ["positive_prompt", "negative_prompt", "temporal_texture_lock"] },
-    { id: "CASCADE", color: "#0891b2", bg: "rgba(8, 145, 178, 0.10)", names: ["cascade_count", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4", "frames_per_cascade", "width", "height", "fps", "seed"] },
-    { id: "SAMPLING", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step", "math_control_mode", "high_delta_strength", "low_delta_strength", "strategy_field_mode"] },
-    { id: "DECODE", color: "#059669", bg: "rgba(5, 150, 105, 0.09)", names: ["decode_tile_size", "decode_overlap", "decode_temporal_size", "decode_temporal_overlap", "image_upscale_method", "image_crop"] },
-    { id: "OUTPUT", color: "#dc2626", bg: "rgba(220, 38, 38, 0.09)", names: ["save_video", "video_format", "save_report", "save_prefix"] },
-    { id: "RESEARCH", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["sampler_trace_mode", "sampler_trace_max_steps", "use_formula_recommendation", "prompt_transcode_mode", "auto_calibration_mode", "bridge_wan_alpha", "bridge_concat_alpha", "bridge_wan_max_step", "bridge_concat_max_step", "selected_tail_index"] },
+    { id: "SOURCE", label: "SOURCE", color: "#1d4ed8", bg: "rgba(30, 64, 175, 0.12)", names: ["source_image_file"] },
+    { id: "PROMPT", label: "PROMPT", color: "#7c3aed", bg: "rgba(91, 33, 182, 0.10)", names: ["positive_prompt", "negative_prompt", "temporal_texture_lock"] },
+    { id: "TIMELINE", label: "TIMELINE", color: "#0891b2", bg: "rgba(8, 145, 178, 0.10)", names: ["cascade_count", "pause_after_cascade_1", "pause_after_cascade_2", "pause_after_cascade_3", "pause_after_cascade_4", "frames_per_cascade", "width", "height", "fps", "seed"] },
+    { id: "SAMPLER", label: "SAMPLER", color: "#ca8a04", bg: "rgba(202, 138, 4, 0.09)", names: ["sampler_name", "scheduler", "global_steps", "primary_cfg", "secondary_cfg", "primary_start_step", "primary_end_step", "secondary_start_step", "secondary_end_step"] },
+    { id: "MATH", label: "MATH", color: "#f97316", bg: "rgba(249, 115, 22, 0.09)", names: ["math_control_mode", "high_delta_strength", "low_delta_strength", "strategy_field_mode"] },
+    { id: "DECODE", label: "DECODE", color: "#059669", bg: "rgba(5, 150, 105, 0.09)", names: ["decode_tile_size", "decode_overlap", "decode_temporal_size", "decode_temporal_overlap", "image_upscale_method", "image_crop"] },
+    { id: "OUTPUT", label: "OUTPUT", color: "#dc2626", bg: "rgba(220, 38, 38, 0.09)", names: ["save_video", "video_format", "save_report", "save_prefix"] },
+    { id: "LAB", label: "LAB", color: "#00aa00", bg: "rgba(0, 128, 0, 0.08)", names: ["sampler_trace_mode", "sampler_trace_max_steps", "use_formula_recommendation", "prompt_transcode_mode", "auto_calibration_mode", "bridge_wan_alpha", "bridge_concat_alpha", "bridge_wan_max_step", "bridge_concat_max_step", "selected_tail_index"] },
 ];
 const TAIL_UI_SLOT_COUNT = 5;
+
+const MATH_CONTROL_DISPLAY = {
+    OBSERVE_ONLY: "Observe Only",
+    LATENT_DELTA_SCALE: "Latent Delta Scale",
+    STRATEGY_PRESSURE_WINDOW: "Strategy Pressure Window",
+    LATENT_MEMORY_BRIDGE: "Latent Memory Bridge",
+    PRESSURE_PIXEL_REWEIGHTING: "Pressure Pixel Reweighting",
+    SELECTED_TAIL_SOURCE_RECONSTRUCTION: "Tail Source Reconstruction",
+    SOURCE_NOISE_FIELD_SHAPING: "Source Noise Field Shaping",
+    MAX_RISK_STRATEGY_RING: "Max Risk Strategy Ring",
+    DEEP_STEP_DELTA_CONTROL: "Deep Step Delta Control",
+};
+const MATH_CONTROL_PUBLIC_VALUES = Object.values(MATH_CONTROL_DISPLAY);
+const PROMPT_TRANSCODE_DISPLAY = {
+    REPORT_ONLY: "Report Only",
+    TRANSFORM_PROMPT: "Transform Prompt",
+};
+const PROMPT_TRANSCODE_PUBLIC_VALUES = Object.values(PROMPT_TRANSCODE_DISPLAY);
+
+function publicEnumKey(value) {
+    return String(value ?? "").trim().replace(/[^0-9a-z]+/gi, "_").replace(/^_+|_+$/g, "").toUpperCase();
+}
 
 function isSingularityNode(node) {
     const candidates = [
@@ -146,7 +179,7 @@ function applySingularityVisibleTitle(node, nodeData = null) {
 }
 
 function normalizePromptTranscodeMode(value) {
-    const text = String(value ?? "").trim().toUpperCase();
+    const text = publicEnumKey(value);
     if (text === "1" || text === "TRANSFORM_PROMPT" || text === "TRANSFORM_STRUCTURED_PROMPT" || text === "APPEND_TRANSCODE" || text === "APPEND_STRUCTURED_TRANSCODE") {
         return "TRANSFORM_PROMPT";
     }
@@ -154,10 +187,15 @@ function normalizePromptTranscodeMode(value) {
 }
 
 function normalizeMathControlMode(value) {
-    const text = String(value ?? "").trim().toUpperCase();
+    const text = publicEnumKey(value);
     if (text === "LATENT_DELTA_SCALE") return "LATENT_DELTA_SCALE";
     if (text === "STRATEGY_PRESSURE_WINDOW") return "STRATEGY_PRESSURE_WINDOW";
     if (text === "LATENT_MEMORY_BRIDGE") return "LATENT_MEMORY_BRIDGE";
+    if (text === "PRESSURE_PIXEL_REWEIGHTING") return "PRESSURE_PIXEL_REWEIGHTING";
+    if (text === "TAIL_SOURCE_RECONSTRUCTION") return "SELECTED_TAIL_SOURCE_RECONSTRUCTION";
+    if (text === "SELECTED_TAIL_SOURCE_RECONSTRUCTION") return "SELECTED_TAIL_SOURCE_RECONSTRUCTION";
+    if (text === "SOURCE_NOISE_FIELD_SHAPING") return "SOURCE_NOISE_FIELD_SHAPING";
+    if (text === "MAX_RISK_STRATEGY_RING") return "MAX_RISK_STRATEGY_RING";
     if (text === "DEEP_STEP_DELTA_CONTROL") return "DEEP_STEP_DELTA_CONTROL";
     return "OBSERVE_ONLY";
 }
@@ -166,22 +204,18 @@ function sanitizeMathControlWidget(node) {
     const widget = findWidget(node, "math_control_mode");
     if (!widget) return;
     widget.options = widget.options || {};
-    widget.options.values = [
-        "OBSERVE_ONLY",
-        "LATENT_DELTA_SCALE",
-        "STRATEGY_PRESSURE_WINDOW",
-        "LATENT_MEMORY_BRIDGE",
-        "DEEP_STEP_DELTA_CONTROL",
-    ];
-    widget.value = normalizeMathControlMode(widget.value);
+    widget.options.values = MATH_CONTROL_PUBLIC_VALUES;
+    const canonical = normalizeMathControlMode(widget.value);
+    widget.value = MATH_CONTROL_DISPLAY[canonical] || MATH_CONTROL_DISPLAY.OBSERVE_ONLY;
 }
 
 function sanitizePromptTranscodeWidget(node) {
     const widget = findWidget(node, "prompt_transcode_mode");
     if (!widget) return;
     widget.options = widget.options || {};
-    widget.options.values = ["REPORT_ONLY", "TRANSFORM_PROMPT"];
-    widget.value = normalizePromptTranscodeMode(widget.value);
+    widget.options.values = PROMPT_TRANSCODE_PUBLIC_VALUES;
+    const canonical = normalizePromptTranscodeMode(widget.value);
+    widget.value = PROMPT_TRANSCODE_DISPLAY[canonical] || PROMPT_TRANSCODE_DISPLAY.REPORT_ONLY;
 }
 
 function clampNodeSize(node) {
@@ -211,22 +245,24 @@ function hidePublicOnlyWidgets(node) {
     const widgets = node?.widgets || [];
     for (const widget of widgets) {
         if (!widget || !PUBLIC_HIDDEN_WIDGET_NAMES.has(widget.name)) continue;
-        widget.value = false;
+        if (Object.prototype.hasOwnProperty.call(PUBLIC_HIDDEN_WIDGET_SAFE_VALUES, widget.name)) {
+            widget.value = PUBLIC_HIDDEN_WIDGET_SAFE_VALUES[widget.name];
+        }
         widget.label = "";
         widget.hidden = true;
         widget.computeSize = function() { return [0, -6]; };
     }
 }
 
-const R113_DRIFT_REPAIR_DEFAULTS = {
+const SEVERE_WIDGET_DRIFT_REPAIR_DEFAULTS = {
     cascade_count: 2,
     pause_after_cascade_1: true,
     pause_after_cascade_2: false,
     pause_after_cascade_3: false,
     pause_after_cascade_4: false,
     frames_per_cascade: 49,
-    width: 416,
-    height: 608,
+    width: 704,
+    height: 1280,
     fps: 16,
     seed: 123,
     sampler_name: "euler",
@@ -241,13 +277,13 @@ const R113_DRIFT_REPAIR_DEFAULTS = {
     math_control_mode: "OBSERVE_ONLY",
     high_delta_strength: 1.0,
     low_delta_strength: 1.0,
-    strategy_field_mode: "REPORT_ONLY",
+    strategy_field_mode: "OFF",
     decode_tile_size: 512,
     decode_overlap: 64,
     decode_temporal_size: 32,
     decode_temporal_overlap: 12,
     image_upscale_method: "nearest-exact",
-    image_crop: "disabled",
+    image_crop: "wan_native",
     save_video: true,
     video_format: "video/h264-mp4",
     save_report: true,
@@ -274,7 +310,7 @@ function textWidgetValue(node, name) {
 }
 
 function repairSevereWidgetDrift(node) {
-    if (!node?.widgets?.length || node._singularityR113DriftRepaired) return;
+    if (!node?.widgets?.length || node._singularitySevereWidgetDriftRepaired) return;
     const symptoms = [];
     const cascadeCount = numericWidgetValue(node, "cascade_count");
     const frames = numericWidgetValue(node, "frames_per_cascade");
@@ -302,17 +338,17 @@ function repairSevereWidgetDrift(node) {
 
     if (symptoms.length < 4) return;
 
-    for (const [name, value] of Object.entries(R113_DRIFT_REPAIR_DEFAULTS)) {
+    for (const [name, value] of Object.entries(SEVERE_WIDGET_DRIFT_REPAIR_DEFAULTS)) {
         setWidgetValue(node, name, value);
     }
-    node._singularityR113DriftRepaired = true;
+    node._singularitySevereWidgetDriftRepaired = true;
     node.properties = node.properties || {};
-    node.properties.singularity_r113_widget_drift_repaired = {
+    node.properties.singularity_severe_widget_drift_repaired = {
         reason: "severe_positional_widget_value_drift",
         symptoms,
         repaired_at: new Date().toISOString(),
     };
-    console.warn("[Singularity UI] R113 repaired severe positional widget drift", symptoms);
+    console.warn("[Singularity UI] Repaired severe positional widget drift", symptoms);
 }
 
 function stabilizeNodeLayout(node) {
@@ -877,7 +913,7 @@ async function requestCascadeContinue(node) {
         const transcodeModeWidget = findWidget(node, "prompt_transcode_mode");
         const promptTranscodeMode = normalizePromptTranscodeMode(transcodeModeWidget?.value);
         if (transcodeModeWidget) {
-            transcodeModeWidget.value = promptTranscodeMode;
+            transcodeModeWidget.value = PROMPT_TRANSCODE_DISPLAY[promptTranscodeMode] || PROMPT_TRANSCODE_DISPLAY.REPORT_ONLY;
         }
         await api.fetchApi(CONTINUE_ROUTE + encodeURIComponent(String(node._singularityPauseNodeId || node.id)), {
             method: "POST",
@@ -1366,7 +1402,7 @@ function drawGroupBackgrounds(ctx, node) {
 
         ctx.fillStyle = "#ddd";
         ctx.font = "bold 8px sans-serif";
-        ctx.fillText(g.id, groupX + 8, y + 11);
+        ctx.fillText(g.label || g.id, groupX + 8, y + 11);
     }
 
     ctx.globalCompositeOperation = oldComposite;

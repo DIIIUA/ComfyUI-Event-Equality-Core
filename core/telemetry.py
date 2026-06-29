@@ -104,9 +104,9 @@ from ..utils.tensor_stats import compute_tensor_delta, extract_latent_samples, s
 from ..utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from ..adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r113"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r178"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R178 Tail 5 Continuation Gate"
+EVENT_HORIZON_BODY_VERSION = "0.1-R178"
 
 
 def _event_json_safe(value, depth=0):
@@ -279,6 +279,14 @@ class SingularityTelemetryMixin:
             r for r in records
             if str(r.get("stage", "") or "").startswith("EventStrategyControlSurfaceApply_")
         ]
+        public_surface_contracts = [
+            r for r in records
+            if str(r.get("stage", "") or "") == "EventPublicSurfaceContract"
+        ]
+        public_package_static_scans = [
+            r for r in records
+            if str(r.get("stage", "") or "") == "EventPublicPackageStaticScan"
+        ]
 
         body["collection_disabled"] = False
         body["collection_mode"] = "runtime_record_derived_minimal"
@@ -290,8 +298,934 @@ class SingularityTelemetryMixin:
         body["runtime_monitor_count"] = int(body.get("runtime_monitor_count", 0) or 0)
         if strategy_control_plans:
             body["strategy_control_surface_plan"] = strategy_control_plans[-1]
+        if public_surface_contracts:
+            body["public_surface_contract"] = public_surface_contracts[-1]
+        if public_package_static_scans:
+            body["public_package_static_scan"] = public_package_static_scans[-1]
         body["strategy_control_surface_apply_records"] = strategy_control_apply_records
         return packet
+
+    def _event_public_package_static_scan(self):
+        package_root = Path(__file__).resolve().parent.parent
+        required_files = [
+            "VERSION",
+            "__init__.py",
+            "nodes.py",
+            "README.md",
+            "CHANGELOG.md",
+            "HOMEPAGE_DESCRIPTION.md",
+            "FORMULA_INTEGRITY.md",
+            "LICENSE",
+            "pyproject.toml",
+            "requirements.txt",
+            "core/cascade.py",
+            "core/execution.py",
+            "core/orchestrator.py",
+            "core/telemetry.py",
+            "reports/markdown_report.py",
+            "web/singularity_cascade_ui_v2.js",
+        ]
+        public_docs = [
+            "README.md",
+            "CHANGELOG.md",
+            "HOMEPAGE_DESCRIPTION.md",
+            "FORMULA_INTEGRITY.md",
+        ]
+        required_dirs = [
+            "core",
+            "reports",
+            "web",
+            "adapters",
+            "readers",
+            "resolvers",
+            "utils",
+        ]
+
+        def issue(reason, evidence=None):
+            out = {"reason": str(reason or "unknown")}
+            if evidence is not None:
+                out["evidence"] = evidence
+            return out
+
+        def rel(path):
+            try:
+                return str(path.relative_to(package_root)).replace("\\", "/")
+            except Exception:
+                return str(path)
+
+        blockers = []
+        warnings = []
+
+        missing_required_files = []
+        required_file_stats = []
+        for item in required_files:
+            path = package_root / item
+            exists = path.is_file()
+            size = path.stat().st_size if exists else 0
+            required_file_stats.append({"path": item, "exists": exists, "bytes": size})
+            if not exists:
+                missing_required_files.append(item)
+            elif size <= 0:
+                blockers.append(issue("required_file_empty", {"path": item}))
+
+        missing_required_dirs = [
+            item for item in required_dirs
+            if not (package_root / item).is_dir()
+        ]
+        if missing_required_files:
+            blockers.append(issue("required_public_package_files_missing", {"paths": missing_required_files}))
+        if missing_required_dirs:
+            blockers.append(issue("required_public_package_dirs_missing", {"paths": missing_required_dirs}))
+
+        public_doc_stats = []
+        for item in public_docs:
+            path = package_root / item
+            if not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                blockers.append(issue("public_doc_read_failed", {"path": item, "error": str(e)}))
+                continue
+            cyrillic_count = len(re.findall(r"[\u0400-\u04FF]", text))
+            non_ascii_count = len(re.findall(r"[^\x00-\x7F]", text))
+            public_doc_stats.append({
+                "path": item,
+                "bytes": path.stat().st_size,
+                "chars": len(text),
+                "cyrillic_count": cyrillic_count,
+                "non_ascii_count": non_ascii_count,
+            })
+            if cyrillic_count > 0:
+                blockers.append(issue("public_doc_contains_cyrillic", {"path": item, "cyrillic_count": cyrillic_count}))
+            elif non_ascii_count > 0:
+                warnings.append(issue("public_doc_contains_non_ascii", {"path": item, "non_ascii_count": non_ascii_count}))
+
+        runtime_cache_dirs = []
+        runtime_cache_files = []
+        forbidden_dirs = []
+        forbidden_files = []
+        source_checkout_markers = []
+        transient_dirs = {".pytest_cache", ".mypy_cache", ".ruff_cache", "build", "dist"}
+        for root, dirs, files in os.walk(package_root):
+            root_path = Path(root)
+            for name in list(dirs):
+                path = root_path / name
+                relative = rel(path)
+                if name == "__pycache__":
+                    runtime_cache_dirs.append(relative)
+                elif name in transient_dirs or name.endswith(".egg-info"):
+                    forbidden_dirs.append(relative)
+                elif name == ".git":
+                    source_checkout_markers.append(relative)
+            for name in files:
+                path = root_path / name
+                relative = rel(path)
+                lower = name.lower()
+                if lower.endswith((".pyc", ".pyo")):
+                    runtime_cache_files.append(relative)
+                elif lower in (".coverage", "coverage.xml"):
+                    forbidden_files.append(relative)
+        if forbidden_dirs:
+            blockers.append(issue("forbidden_cache_or_build_dirs_present", {"paths": forbidden_dirs[:24], "count": len(forbidden_dirs)}))
+        if forbidden_files:
+            blockers.append(issue("forbidden_compiled_or_coverage_files_present", {"paths": forbidden_files[:24], "count": len(forbidden_files)}))
+        if runtime_cache_dirs:
+            warnings.append(issue("runtime_generated_pycache_dirs_present", {"paths": runtime_cache_dirs[:24], "count": len(runtime_cache_dirs)}))
+        if runtime_cache_files:
+            warnings.append(issue("runtime_generated_bytecode_files_present", {"paths": runtime_cache_files[:24], "count": len(runtime_cache_files)}))
+        if source_checkout_markers:
+            warnings.append(issue("source_checkout_metadata_present_not_for_zip", {"paths": source_checkout_markers[:8], "count": len(source_checkout_markers)}))
+
+        version_text = ""
+        version_path = package_root / "VERSION"
+        if version_path.is_file():
+            try:
+                version_text = version_path.read_text(encoding="utf-8", errors="replace").strip()
+            except Exception:
+                version_text = ""
+        if version_text and version_text != EVENT_HORIZON_RUNTIME_VERSION:
+            blockers.append(issue(
+                "version_file_mismatch",
+                {"VERSION": version_text, "runtime_version": EVENT_HORIZON_RUNTIME_VERSION},
+            ))
+
+        if blockers:
+            status = "public_package_static_blocked"
+            severity = "BLOCKED"
+            next_action = "Fix package blockers before creating a public zip or release candidate."
+        elif warnings:
+            status = "public_package_static_warning"
+            severity = "WARNING"
+            next_action = "Static package surface is usable for development, but review warnings before public zip."
+        else:
+            status = "public_package_static_clean"
+            severity = "PASS"
+            next_action = "Static package surface is clean; runtime gate and human video review still apply."
+
+        return {
+            "stage": "EventPublicPackageStaticScan",
+            "status": status,
+            "severity": severity,
+            "scan_version": "public_package_static_scan_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "formula": "Public package files are release Outcome carriers; README, changelog, version, web assets, and cache cleanliness must return to the same public Strategy before packaging.",
+            "control_mode": "REPORT_ONLY",
+            "does_not_change_generation": True,
+            "package_root": str(package_root),
+            "version_file": version_text,
+            "required_file_count": len(required_files),
+            "missing_required_files": missing_required_files,
+            "missing_required_dirs": missing_required_dirs,
+            "public_doc_stats": public_doc_stats,
+            "required_file_stats": required_file_stats,
+            "forbidden_dir_count": len(forbidden_dirs),
+            "forbidden_file_count": len(forbidden_files),
+            "runtime_cache_dir_count": len(runtime_cache_dirs),
+            "runtime_cache_file_count": len(runtime_cache_files),
+            "source_checkout_marker_count": len(source_checkout_markers),
+            "forbidden_dirs": forbidden_dirs[:48],
+            "forbidden_files": forbidden_files[:48],
+            "runtime_cache_dirs": runtime_cache_dirs[:48],
+            "runtime_cache_files": runtime_cache_files[:48],
+            "source_checkout_markers": source_checkout_markers[:16],
+            "blockers": blockers,
+            "warnings": warnings,
+            "next_action": next_action,
+        }
+
+    def _event_math_topology_ledger_from_records(self, execution_records):
+        records = [r for r in (execution_records or []) if isinstance(r, dict)]
+
+        def stage_name(record):
+            return str(record.get("stage", "") or "")
+
+        def matches(record, exact=None, prefix=None):
+            stage = stage_name(record)
+            if exact and stage in exact:
+                return True
+            if prefix and any(stage.startswith(p) for p in prefix):
+                return True
+            return False
+
+        def collect(exact=None, prefix=None):
+            exact = set(exact or [])
+            prefix = list(prefix or [])
+            return [r for r in records if matches(r, exact=exact, prefix=prefix)]
+
+        def has_any(exact=None, prefix=None):
+            return bool(collect(exact=exact, prefix=prefix))
+
+        def as_bool(value, default=False):
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return bool(default)
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
+        def add_surface(
+            surfaces,
+            *,
+            surface_id,
+            label,
+            exact=None,
+            prefix=None,
+            formula_role="",
+            risk_layer="observer",
+            control_mode="REPORT_ONLY",
+            generation_side_effect="none",
+            public_release_role="diagnostic",
+            active_statuses=None,
+            active_when_control_allowed=False,
+            active_when_non_report_control=False,
+            research_when_present=False,
+            next_route="",
+        ):
+            found = collect(exact=exact, prefix=prefix)
+            stages = [stage_name(r) for r in found]
+            statuses = sorted({str(r.get("status", "") or "") for r in found if str(r.get("status", "") or "")})
+            active_statuses = set(active_statuses or ["active", "applied", "active_control"])
+            active_by_status = any(str(r.get("status", "") or "").lower() in active_statuses for r in found)
+            active_by_allowed = any(as_bool(r.get("active_control_allowed", False)) for r in found) if active_when_control_allowed else False
+            active_by_mode = any(str(r.get("control_mode", "REPORT_ONLY") or "REPORT_ONLY").upper() != "REPORT_ONLY" for r in found) if active_when_non_report_control else False
+            active = active_by_status or active_by_allowed or active_by_mode
+            report_only = all(str(r.get("control_mode", "REPORT_ONLY") or "REPORT_ONLY").upper() == "REPORT_ONLY" for r in found) if found else False
+            research = bool(research_when_present and found) or risk_layer in ("research", "active_research", "research_control")
+            surfaces.append({
+                "surface_id": str(surface_id),
+                "label": str(label),
+                "present": bool(found),
+                "stage_count": len(found),
+                "stages": stages[:24],
+                "statuses": statuses,
+                "formula_role": str(formula_role),
+                "risk_layer": str(risk_layer),
+                "control_mode": str(control_mode),
+                "report_only": bool(report_only),
+                "active_generation_control": bool(active),
+                "research_surface": bool(research),
+                "generation_side_effect": str(generation_side_effect),
+                "public_release_role": str(public_release_role),
+                "next_route": str(next_route),
+            })
+
+        surfaces = []
+        add_surface(
+            surfaces,
+            surface_id="finite_input_guard",
+            label="Finite Input Guard",
+            exact=["EventInputNormalization", "EventInputNormalizationAdjustments"],
+            formula_role="corrupted UI/runtime numeric carrier returns to declared default before Strategy math",
+            risk_layer="public_guard",
+            public_release_role="required_boundary",
+            next_route="Read adjustments before interpreting any math value.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="prompt_purity_lock",
+            label="Prompt Purity Lock",
+            exact=["EventPromptPurityLock", "EventPromptStrategyTranscodeApply"],
+            formula_role="prompt stays clean StrategyCandidate; semantic math must not become prompt prose",
+            risk_layer="public_guard",
+            public_release_role="required_boundary",
+            next_route="If prompt transform is enabled, treat the run as diagnostic/research evidence.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="math_control_summary",
+            label="Math Control Summary",
+            exact=["EventMathControlSummary"],
+            formula_role="UI math mode selects observer, delta overlay, or research Strategy pressure route",
+            risk_layer="public_or_research_switch",
+            public_release_role="required_boundary",
+        )
+        add_surface(
+            surfaces,
+            surface_id="public_surface_contract",
+            label="Public Surface Contract",
+            exact=["EventPublicSurfaceContract"],
+            formula_role="visible UI/runtime mode carriers return to public/research boundary before final readiness",
+            risk_layer="public_guard",
+            public_release_role="required_boundary",
+        )
+        add_surface(
+            surfaces,
+            surface_id="public_package_static_scan",
+            label="Public Package Static Scan",
+            exact=["EventPublicPackageStaticScan"],
+            formula_role="public README/changelog/version/web package files return to the same release Strategy before packaging",
+            risk_layer="public_guard",
+            public_release_role="required_boundary",
+            next_route="Block public zip if required files, English-only docs, version, or cache cleanliness fail.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="semantic_relation_pressure_router",
+            label="Semantic Relation Pressure Router",
+            exact=["EventSemanticRelationPressureRouter"],
+            formula_role="prompt/topology relation pressure is read as local Strategy evidence without text injection",
+            risk_layer="research",
+            public_release_role="diagnostic_or_research",
+            active_when_control_allowed=True,
+            research_when_present=True,
+            next_route="Keep this as pressure evidence unless a bounded model-native route proves visual benefit.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="strategy_control_surface",
+            label="Strategy Control Surface",
+            exact=["EventStrategyControlSurfacePlan"],
+            prefix=["EventStrategyControlSurfaceApply_"],
+            formula_role="local Strategy pressure folds back into S_global_event_route and model attractor",
+            risk_layer="research_control",
+            public_release_role="research_evidence",
+            active_when_control_allowed=True,
+            research_when_present=True,
+            next_route="Active use requires safe-mode comparison and visible video review.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="visible_motion_strategy_return_gate",
+            label="Visible Motion Strategy Return Gate",
+            exact=["EventVisibleMotionStrategyReturnGate"],
+            formula_role="visible Outcome(t+1) and ObservedBehavior(t+1) return as next-run Strategy evidence, not same-run damping",
+            risk_layer="observer",
+            public_release_role="visual_diagnostic",
+            next_route="Use visible motion evidence to choose the next bounded topology route; never damp globally from frame pressure alone.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="true_region_topology_evidence",
+            label="True Region Topology Evidence",
+            exact=["EventTrueRegionTopologyEvidence"],
+            formula_role="visible/background/spatial/object/tail pressures are separated into region-role evidence before any active topology route is allowed",
+            risk_layer="observer_to_route",
+            public_release_role="visual_diagnostic",
+            next_route="Require region separation proof before spatial/background pressure can become active control.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="fractal_strategy_intersection_map",
+            label="Fractal Strategy Intersection Map",
+            exact=["EventFractalStrategyIntersectionMap"],
+            formula_role="all dynamic intersections unfold the same Strategy equality recursively and return to S_global_event_route across depth 7",
+            risk_layer="observer_to_route",
+            public_release_role="topology_diagnostic",
+            next_route="Use the dominant intersection axis to choose the next bounded report-only route; do not promote derived strategies into independent controllers.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="region_weighted_fractal_strategy_return",
+            label="Region-Weighted Fractal Strategy Return",
+            exact=["EventRegionWeightedFractalStrategyReturn"],
+            formula_role="dominant fractal Strategy axes are weighted by true region and visible-video evidence before they can nominate a next route",
+            risk_layer="observer_to_route",
+            public_release_role="topology_diagnostic",
+            next_route="Require dominant_axis_evidence_match and region_axis_confidence before any region-derived active control.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="pixel_region_motion_map",
+            label="Pixel Region Motion Map",
+            exact=["EventPixelRegionMotionMap"],
+            formula_role="decoded visible Outcome is split into center, object/contact, seam, top/bottom, and edge/background pixel motion before pressure evidence can nominate a next route",
+            risk_layer="observer_to_route",
+            public_release_role="visual_diagnostic",
+            next_route="Compare pressure-derived background leakage with actual pixel-region motion before choosing action/background control.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="cascade_seam_impulse_review",
+            label="Cascade Seam Impulse Review",
+            exact=["EventCascadeSeamImpulseReview"],
+            formula_role="tail Outcome(previous segment), boundary ObservedBehavior, and post-continue Outcome are compared as one cascade Strategy transition",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            next_route="If high, route to tail-next-source Strategy continuity; do not apply damping from one run.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="tail_next_source_continuity_proposal",
+            label="Tail Next Source Continuity Proposal",
+            exact=["EventTailNextSourceStrategyContinuityProposal"],
+            formula_role="selected tail Outcome(previous segment), tail motion ObservedBehavior, next source frame, and first post-continue motion are compared as the same StrategyCarrier",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            next_route="If repeated high, design a tail-next-source continuity bridge; keep this proposal report-only.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="cascade_seam_phase_classifier",
+            label="Cascade Seam Phase Classifier",
+            exact=["EventCascadeSeamPhaseClassifier"],
+            formula_role="seam pressure is classified as semantic phase re-entry, prompt text change, latent mismatch, background anchor conflict, center-action overdrive, or sampler handoff reset before active control",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            next_route="Use repeated fixed-seed classifier evidence to pick one next active surface; do not strengthen the selected-tail echo blindly.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="semantic_phase_schedule_proposal",
+            label="Semantic Phase Schedule Proposal",
+            exact=["EventCascadeSemanticPhaseScheduleProposal"],
+            formula_role="clean global StrategyCandidate text is separated from local cascade phase identity so the next segment can be diagnosed without prompt text injection",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            next_route="If repeated high, design a local Strategy phase window that keeps model-facing prompt text unchanged.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="semantic_phase_window_carrier",
+            label="Semantic Phase Report Fence",
+            exact=["EventCascadeSemanticPhaseScheduleProposal"],
+            formula_role="selected tail progress is converted into bounded local Strategy phase evidence without prompt text injection or tensor mutation",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            active_statuses=["phase_window_tensor_applied"],
+            next_route="Keep report-only until a non-concat sampler-entry route proves lower seam impulse without background/detail loss.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="selected_tail_source_reconstruction_safe",
+            label="Selected Tail Source Reconstruction SAFE Package",
+            exact=["EventSelectedTailSourceReconstructionPackage"],
+            formula_role="selected tail OutcomePrevious and tail motion ObservedBehaviorPrevious are reconstructed as next-source StrategyCarrier evidence without tensor mutation",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            next_route="Use this as the safe package before any latent-memory or sampler-entry mutation.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="max_risk_strategy_ring_package",
+            label="MAX RISK Strategy Ring Package",
+            exact=["EventMaxRiskStrategyRingPackage"],
+            formula_role="previous latent tail may become a tiny forced Strategy ring at next segment entry only when explicitly selected",
+            risk_layer="active_research",
+            control_mode="ACTIVE_RESEARCH",
+            public_release_role="research_evidence",
+            active_statuses=["max_risk_package_active"],
+            active_when_control_allowed=True,
+            research_when_present=True,
+            generation_side_effect="can override the latent bridge hard guard and alter next segment entry in MAX_RISK_STRATEGY_RING mode",
+            next_route="Run only as fixed-seed A/B against SAFE and OBSERVE_ONLY; inspect video for color/noise/identity artifacts.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="boundary_background_anchor_control",
+            label="Boundary Background Anchor Control",
+            exact=["EventCascadeBoundaryBackgroundAnchorControlBind", "EventCascadeBoundaryBackgroundAnchorCard"],
+            formula_role="selected tail visible frame becomes background/source evidence before the next sampler",
+            risk_layer="observer_to_route",
+            public_release_role="continuity_diagnostic",
+            active_statuses=["active"],
+            next_route="Use as cascade-boundary evidence; do not confuse with tail-only pressure.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="r126_low_mid_window_route",
+            label="R126 Low Mid-Window Route Guard",
+            prefix=["EventR126LowMidWindowSpatialControlRoute_"],
+            formula_role="route-key guarded low mid-window Strategy intersection for spatial carrier preservation",
+            risk_layer="active_research",
+            public_release_role="research_evidence",
+            active_statuses=["active"],
+            research_when_present=True,
+            generation_side_effect="possible additional low-branch sampler calls when active",
+            next_route="Verify route_key_matches and additional_sampler_calls before visual conclusions.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="denoise_phase_map",
+            label="Denoise Phase Map",
+            prefix=["EventDenoisePhaseMap_"],
+            formula_role="classifies high/low/post-window/endpoint phase before any local math can act",
+            risk_layer="public_guard",
+            public_release_role="required_for_step_control",
+            next_route="Only low mid-window should become active-control eligible.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="spatial_carrier_preservation_map",
+            label="Spatial Carrier Preservation Map",
+            prefix=["EventSpatialCarrierPreservationMap_"],
+            formula_role="background/source/tail carriers become bounded spatial preservation pressure",
+            risk_layer="active_research",
+            public_release_role="research_evidence",
+            active_statuses=["active"],
+            research_when_present=True,
+            generation_side_effect="bounded ROI gain only when active and phase-safe",
+            next_route="If guarded_report_only, do not expect visible improvement from this surface.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="action_background_separation_gate",
+            label="Action / Background Separation Evidence Gate",
+            exact=["EventActionBackgroundSeparationEvidence"],
+            prefix=["EventActionBackgroundSeparationGate_"],
+            formula_role="center action, object/contact, seam, and background carriers return as separable sub-strategies before model-attractor pressure",
+            risk_layer="active_research",
+            public_release_role="research_evidence",
+            active_statuses=["active"],
+            research_when_present=True,
+            generation_side_effect="bounded StrategyField/window compression when background pressure competes with action center",
+            next_route="Compare background/center motion ratio before and after; this gate should reduce whole-scene motion leakage, not freeze action.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="pixel_pressure_disagreement_review",
+            label="Pixel Pressure Disagreement Review",
+            exact=["EventPixelPressureDisagreementReview"],
+            formula_role="selected visible pixel Outcome reweights pressure-derived background/action interpretation before any route nomination",
+            risk_layer="observer_to_route",
+            public_release_role="visual_diagnostic",
+            next_route="Use corrected pixel/pressure axis before active control; never let scalar pressure overrule visible Outcome alone.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="pressure_pixel_reweighting_proposal",
+            label="Pressure / Pixel Reweighting Proposal",
+            exact=["EventPressurePixelReweightingProposal"],
+            formula_role="pixel-corrected pressure becomes bounded future control proposal while preserving the model-attractor route",
+            risk_layer="observer_to_route",
+            public_release_role="visual_diagnostic",
+            next_route="Use only for fixed-seed A/B before any active low-mid-window pressure/pixel reweighting.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="pressure_pixel_reweighting_active_candidate",
+            label="Pressure / Pixel Reweighting Active Candidate",
+            prefix=["EventPressurePixelReweightingActiveCandidate_"],
+            formula_role="R147/R149 pixel-corrected pressure evidence returns as a quality-guarded local/spatial low-branch active A/B candidate",
+            risk_layer="active_research",
+            public_release_role="research_evidence",
+            active_statuses=["active_candidate"],
+            research_when_present=True,
+            generation_side_effect="quality-guarded tiny low-branch delta overlay with local/spatial background gain only when math_control_mode is PRESSURE_PIXEL_REWEIGHTING",
+            next_route="Accept only if fixed-seed R150 preserves R149 quality while reducing edge/background pressure artifacts.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="noise_field_strategy_bridge",
+            label="Noise Field Strategy Bridge",
+            prefix=["EventNoiseFieldStrategyBridge_"],
+            formula_role="source/noise evidence names the next safe Strategy surface; R171 can birth tiny spatial gain, anchor-only low-frequency source-image carrier, and a bounded two-slice selected-tail post-drop seam-entry micro echo with regional/background guard before high sampler while keeping unsafe post-window delta report-only",
+            risk_layer="observer_to_research",
+            public_release_role="diagnostic",
+            active_statuses=["pre_high_seed_active_candidate"],
+            research_when_present=True,
+            next_route="If SOURCE_NOISE_FIELD_SHAPING is active, inspect EventSourceNoiseBirthShaping before judging video.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="source_noise_birth_shaping",
+            label="R171 Regional Tail Guard",
+            prefix=["EventSourceNoiseBirthShaping_"],
+            formula_role="Wan latent seed and Wan positive concat conditioning are lightly shaped before high sampler so source/noise StrategyCarrier returns to model-attractor without prompt text or forced microtexture",
+            risk_layer="active_research",
+            public_release_role="research_evidence",
+            active_statuses=["applied"],
+            research_when_present=True,
+            generation_side_effect="tiny feathered low-frequency spatial gain/source carrier on Wan latent seed and Wan positive concat conditioning before high sampler when math_control_mode is SOURCE_NOISE_FIELD_SHAPING",
+            next_route="Compare fixed-seed A/B against R159 SAFE and R162; reject if it creates background/face pixel noise, finger/detail smearing, or stronger seam reversal.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="segment_entry_latent_memory_bridge",
+            label="Segment Entry Latent Memory Bridge",
+            exact=["EventSegmentEntryLatentMemoryBridge"],
+            formula_role="previous latent OutcomePrevious may return to next segment entry as explicit bounded memory",
+            risk_layer="research_control",
+            public_release_role="research_evidence",
+            active_statuses=["active"],
+            research_when_present=True,
+            generation_side_effect="can alter next segment latent entry only when explicit bridge mode is active",
+            next_route="Use only with same-seed comparison against OBSERVE_ONLY.",
+        )
+        add_surface(
+            surfaces,
+            surface_id="strategy_matrix",
+            label="Strategy Matrix And Local Micro-Formulae",
+            exact=["EventStrategyMatrix"],
+            prefix=["EventLocalMicroFormula_"],
+            formula_role="carrier collisions unfold local Strategy equalities as report-only evidence",
+            risk_layer="observer",
+            public_release_role="diagnostic",
+            next_route="Use this to choose the next active surface, not as proof of visual quality.",
+        )
+
+        required_ids = {
+            "finite_input_guard",
+            "prompt_purity_lock",
+            "math_control_summary",
+            "public_surface_contract",
+            "public_package_static_scan",
+        }
+        present_ids = {s["surface_id"] for s in surfaces if s["present"]}
+        missing_required = sorted(required_ids - present_ids)
+        active_surfaces = [s for s in surfaces if s["active_generation_control"]]
+        research_surfaces = [s for s in surfaces if s["research_surface"] and s["present"]]
+        report_only_surfaces = [s for s in surfaces if s["present"] and s["report_only"]]
+
+        if missing_required:
+            status = "incomplete_math_topology"
+            severity = "WARNING"
+            next_action = "Missing required math topology boundaries; treat the report as incomplete evidence."
+        elif active_surfaces:
+            status = "active_math_present"
+            severity = "RESEARCH"
+            next_action = "Use this run as internal math evidence and compare against a safe-mode baseline before release."
+        elif research_surfaces:
+            status = "research_or_diagnostic_math_present"
+            severity = "WARNING"
+            next_action = "Research/diagnostic math is present but no active generation surface is proven active."
+        else:
+            status = "public_observer_topology"
+            severity = "PASS"
+            next_action = "Math topology is observer/public-boundary only; final release still needs video inspection."
+
+        return {
+            "stage": "EventMathTopologyLedger",
+            "status": status,
+            "severity": severity,
+            "ledger_version": "math_topology_ledger_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "formula": "Every math organ is classified by formula role, risk layer, control mode, and generation side-effect so Strategy evidence can return to one release-readable topology.",
+            "control_mode": "REPORT_ONLY",
+            "does_not_change_generation": True,
+            "surface_count": len(surfaces),
+            "present_surface_count": len(present_ids),
+            "required_surface_ids": sorted(required_ids),
+            "missing_required_surface_ids": missing_required,
+            "active_generation_surface_count": len(active_surfaces),
+            "active_generation_surface_ids": [s["surface_id"] for s in active_surfaces],
+            "research_surface_count": len(research_surfaces),
+            "research_surface_ids": [s["surface_id"] for s in research_surfaces],
+            "report_only_surface_count": len(report_only_surfaces),
+            "surfaces": surfaces,
+            "next_action": next_action,
+        }
+
+    def _event_math_topology_dependency_graph(self, math_topology_ledger):
+        ledger = math_topology_ledger if isinstance(math_topology_ledger, dict) else {}
+        surfaces = [
+            s for s in (ledger.get("surfaces", []) or [])
+            if isinstance(s, dict)
+        ]
+        surface_by_id = {str(s.get("surface_id", "") or ""): s for s in surfaces}
+
+        def surface_present(surface_id):
+            return bool(surface_by_id.get(surface_id, {}).get("present", False))
+
+        def surface_active(surface_id):
+            return bool(surface_by_id.get(surface_id, {}).get("active_generation_control", False))
+
+        def surface_research(surface_id):
+            return bool(surface_by_id.get(surface_id, {}).get("research_surface", False))
+
+        def node(node_id, label, formula_role, source_surface_id="", node_type="surface"):
+            surface = surface_by_id.get(source_surface_id, {}) if source_surface_id else {}
+            if source_surface_id:
+                present = surface_present(source_surface_id)
+                active = surface_active(source_surface_id)
+                research = surface_research(source_surface_id)
+                risk_layer = str(surface.get("risk_layer", "") or "")
+                public_release_role = str(surface.get("public_release_role", "") or "")
+            else:
+                present = True
+                active = False
+                research = False
+                risk_layer = "concept"
+                public_release_role = "context"
+            return {
+                "node_id": str(node_id),
+                "label": str(label),
+                "node_type": str(node_type),
+                "source_surface_id": str(source_surface_id or ""),
+                "present": bool(present),
+                "active_generation_control": bool(active),
+                "research_surface": bool(research),
+                "risk_layer": risk_layer,
+                "public_release_role": public_release_role,
+                "formula_role": str(formula_role),
+            }
+
+        nodes = [
+            node("ui_runtime_carrier", "UI / runtime numeric carriers", "Raw UI values enter as candidate Strategy carriers before normalization.", node_type="carrier"),
+            node("finite_input_guard", "Finite Input Guard", "Invalid numeric carrier returns to declared default before Strategy math.", "finite_input_guard"),
+            node("prompt_strategy_candidate", "Clean Prompt StrategyCandidate", "Prompt remains clean text carrier; math must not become prompt prose.", node_type="carrier"),
+            node("prompt_purity_lock", "Prompt Purity Lock", "Locks semantic/math topology outside prompt text.", "prompt_purity_lock"),
+            node("math_control_summary", "Math Control Summary", "UI math mode selects observer/safe delta/research route.", "math_control_summary"),
+            node("semantic_relation_pressure_router", "Semantic Relation Pressure Router", "Reads prompt/topology relation pressure as local Strategy evidence.", "semantic_relation_pressure_router"),
+            node("strategy_control_surface", "Strategy Control Surface", "Folds bounded local pressure back into S_global_event_route.", "strategy_control_surface"),
+            node("visible_motion_strategy_return_gate", "Visible Motion Strategy Return Gate", "Visible video behavior returns as next Strategy evidence without same-run active damping.", "visible_motion_strategy_return_gate"),
+            node("true_region_topology_evidence", "True Region Topology Evidence", "Region-role evidence separates center action, edge/background, top band, object/contact, and selected-tail carriers before active control can be nominated.", "true_region_topology_evidence"),
+            node("fractal_strategy_intersection_map", "Fractal Strategy Intersection Map", "All dynamic intersections recursively unfold the Strategy equality to depth 7 and return to the parent route.", "fractal_strategy_intersection_map"),
+            node("region_weighted_fractal_strategy_return", "Region-Weighted Fractal Strategy Return", "Dominant fractal axes must agree with true-region and visible-video evidence before nominating a route.", "region_weighted_fractal_strategy_return"),
+            node("pixel_region_motion_map", "Pixel Region Motion Map", "Decoded pixel regions verify whether pressure-derived background leakage is visible evidence or scalar artifact.", "pixel_region_motion_map"),
+            node("cascade_seam_impulse_review", "Cascade Seam Impulse Review", "Tail, boundary, and post-continue motion vectors expose whether the next segment continues or is reborn.", "cascade_seam_impulse_review"),
+            node("tail_next_source_continuity_proposal", "Tail Next Source Continuity Proposal", "Selected tail source, tail motion, next entry frame, and visible seam evidence are gathered into a report-only bridge proposal.", "tail_next_source_continuity_proposal"),
+            node("cascade_seam_phase_classifier", "Cascade Seam Phase Classifier", "Classifies the seam cause before active control: semantic phase, prompt text change, latent mismatch, background conflict, center overdrive, or sampler handoff reset.", "cascade_seam_phase_classifier"),
+            node("semantic_phase_schedule_proposal", "Semantic Phase Schedule Proposal", "Separates clean prompt text identity from local cascade phase identity before any active phase-window route.", "semantic_phase_schedule_proposal"),
+            node("selected_tail_source_reconstruction_safe", "Selected Tail Source Reconstruction SAFE Package", "Reconstructs source/tail inheritance as report-only StrategyCarrier evidence.", "selected_tail_source_reconstruction_safe"),
+            node("max_risk_strategy_ring_package", "MAX RISK Strategy Ring Package", "Explicitly allows a tiny hard-guard override at the next segment latent entry.", "max_risk_strategy_ring_package"),
+            node("pixel_pressure_disagreement_review", "Pixel Pressure Disagreement Review", "Selected visible pixels correct scalar pressure interpretation before future route nomination.", "pixel_pressure_disagreement_review"),
+            node("pressure_pixel_reweighting_proposal", "Pressure / Pixel Reweighting Proposal", "Corrected pixel-pressure evidence returns as bounded future weights, never same-run tensor control.", "pressure_pixel_reweighting_proposal"),
+            node("pressure_pixel_reweighting_active_candidate", "Pressure / Pixel Reweighting Quality Guard", "Fixed-seed R147 proof returns as a quality-guarded low-branch A/B delta after the R148 grain verdict.", "pressure_pixel_reweighting_active_candidate"),
+            node("source_tail_carrier", "Source / selected tail visible carrier", "Visible tail/source OutcomePrevious becomes next sampler Strategy evidence.", node_type="carrier"),
+            node("boundary_background_anchor_control", "Boundary Background Anchor Control", "Moves selected-tail background/source evidence before next sampler.", "boundary_background_anchor_control"),
+            node("r126_low_mid_window_route", "R126 Low Mid-Window Route Guard", "Places spatial control only into route-key matched low mid-window.", "r126_low_mid_window_route"),
+            node("denoise_phase_map", "Denoise Phase Map", "Classifies phase before local math can touch delta.", "denoise_phase_map"),
+            node("spatial_carrier_preservation_map", "Spatial Carrier Preservation Map", "Converts spatial/source carriers into bounded phase-safe pressure.", "spatial_carrier_preservation_map"),
+            node("action_background_separation_gate", "Action Background Separation Gate", "Keeps center action and edge background as separable sub-strategies before pressure returns to the model.", "action_background_separation_gate"),
+            node("source_noise_field", "Source / noise field carrier", "Noise/source field is read before deciding whether shaping is safe.", node_type="carrier"),
+            node("noise_field_strategy_bridge", "Noise Field Strategy Bridge", "Names safe next Strategy surface from source/noise evidence.", "noise_field_strategy_bridge"),
+            node("source_noise_birth_shaping", "Source / Noise Birth Shaping", "Tiny guarded pre-high seed gain acts before high sampler while prompt and CFG stay native.", "source_noise_birth_shaping"),
+            node("segment_entry_latent_memory_bridge", "Segment Entry Latent Memory Bridge", "Optional previous latent OutcomePrevious returns at next segment entry.", "segment_entry_latent_memory_bridge"),
+            node("strategy_matrix", "Strategy Matrix / micro-formulae", "Carrier collisions unfold report-only local Strategy equalities.", "strategy_matrix"),
+            node("public_surface_contract", "Public Surface Contract", "Classifies visible UI/runtime modes before final readiness.", "public_surface_contract"),
+            node("public_package_static_scan", "Public Package Static Scan", "Public docs/version/web/cache package surface returns before release packaging.", "public_package_static_scan"),
+            node("math_topology_ledger", "Math Topology Ledger", "Collects all math organs into one release-readable topology.", node_type="ledger"),
+            node("public_release_readiness_gate", "Public Release Readiness Gate", "Returns public/research/not-ready verdict after finalized route.", node_type="gate"),
+            node("public_release_candidate_manifest", "Public Release Candidate Manifest", "Post-save artifacts and release gates return to one package/no-package Strategy verdict.", node_type="manifest"),
+            node("human_report_top_summary", "Human Report Top Summary", "Returns graph/readiness/manifest meaning to the human reader before raw records.", node_type="report"),
+            node("public_package_verdict", "Public Package Verdict", "A package handoff is allowed only after manifest convergence plus human video review.", node_type="release_outcome"),
+            node("model_attractor", "Model Attractor", "The model remains the topological center; math should help it understand, not replace it.", node_type="formula_center"),
+            node("visible_video_outcome", "Visible Video Outcome", "Decoded video is the visible Outcome(t+1) that still needs human inspection.", node_type="outcome"),
+        ]
+
+        def edge(edge_id, source, target, formula_link, required=True, source_surface_id="", risk="observer"):
+            source_node = next((n for n in nodes if n["node_id"] == source), {})
+            target_node = next((n for n in nodes if n["node_id"] == target), {})
+            linked_surfaces = [sid for sid in [source_surface_id, source_node.get("source_surface_id", ""), target_node.get("source_surface_id", "")] if sid]
+            present = bool(source_node.get("present", False)) and bool(target_node.get("present", False))
+            active = any(surface_active(sid) for sid in linked_surfaces)
+            research = any(surface_research(sid) for sid in linked_surfaces) or str(risk) in ("research", "active_research")
+            return {
+                "edge_id": str(edge_id),
+                "from": str(source),
+                "to": str(target),
+                "present": bool(present),
+                "required": bool(required),
+                "active_generation_edge": bool(active),
+                "research_edge": bool(research),
+                "risk": str(risk),
+                "formula_link": str(formula_link),
+            }
+
+        edges = [
+            edge("ui_to_finite_guard", "ui_runtime_carrier", "finite_input_guard", "corrupted carrier -> fallback Strategy boundary", source_surface_id="finite_input_guard", risk="public_guard"),
+            edge("finite_guard_to_math_mode", "finite_input_guard", "math_control_summary", "finite numeric carrier -> selected math route", source_surface_id="math_control_summary", risk="public_guard"),
+            edge("prompt_to_purity", "prompt_strategy_candidate", "prompt_purity_lock", "prompt remains StrategyCandidate, not formula prose", source_surface_id="prompt_purity_lock", risk="public_guard"),
+            edge("purity_to_semantic_router", "prompt_purity_lock", "semantic_relation_pressure_router", "semantic pressure can be read only outside prompt text", source_surface_id="semantic_relation_pressure_router", required=False, risk="research"),
+            edge("semantic_router_to_control_surface", "semantic_relation_pressure_router", "strategy_control_surface", "local relation pressure returns to S_global_event_route", source_surface_id="strategy_control_surface", required=False, risk="research"),
+            edge("visible_outcome_to_motion_return", "visible_video_outcome", "visible_motion_strategy_return_gate", "visible Outcome(t+1) returns as next-run Strategy evidence", source_surface_id="visible_motion_strategy_return_gate", required=False, risk="observer"),
+            edge("motion_return_to_control_surface", "visible_motion_strategy_return_gate", "strategy_control_surface", "visible motion may nominate the next bounded route but cannot force same-run damping", source_surface_id="visible_motion_strategy_return_gate", required=False, risk="research"),
+            edge("motion_return_to_true_region_topology", "visible_motion_strategy_return_gate", "true_region_topology_evidence", "coupled visible motion must be resolved into region-role evidence before active control", source_surface_id="true_region_topology_evidence", required=False, risk="observer_to_route"),
+            edge("strategy_matrix_to_fractal_intersections", "strategy_matrix", "fractal_strategy_intersection_map", "local collision formulae become primary intersections for recursive Strategy unfold", source_surface_id="fractal_strategy_intersection_map", required=False, risk="observer_to_route"),
+            edge("true_region_to_fractal_intersections", "true_region_topology_evidence", "fractal_strategy_intersection_map", "region-role pressures become local intersections that must return to S_global_event_route", source_surface_id="fractal_strategy_intersection_map", required=False, risk="observer_to_route"),
+            edge("fractal_to_region_weighted_return", "fractal_strategy_intersection_map", "region_weighted_fractal_strategy_return", "dominant fractal axis is reweighted by region/visible evidence before route nomination", source_surface_id="region_weighted_fractal_strategy_return", required=False, risk="observer_to_route"),
+            edge("true_region_to_region_weighted_return", "true_region_topology_evidence", "region_weighted_fractal_strategy_return", "true region confidence checks whether a dominant region axis is real evidence or scalar overweight", source_surface_id="region_weighted_fractal_strategy_return", required=False, risk="observer_to_route"),
+            edge("region_weighted_return_to_control_surface", "region_weighted_fractal_strategy_return", "strategy_control_surface", "only evidence-matched axes may nominate future bounded control surfaces", source_surface_id="region_weighted_fractal_strategy_return", required=False, risk="research"),
+            edge("region_weighted_return_to_model_attractor", "region_weighted_fractal_strategy_return", "model_attractor", "region-weighted axes must return to the model attractor instead of becoming independent controllers", source_surface_id="region_weighted_fractal_strategy_return", required=False, risk="observer_to_route"),
+            edge("region_weighted_return_to_ledger", "region_weighted_fractal_strategy_return", "math_topology_ledger", "axis confidence becomes release-readable topology evidence", source_surface_id="region_weighted_fractal_strategy_return", required=False, risk="observer_to_route"),
+            edge("region_weighted_return_to_action_background", "region_weighted_fractal_strategy_return", "action_background_separation_gate", "guarded fractal axis is split into action/background/seam carriers before any route nomination", source_surface_id="action_background_separation_gate", required=False, risk="observer_to_route"),
+            edge("visible_outcome_to_pixel_region_map", "visible_video_outcome", "pixel_region_motion_map", "visible Outcome(t+1) is segmented into pixel-region motion before scalar pressure is trusted", source_surface_id="pixel_region_motion_map", required=False, risk="observer_to_route"),
+            edge("visible_outcome_to_seam_impulse", "visible_video_outcome", "cascade_seam_impulse_review", "visible segment tails and entries expose cascade Strategy continuity or rebirth", source_surface_id="cascade_seam_impulse_review", required=False, risk="observer_to_route"),
+            edge("tail_carrier_to_seam_impulse", "source_tail_carrier", "cascade_seam_impulse_review", "selected/tail Outcome(previous segment) is compared against post-continue movement", source_surface_id="cascade_seam_impulse_review", required=False, risk="observer_to_route"),
+            edge("seam_impulse_to_control_surface", "cascade_seam_impulse_review", "strategy_control_surface", "a repeated seam impulse may nominate tail-next-source Strategy continuity but remains report-only here", source_surface_id="cascade_seam_impulse_review", required=False, risk="research"),
+            edge("seam_impulse_to_model_attractor", "cascade_seam_impulse_review", "model_attractor", "cascade continuity evidence must return to the model attractor instead of becoming blind damping", source_surface_id="cascade_seam_impulse_review", required=False, risk="observer_to_route"),
+            edge("seam_impulse_to_ledger", "cascade_seam_impulse_review", "math_topology_ledger", "cascade seam impulse becomes release-readable topology evidence", source_surface_id="cascade_seam_impulse_review", required=False, risk="observer_to_route"),
+            edge("seam_impulse_to_tail_next_source_proposal", "cascade_seam_impulse_review", "tail_next_source_continuity_proposal", "visible/vector seam evidence is translated into the carriers a future continuity bridge would need", source_surface_id="tail_next_source_continuity_proposal", required=False, risk="observer_to_route"),
+            edge("tail_carrier_to_tail_next_source_proposal", "source_tail_carrier", "tail_next_source_continuity_proposal", "selected tail frame and tail motion become the left side of the next-source Strategy equality", source_surface_id="tail_next_source_continuity_proposal", required=False, risk="observer_to_route"),
+            edge("tail_next_source_proposal_to_control_surface", "tail_next_source_continuity_proposal", "strategy_control_surface", "a repeated high proposal may nominate report-only tail-next-source inheritance before active control", source_surface_id="tail_next_source_continuity_proposal", required=False, risk="research"),
+            edge("tail_next_source_proposal_to_model_attractor", "tail_next_source_continuity_proposal", "model_attractor", "continuity bridge design must return to the model attractor instead of becoming local damping", source_surface_id="tail_next_source_continuity_proposal", required=False, risk="observer_to_route"),
+            edge("tail_next_source_proposal_to_ledger", "tail_next_source_continuity_proposal", "math_topology_ledger", "tail-next-source continuity proposal becomes release-readable topology evidence", source_surface_id="tail_next_source_continuity_proposal", required=False, risk="observer_to_route"),
+            edge("seam_impulse_to_phase_classifier", "cascade_seam_impulse_review", "cascade_seam_phase_classifier", "seam impulse evidence becomes phase-cause classification before active route choice", source_surface_id="cascade_seam_phase_classifier", required=False, risk="observer_to_route"),
+            edge("tail_next_source_to_phase_classifier", "tail_next_source_continuity_proposal", "cascade_seam_phase_classifier", "tail/source continuity pressure helps separate latent mismatch from prompt or sampler reset", source_surface_id="cascade_seam_phase_classifier", required=False, risk="observer_to_route"),
+            edge("pixel_region_map_to_phase_classifier", "pixel_region_motion_map", "cascade_seam_phase_classifier", "visible region motion separates background conflict from center action overdrive", source_surface_id="cascade_seam_phase_classifier", required=False, risk="observer_to_route"),
+            edge("latent_memory_to_phase_classifier", "segment_entry_latent_memory_bridge", "cascade_seam_phase_classifier", "latent bridge admissibility helps classify carrier mismatch before more alpha", source_surface_id="cascade_seam_phase_classifier", required=False, risk="observer_to_route"),
+            edge("phase_classifier_to_semantic_schedule", "cascade_seam_phase_classifier", "semantic_phase_schedule_proposal", "semantic phase re-entry is separated from prompt text changes before selecting a next route", source_surface_id="semantic_phase_schedule_proposal", required=False, risk="observer_to_route"),
+            edge("semantic_schedule_to_control_surface", "semantic_phase_schedule_proposal", "strategy_control_surface", "a repeated semantic phase schedule can nominate a future local Strategy window without prompt text injection", source_surface_id="semantic_phase_schedule_proposal", required=False, risk="research"),
+            edge("semantic_schedule_to_model_attractor", "semantic_phase_schedule_proposal", "model_attractor", "phase windows must return to the model attractor instead of becoming independent text rewrites", source_surface_id="semantic_phase_schedule_proposal", required=False, risk="observer_to_route"),
+            edge("semantic_schedule_to_ledger", "semantic_phase_schedule_proposal", "math_topology_ledger", "semantic phase schedule evidence becomes release-readable topology evidence", source_surface_id="semantic_phase_schedule_proposal", required=False, risk="observer_to_route"),
+            edge("semantic_schedule_to_phase_window_carrier", "semantic_phase_schedule_proposal", "semantic_phase_window_carrier", "the report-only schedule becomes a bounded local numeric carrier on the next segment route", source_surface_id="semantic_phase_window_carrier", required=False, risk="active_research"),
+            edge("remaining_strategy_to_phase_window_carrier", "source_tail_carrier", "semantic_phase_window_carrier", "selected tail progress and tail motion define the local phase window before the next high sampler", source_surface_id="semantic_phase_window_carrier", required=False, risk="active_research"),
+            edge("phase_window_carrier_to_latent_bridge", "semantic_phase_window_carrier", "segment_entry_latent_memory_bridge", "R177 reports phase-window pressure at the existing tiny concat-only seam-entry bridge but restores the R173 region guard baseline and does not let phase pressure mutate tensors", source_surface_id="semantic_phase_window_carrier", required=False, risk="report_only"),
+            edge("phase_window_carrier_to_model_attractor", "semantic_phase_window_carrier", "model_attractor", "local phase control must return to model-readable continuity rather than becoming an independent local loop", source_surface_id="semantic_phase_window_carrier", required=False, risk="active_research"),
+            edge("phase_window_carrier_to_ledger", "semantic_phase_window_carrier", "math_topology_ledger", "R177 phase-window rejection evidence is visible in the topology ledger for A/B comparison without being counted as an active generation surface", source_surface_id="semantic_phase_window_carrier", required=False, risk="report_only"),
+            edge("phase_classifier_to_control_surface", "cascade_seam_phase_classifier", "strategy_control_surface", "phase classification nominates exactly one future route but remains report-only here", source_surface_id="cascade_seam_phase_classifier", required=False, risk="research"),
+            edge("phase_classifier_to_model_attractor", "cascade_seam_phase_classifier", "model_attractor", "classified seam phase returns to the model attractor before any active control", source_surface_id="cascade_seam_phase_classifier", required=False, risk="observer_to_route"),
+            edge("phase_classifier_to_ledger", "cascade_seam_phase_classifier", "math_topology_ledger", "seam phase classification becomes release-readable topology evidence", source_surface_id="cascade_seam_phase_classifier", required=False, risk="observer_to_route"),
+            edge("tail_next_source_proposal_to_safe_package", "tail_next_source_continuity_proposal", "selected_tail_source_reconstruction_safe", "tail/source evidence is reconstructed into a safe report package before mutation is allowed", source_surface_id="selected_tail_source_reconstruction_safe", required=False, risk="observer_to_route"),
+            edge("safe_package_to_model_attractor", "selected_tail_source_reconstruction_safe", "model_attractor", "safe reconstruction must return to the model attractor instead of becoming prompt prose", source_surface_id="selected_tail_source_reconstruction_safe", required=False, risk="observer_to_route"),
+            edge("safe_package_to_max_risk_package", "selected_tail_source_reconstruction_safe", "max_risk_strategy_ring_package", "only repeated high rebirth risk should justify explicit max-risk Strategy ring A/B", source_surface_id="max_risk_strategy_ring_package", required=False, risk="active_research"),
+            edge("max_risk_package_to_latent_bridge", "max_risk_strategy_ring_package", "segment_entry_latent_memory_bridge", "max-risk package can override bridge hard guard with a tiny single-slice latent Strategy ring", source_surface_id="max_risk_strategy_ring_package", required=False, risk="active_research"),
+            edge("max_risk_package_to_model_attractor", "max_risk_strategy_ring_package", "model_attractor", "max-risk mutation must still serve the model attractor and not become independent physics", source_surface_id="max_risk_strategy_ring_package", required=False, risk="active_research"),
+            edge("max_risk_package_to_ledger", "max_risk_strategy_ring_package", "math_topology_ledger", "max-risk route is release-readable evidence and never silent behavior", source_surface_id="max_risk_strategy_ring_package", required=False, risk="active_research"),
+            edge("pixel_region_map_to_action_background", "pixel_region_motion_map", "action_background_separation_gate", "pixel-region motion checks pressure-derived leakage before action/background route nomination", source_surface_id="pixel_region_motion_map", required=False, risk="observer_to_route"),
+            edge("pixel_region_map_to_model_attractor", "pixel_region_motion_map", "model_attractor", "visible pixel evidence must return to the model attractor instead of becoming an independent controller", source_surface_id="pixel_region_motion_map", required=False, risk="observer_to_route"),
+            edge("pixel_region_map_to_ledger", "pixel_region_motion_map", "math_topology_ledger", "pixel-region motion becomes release-readable topology evidence", source_surface_id="pixel_region_motion_map", required=False, risk="observer_to_route"),
+            edge("pixel_region_map_to_pressure_disagreement", "pixel_region_motion_map", "pixel_pressure_disagreement_review", "selected visible Outcome reweights scalar pressure before interpretation", source_surface_id="pixel_pressure_disagreement_review", required=False, risk="observer_to_route"),
+            edge("action_background_to_pressure_disagreement", "action_background_separation_gate", "pixel_pressure_disagreement_review", "pressure-derived action/background split is checked against selected visible pixels", source_surface_id="pixel_pressure_disagreement_review", required=False, risk="observer_to_route"),
+            edge("pressure_disagreement_to_control_surface", "pixel_pressure_disagreement_review", "strategy_control_surface", "corrected pixel/pressure axis may nominate a future bounded route only after fixed-seed proof", source_surface_id="pixel_pressure_disagreement_review", required=False, risk="research"),
+            edge("pressure_disagreement_to_model_attractor", "pixel_pressure_disagreement_review", "model_attractor", "pixel-corrected pressure must return to the model attractor instead of becoming independent control", source_surface_id="pixel_pressure_disagreement_review", required=False, risk="observer_to_route"),
+            edge("pressure_disagreement_to_ledger", "pixel_pressure_disagreement_review", "math_topology_ledger", "pixel/pressure disagreement becomes release-readable topology evidence", source_surface_id="pixel_pressure_disagreement_review", required=False, risk="observer_to_route"),
+            edge("pressure_disagreement_to_reweighting_proposal", "pixel_pressure_disagreement_review", "pressure_pixel_reweighting_proposal", "corrected disagreement becomes bounded next-run weights, not current-run mutation", source_surface_id="pressure_pixel_reweighting_proposal", required=False, risk="observer_to_route"),
+            edge("reweighting_proposal_to_control_surface", "pressure_pixel_reweighting_proposal", "strategy_control_surface", "bounded weights may nominate a future low-mid-window A/B route only after fixed-seed proof", source_surface_id="pressure_pixel_reweighting_proposal", required=False, risk="research"),
+            edge("reweighting_proposal_to_model_attractor", "pressure_pixel_reweighting_proposal", "model_attractor", "pressure/pixel weights must serve the model attractor instead of becoming independent physics", source_surface_id="pressure_pixel_reweighting_proposal", required=False, risk="observer_to_route"),
+            edge("reweighting_proposal_to_ledger", "pressure_pixel_reweighting_proposal", "math_topology_ledger", "bounded pressure/pixel weights become release-readable topology evidence", source_surface_id="pressure_pixel_reweighting_proposal", required=False, risk="observer_to_route"),
+            edge("reweighting_proposal_to_active_candidate", "pressure_pixel_reweighting_proposal", "pressure_pixel_reweighting_active_candidate", "fixed-seed proof may become a quality-guarded low-branch A/B candidate", source_surface_id="pressure_pixel_reweighting_active_candidate", required=False, risk="active_research"),
+            edge("active_candidate_to_control_surface", "pressure_pixel_reweighting_active_candidate", "strategy_control_surface", "candidate delta returns through the normal Strategy control surface before latent delta control", source_surface_id="pressure_pixel_reweighting_active_candidate", required=False, risk="active_research"),
+            edge("active_candidate_to_model_attractor", "pressure_pixel_reweighting_active_candidate", "model_attractor", "candidate remains subordinate to the model attractor instead of becoming independent physics", source_surface_id="pressure_pixel_reweighting_active_candidate", required=False, risk="active_research"),
+            edge("active_candidate_to_ledger", "pressure_pixel_reweighting_active_candidate", "math_topology_ledger", "active candidate becomes release-readable topology evidence", source_surface_id="pressure_pixel_reweighting_active_candidate", required=False, risk="active_research"),
+            edge("action_background_report_to_control_surface", "action_background_separation_gate", "strategy_control_surface", "separated action/background evidence may nominate a bounded future route, never same-run tensor control", source_surface_id="action_background_separation_gate", required=False, risk="research"),
+            edge("action_background_to_model_attractor", "action_background_separation_gate", "model_attractor", "separated carrier roles must return to the model attractor instead of becoming independent controllers", source_surface_id="action_background_separation_gate", required=False, risk="observer_to_route"),
+            edge("action_background_to_ledger", "action_background_separation_gate", "math_topology_ledger", "action/background separation becomes release-readable topology evidence", source_surface_id="action_background_separation_gate", required=False, risk="observer_to_route"),
+            edge("fractal_intersections_to_control_surface", "fractal_strategy_intersection_map", "strategy_control_surface", "dominant fractal axis may nominate a bounded route, but remains report-only until fixed-seed proof", source_surface_id="fractal_strategy_intersection_map", required=False, risk="research"),
+            edge("fractal_intersections_to_model_attractor", "fractal_strategy_intersection_map", "model_attractor", "recursive Strategy intersections align around the model attractor instead of replacing model physics", source_surface_id="fractal_strategy_intersection_map", required=False, risk="observer_to_route"),
+            edge("fractal_intersections_to_ledger", "fractal_strategy_intersection_map", "math_topology_ledger", "seven-layer intersection map becomes release-readable topology evidence", source_surface_id="fractal_strategy_intersection_map", required=False, risk="observer_to_route"),
+            edge("true_region_to_spatial_preservation", "true_region_topology_evidence", "spatial_carrier_preservation_map", "only proven region topology may become spatial preservation pressure", source_surface_id="true_region_topology_evidence", required=False, risk="research"),
+            edge("true_region_to_action_background", "true_region_topology_evidence", "action_background_separation_gate", "region roles may separate center action from edge/background before returning to the model attractor", source_surface_id="true_region_topology_evidence", required=False, risk="research"),
+            edge("tail_to_boundary_background", "source_tail_carrier", "boundary_background_anchor_control", "selected tail OutcomePrevious becomes boundary/source evidence", source_surface_id="boundary_background_anchor_control", required=False, risk="observer_to_route"),
+            edge("boundary_to_r126", "boundary_background_anchor_control", "r126_low_mid_window_route", "boundary evidence may enter only a route-key matched low mid-window", source_surface_id="r126_low_mid_window_route", required=False, risk="active_research"),
+            edge("r126_to_denoise_phase", "r126_low_mid_window_route", "denoise_phase_map", "active route must prove low mid-window denoise phase", source_surface_id="denoise_phase_map", required=False, risk="active_research"),
+            edge("denoise_to_spatial_preservation", "denoise_phase_map", "spatial_carrier_preservation_map", "only phase-safe delta can receive spatial preservation pressure", source_surface_id="spatial_carrier_preservation_map", required=False, risk="active_research"),
+            edge("spatial_preservation_to_control_surface", "spatial_carrier_preservation_map", "strategy_control_surface", "bounded spatial pressure folds back to global Strategy", source_surface_id="strategy_control_surface", required=False, risk="active_research"),
+            edge("spatial_preservation_to_action_background", "spatial_carrier_preservation_map", "action_background_separation_gate", "spatial role pressure is separated into center action vs edge background before model-attractor pressure", source_surface_id="action_background_separation_gate", required=False, risk="active_research"),
+            edge("action_background_to_control_surface", "action_background_separation_gate", "strategy_control_surface", "background motion leakage is compressed while center action returns to S_global_event_route", source_surface_id="action_background_separation_gate", required=False, risk="active_research"),
+            edge("noise_to_bridge", "source_noise_field", "noise_field_strategy_bridge", "source/noise field names the safe future shaping surface", source_surface_id="noise_field_strategy_bridge", required=False, risk="observer"),
+            edge("bridge_to_birth_shaping", "noise_field_strategy_bridge", "source_noise_birth_shaping", "only pre-high seed evidence may become tiny source/noise shaping", source_surface_id="source_noise_birth_shaping", required=False, risk="active_research"),
+            edge("birth_shaping_to_control_surface", "source_noise_birth_shaping", "strategy_control_surface", "pre-high seed shaping is still subordinate to the selected Strategy control surface", source_surface_id="strategy_control_surface", required=False, risk="active_research"),
+            edge("birth_shaping_to_model_attractor", "source_noise_birth_shaping", "model_attractor", "source/noise shaping must help the model understand the event, not replace sampler physics", source_surface_id="source_noise_birth_shaping", required=False, risk="active_research"),
+            edge("latent_memory_to_control_surface", "segment_entry_latent_memory_bridge", "strategy_control_surface", "previous latent OutcomePrevious returns only through explicit bounded memory", source_surface_id="segment_entry_latent_memory_bridge", required=False, risk="research"),
+            edge("strategy_matrix_to_ledger", "strategy_matrix", "math_topology_ledger", "local micro-formula observations become release-readable topology", source_surface_id="strategy_matrix", required=False, risk="observer"),
+            edge("math_mode_to_public_surface", "math_control_summary", "public_surface_contract", "UI/runtime modes must be classified before release readiness", source_surface_id="public_surface_contract", risk="public_guard"),
+            edge("public_surface_to_package_static_scan", "public_surface_contract", "public_package_static_scan", "UI/runtime public surface must agree with package files", source_surface_id="public_package_static_scan", risk="public_guard"),
+            edge("public_surface_to_ledger", "public_surface_contract", "math_topology_ledger", "public/research boundary becomes part of math topology", source_surface_id="math_topology_ledger", risk="public_guard"),
+            edge("package_static_scan_to_ledger", "public_package_static_scan", "math_topology_ledger", "public package files become release-readable topology", source_surface_id="public_package_static_scan", risk="public_guard"),
+            edge("ledger_to_readiness", "math_topology_ledger", "public_release_readiness_gate", "all math surfaces return to one public/research verdict", source_surface_id="math_topology_ledger", risk="public_guard"),
+            edge("package_static_scan_to_release_manifest", "public_package_static_scan", "public_release_candidate_manifest", "package file cleanliness becomes package/no-package evidence", source_surface_id="public_package_static_scan", risk="public_guard"),
+            edge("readiness_to_release_manifest", "public_release_readiness_gate", "public_release_candidate_manifest", "public/research readiness becomes package/no-package evidence", risk="public_guard"),
+            edge("ledger_to_release_manifest", "math_topology_ledger", "public_release_candidate_manifest", "math topology proof becomes package/no-package evidence", source_surface_id="math_topology_ledger", risk="public_guard"),
+            edge("release_manifest_to_human_report", "public_release_candidate_manifest", "human_report_top_summary", "package verdict must be visible before raw records", risk="report"),
+            edge("release_manifest_to_package_verdict", "public_release_candidate_manifest", "public_package_verdict", "release package is an Outcome only after manifest convergence", risk="release_gate"),
+            edge("readiness_to_human_report", "public_release_readiness_gate", "human_report_top_summary", "readiness verdict must stay visible before raw records", risk="report"),
+            edge("control_surface_to_model_attractor", "strategy_control_surface", "model_attractor", "math acts as bounded attractor guidance, not model replacement", source_surface_id="strategy_control_surface", required=False, risk="research"),
+            edge("model_attractor_to_video_outcome", "model_attractor", "visible_video_outcome", "the final proof is visible Outcome(t+1), not report fields alone", required=False, risk="visual_review"),
+        ]
+
+        required_missing = [e["edge_id"] for e in edges if e["required"] and not e["present"]]
+        active_edges = [e for e in edges if e["active_generation_edge"]]
+        research_edges = [e for e in edges if e["research_edge"] and e["present"]]
+
+        if not ledger:
+            status = "missing_math_topology_ledger"
+            severity = "WARNING"
+            next_action = "Record EventMathTopologyLedger before interpreting math dependencies."
+        elif required_missing:
+            status = "incomplete_math_topology_graph"
+            severity = "WARNING"
+            next_action = "Required dependency edges are missing; treat public/release interpretation as incomplete."
+        elif active_edges:
+            status = "active_math_dependency_graph"
+            severity = "RESEARCH"
+            next_action = "Active math dependency edges exist; compare against safe baseline and inspect video before release."
+        elif research_edges:
+            status = "research_dependency_graph"
+            severity = "WARNING"
+            next_action = "Research/diagnostic dependency edges are visible, but no active generation edge is proven active."
+        else:
+            status = "observer_dependency_graph"
+            severity = "PASS"
+            next_action = "Graph is observer/public-boundary only; release still needs VIDEO + visual inspection."
+
+        return {
+            "stage": "EventMathTopologyDependencyGraph",
+            "status": status,
+            "severity": severity,
+            "graph_version": "math_topology_dependency_graph_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "formula": "The math body is returned as a dependency graph: each local Strategy surface must declare where it receives evidence, where it sends pressure, and whether it can affect generation.",
+            "control_mode": "REPORT_ONLY",
+            "does_not_change_generation": True,
+            "node_count": len(nodes),
+            "edge_count": len(edges),
+            "present_node_count": sum(1 for n in nodes if n.get("present")),
+            "present_edge_count": sum(1 for e in edges if e.get("present")),
+            "required_missing_edge_ids": required_missing,
+            "active_generation_edge_count": len(active_edges),
+            "active_generation_edge_ids": [e["edge_id"] for e in active_edges],
+            "research_edge_count": len(research_edges),
+            "research_edge_ids": [e["edge_id"] for e in research_edges],
+            "nodes": nodes,
+            "edges": edges,
+            "next_action": next_action,
+        }
 
     def _event_strategy_matrix_from_records(self, execution_records, result_status="", saved_video_path=""):
         """
@@ -2374,6 +3308,1828 @@ class SingularityTelemetryMixin:
             "next_action": next_action,
         }
 
+    def _event_visible_motion_strategy_return_gate(
+        self,
+        strategy_return_pressure_resolver=None,
+        relation_pressure_cards=None,
+        object_relation_review=None,
+        topology_strategy_return_map=None,
+    ):
+        """
+        R139 report-only gate.
+
+        Visible motion is already the completed Outcome(t+1). This gate returns
+        it to the next Strategy decision without allowing same-run or blind
+        global damping. It exists specifically to avoid treating "the video
+        moved" as proof that the model must be constrained.
+        """
+        resolver = strategy_return_pressure_resolver if isinstance(strategy_return_pressure_resolver, dict) else {}
+        relation_pressure_cards = [
+            c for c in (relation_pressure_cards or [])
+            if isinstance(c, dict)
+        ]
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+        topology_strategy_return_map = topology_strategy_return_map if isinstance(topology_strategy_return_map, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def card(stage_name):
+            for item in relation_pressure_cards:
+                if str(item.get("stage", "") or "") == stage_name:
+                    return item
+            return {}
+
+        def route(collision_id):
+            for item in topology_strategy_return_map.get("local_strategy_routes", []) or []:
+                if isinstance(item, dict) and str(item.get("collision_id", "") or "") == collision_id:
+                    return item
+            return {}
+
+        frame_card = card("EventFrameSpikeAttributionCard")
+        tail_card = card("EventTailStrategyContinuityCard")
+        object_card = card("EventObjectCarrierIdentityCard")
+        background_card = card("EventBackgroundAnchorPreservationCard")
+        spatial_card = card("EventSpatialAnchorMap")
+        global_card = card("EventGlobalStrategyReturnCard")
+        seam_terms = tail_card.get("seam_pressure_terms", {}) if isinstance(tail_card.get("seam_pressure_terms", {}), dict) else {}
+        pressure_vector = resolver.get("pressure_vector", {}) if isinstance(resolver.get("pressure_vector", {}), dict) else {}
+
+        visible_frame_motion_pressure = max(
+            clamp01(frame_card.get("frame_pressure", 0.0)),
+            clamp01(pressure_vector.get("visible_frame_motion_pressure", 0.0)),
+            clamp01(route("previous_next_frame_motion").get("return_pressure", 0.0)),
+        )
+        seam_boundary_pressure = max(
+            clamp01(seam_terms.get("max_seam_pressure", 0.0)),
+            clamp01(pressure_vector.get("seam_boundary_pressure", 0.0)),
+        )
+        seam_acceleration_pressure = max(
+            clamp01(tail_card.get("post_seam_acceleration_score", 0.0)),
+            clamp01(object_relation_review.get("cascade_post_seam_acceleration_score", 0.0)),
+            clamp01(topology_strategy_return_map.get("cascade_post_seam_acceleration_score", 0.0)),
+        )
+        late_segment_spike_pressure = max(
+            clamp01(seam_terms.get("max_late_segment_spike_pressure", 0.0)),
+            clamp01(pressure_vector.get("late_segment_spike_pressure", 0.0)),
+        )
+        background_anchor_pressure = max(
+            clamp01(background_card.get("background_anchor_pressure", 0.0)),
+            clamp01(background_card.get("global_scene_drift_score", 0.0)),
+            clamp01(background_card.get("background_drift_score", 0.0)),
+            clamp01(pressure_vector.get("background_anchor_pressure", 0.0)),
+        )
+        top_band_pressure = clamp01(background_card.get("top_band_pressure", 0.0))
+        spatial_anchor_pressure = max(
+            clamp01(spatial_card.get("spatial_anchor_pressure", 0.0)),
+            clamp01(spatial_card.get("background_region_pressure", 0.0)),
+            clamp01(pressure_vector.get("spatial_anchor_pressure", 0.0)),
+        )
+        object_relation_pressure = max(
+            clamp01(object_relation_review.get("object_relation_drift_score", 0.0)),
+            clamp01(object_card.get("object_identity_pressure", 0.0)),
+            clamp01(pressure_vector.get("object_relation_pressure", 0.0)),
+        )
+        carrier_persistence_score = safe_float(
+            object_relation_review.get("carrier_persistence_score", object_card.get("carrier_persistence_score", 1.0)),
+            1.0,
+        )
+        contact_boundary_continuity_score = safe_float(
+            object_relation_review.get("contact_boundary_continuity_score", object_card.get("contact_boundary_continuity_score", 1.0)),
+            1.0,
+        )
+
+        coupled_seam_pressure = max(seam_boundary_pressure, seam_acceleration_pressure, late_segment_spike_pressure)
+        coupled_background_pressure = max(background_anchor_pressure, top_band_pressure, spatial_anchor_pressure)
+        carrier_loss_pressure = max(
+            object_relation_pressure,
+            clamp01(1.0 - carrier_persistence_score),
+            clamp01(1.0 - contact_boundary_continuity_score),
+        )
+        visible_motion_coupling_score = max(
+            min(visible_frame_motion_pressure, coupled_seam_pressure),
+            min(visible_frame_motion_pressure, coupled_background_pressure),
+            min(visible_frame_motion_pressure, carrier_loss_pressure),
+        )
+
+        coupling_evidence = []
+        if coupled_seam_pressure >= 0.35:
+            coupling_evidence.append("seam_or_late_motion_pressure")
+        if coupled_background_pressure >= 0.45:
+            coupling_evidence.append("background_or_spatial_pressure")
+        if carrier_loss_pressure >= 0.45:
+            coupling_evidence.append("object_or_contact_carrier_loss")
+
+        if visible_frame_motion_pressure < 0.35 and visible_motion_coupling_score < 0.25:
+            status = "motion_return_stable"
+            severity = "PASS"
+            next_surface = "continue_r138_baseline_or_fixed_seed_compare"
+            next_action = "Keep collecting fixed-seed evidence; visible motion does not justify active damping."
+        elif visible_frame_motion_pressure >= 0.55 and not coupling_evidence:
+            status = "motion_return_high_report_only"
+            severity = "WARNING"
+            next_surface = "visible_motion_stability_review"
+            next_action = "Visible motion pressure is high, but no seam/background/object coupling proves a local failure; do not globally damp."
+        elif visible_motion_coupling_score >= 0.45:
+            status = "motion_return_coupled_pressure_report_only"
+            severity = "WARNING"
+            if coupled_background_pressure >= max(coupled_seam_pressure, carrier_loss_pressure):
+                next_surface = "true_region_topology_evidence_required"
+                next_action = "Build/verify real region topology before any background or spatial active control."
+            elif coupled_seam_pressure >= max(coupled_background_pressure, carrier_loss_pressure):
+                next_surface = "sampler_to_visible_motion_pressure_window"
+                next_action = "Compare a bounded sampler-to-visible-motion window only after fixed-seed proof."
+            else:
+                next_surface = "object_relation_topology_review"
+                next_action = "Use object/contact carrier evidence before changing prompt or sampler pressure."
+        else:
+            status = "motion_return_watch"
+            severity = "INFO"
+            next_surface = "report_only_fixed_seed_comparison"
+            next_action = "Watch visible motion as next-run evidence; no active control is justified yet."
+
+        return {
+            "stage": "EventVisibleMotionStrategyReturnGate",
+            "status": status,
+            "severity": severity,
+            "gate_version": "visible_motion_strategy_return_gate_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "The generated video is visible Outcome(t+1); its motion evidence can return to the next Strategy, but cannot retroactively justify same-run or global damping.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "visible_motion_active_control_allowed_next": False,
+            "same_run_control_allowed": False,
+            "model_freedom_policy": "Motion is not an error by itself. Only coupled seam/background/object evidence can nominate a future bounded route.",
+            "parent_strategy": "S_global_event_route",
+            "pressure_vector": {
+                "visible_frame_motion_pressure": visible_frame_motion_pressure,
+                "seam_boundary_pressure": seam_boundary_pressure,
+                "seam_acceleration_pressure": seam_acceleration_pressure,
+                "late_segment_spike_pressure": late_segment_spike_pressure,
+                "background_anchor_pressure": background_anchor_pressure,
+                "top_band_pressure": top_band_pressure,
+                "spatial_anchor_pressure": spatial_anchor_pressure,
+                "object_relation_pressure": object_relation_pressure,
+                "carrier_loss_pressure": carrier_loss_pressure,
+                "visible_motion_coupling_score": visible_motion_coupling_score,
+            },
+            "coupling_evidence": coupling_evidence,
+            "strategy_return_resolver_status": resolver.get("status", ""),
+            "strategy_return_primary_attribution": resolver.get("primary_attribution", ""),
+            "strategy_return_next_control_surface": resolver.get("next_control_surface", ""),
+            "next_control_surface": next_surface,
+            "do_not_do": [
+                "do not damp the whole branch from visible motion pressure alone",
+                "do not treat saturated scalar pressure as region topology",
+                "do not inject report or topology prose into prompt text",
+                "do not convert a good motion outcome into a failure just because frame pressure is high",
+            ],
+            "evidence_stages": [
+                stage for stage in [
+                    str(frame_card.get("stage", "") or ""),
+                    str(tail_card.get("stage", "") or ""),
+                    str(object_card.get("stage", "") or ""),
+                    str(background_card.get("stage", "") or ""),
+                    str(spatial_card.get("stage", "") or ""),
+                    str(global_card.get("stage", "") or ""),
+                    str(resolver.get("stage", "") or ""),
+                    str(topology_strategy_return_map.get("stage", "") or ""),
+                ] if stage
+            ],
+            "next_action": next_action,
+        }
+
+    def _event_true_region_topology_evidence(
+        self,
+        visible_motion_strategy_return_gate=None,
+        strategy_return_pressure_resolver=None,
+        relation_pressure_cards=None,
+        object_relation_review=None,
+        topology_strategy_return_map=None,
+    ):
+        """
+        R140 report-only region topology resolver.
+
+        R139 can say that visible motion is coupled to background/spatial
+        pressure. R140 decides whether that pressure is a real region map or
+        only a saturated scalar. It still does not mutate tensors; it only
+        decides whether a future active route has enough region evidence.
+        """
+        visible_gate = visible_motion_strategy_return_gate if isinstance(visible_motion_strategy_return_gate, dict) else {}
+        resolver = strategy_return_pressure_resolver if isinstance(strategy_return_pressure_resolver, dict) else {}
+        relation_pressure_cards = [
+            c for c in (relation_pressure_cards or [])
+            if isinstance(c, dict)
+        ]
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+        topology_strategy_return_map = topology_strategy_return_map if isinstance(topology_strategy_return_map, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def card(stage_name):
+            for item in relation_pressure_cards:
+                if str(item.get("stage", "") or "") == stage_name:
+                    return item
+            return {}
+
+        def route(collision_id):
+            for item in topology_strategy_return_map.get("local_strategy_routes", []) or []:
+                if isinstance(item, dict) and str(item.get("collision_id", "") or "") == collision_id:
+                    return item
+            return {}
+
+        def mean(values):
+            values = [safe_float(v, 0.0) for v in values]
+            return sum(values) / len(values) if values else 0.0
+
+        def stdev(values):
+            values = [safe_float(v, 0.0) for v in values]
+            if not values:
+                return 0.0
+            m = mean(values)
+            return math.sqrt(sum((v - m) ** 2 for v in values) / len(values))
+
+        frame_card = card("EventFrameSpikeAttributionCard")
+        tail_card = card("EventTailStrategyContinuityCard")
+        source_card = card("EventSourceAnchorPreservationCard")
+        background_card = card("EventBackgroundAnchorPreservationCard")
+        spatial_card = card("EventSpatialAnchorMap")
+        object_card = card("EventObjectCarrierIdentityCard")
+        seam_terms = tail_card.get("seam_pressure_terms", {}) if isinstance(tail_card.get("seam_pressure_terms", {}), dict) else {}
+        visible_pressure_vector = visible_gate.get("pressure_vector", {}) if isinstance(visible_gate.get("pressure_vector", {}), dict) else {}
+        resolver_pressure_vector = resolver.get("pressure_vector", {}) if isinstance(resolver.get("pressure_vector", {}), dict) else {}
+
+        visible_frame_motion_pressure = max(
+            clamp01(visible_pressure_vector.get("visible_frame_motion_pressure", 0.0)),
+            clamp01(resolver_pressure_vector.get("visible_frame_motion_pressure", 0.0)),
+            clamp01(frame_card.get("frame_pressure", 0.0)),
+            clamp01(route("previous_next_frame_motion").get("return_pressure", 0.0)),
+        )
+        seam_boundary_pressure = max(
+            clamp01(visible_pressure_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(resolver_pressure_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(seam_terms.get("max_seam_pressure", 0.0)),
+        )
+        late_segment_spike_pressure = max(
+            clamp01(visible_pressure_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(resolver_pressure_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(seam_terms.get("max_late_segment_spike_pressure", 0.0)),
+        )
+        background_anchor_pressure = max(
+            clamp01(visible_pressure_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(resolver_pressure_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(background_card.get("background_anchor_pressure", 0.0)),
+            clamp01(background_card.get("global_scene_drift_score", 0.0)),
+        )
+        top_band_pressure = max(
+            clamp01(visible_pressure_vector.get("top_band_pressure", 0.0)),
+            clamp01(background_card.get("top_band_pressure", 0.0)),
+        )
+        spatial_anchor_pressure = max(
+            clamp01(visible_pressure_vector.get("spatial_anchor_pressure", 0.0)),
+            clamp01(resolver_pressure_vector.get("spatial_anchor_pressure", 0.0)),
+            clamp01(spatial_card.get("spatial_anchor_pressure", 0.0)),
+            clamp01(spatial_card.get("background_region_pressure", 0.0)),
+        )
+        background_region_pressure = max(
+            clamp01(spatial_card.get("background_region_pressure", 0.0)),
+            clamp01(spatial_card.get("dominant_background_region_pressure", 0.0)),
+        )
+        tail_strategy_pressure = max(
+            clamp01(tail_card.get("tail_pressure", 0.0)),
+            clamp01(tail_card.get("post_seam_acceleration_score", 0.0)),
+            clamp01(route("tail_next_source").get("return_pressure", 0.0)),
+        )
+        source_anchor_pressure = max(
+            clamp01(source_card.get("source_anchor_pressure", 0.0)),
+            clamp01(route("prompt_image_anchor").get("return_pressure", 0.0)),
+        )
+        object_relation_pressure = max(
+            clamp01(visible_pressure_vector.get("object_relation_pressure", 0.0)),
+            clamp01(resolver_pressure_vector.get("object_relation_pressure", 0.0)),
+            clamp01(object_relation_review.get("object_relation_drift_score", 0.0)),
+            clamp01(object_card.get("object_identity_pressure", 0.0)),
+            clamp01(route("object_relation_ontology").get("return_pressure", 0.0)),
+        )
+        carrier_persistence_score = safe_float(
+            object_relation_review.get("carrier_persistence_score", object_card.get("carrier_persistence_score", 1.0)),
+            1.0,
+        )
+        contact_boundary_continuity_score = safe_float(
+            object_relation_review.get("contact_boundary_continuity_score", object_card.get("contact_boundary_continuity_score", 1.0)),
+            1.0,
+        )
+        carrier_loss_pressure = max(
+            clamp01(visible_pressure_vector.get("carrier_loss_pressure", 0.0)),
+            object_relation_pressure,
+            clamp01(1.0 - carrier_persistence_score),
+            clamp01(1.0 - contact_boundary_continuity_score),
+        )
+
+        center_action_carrier = clamp01(
+            0.72 * visible_frame_motion_pressure
+            + 0.18 * max(object_relation_pressure, carrier_loss_pressure)
+            + 0.10 * max(seam_boundary_pressure, late_segment_spike_pressure)
+        )
+        edge_background_anchor = max(background_anchor_pressure, spatial_anchor_pressure, background_region_pressure)
+        top_background_band = top_band_pressure
+        selected_tail_source_carrier = max(tail_strategy_pressure, source_anchor_pressure)
+        object_contact_carrier = max(object_relation_pressure, carrier_loss_pressure)
+        seam_transition_carrier = max(seam_boundary_pressure, late_segment_spike_pressure)
+
+        scalar_pressures = [background_anchor_pressure, spatial_anchor_pressure, top_band_pressure, background_region_pressure]
+        scalar_saturation_score = min(1.0, mean([1.0 if p >= 0.95 else p for p in scalar_pressures]))
+        saturated_background_scalar = (
+            max(scalar_pressures) >= 0.995
+            and min(scalar_pressures[:3]) >= 0.995
+        )
+        role_pressures = [
+            center_action_carrier,
+            edge_background_anchor,
+            top_background_band,
+            selected_tail_source_carrier,
+            object_contact_carrier,
+            seam_transition_carrier,
+        ]
+        role_count = sum(1 for p in role_pressures if p >= 0.18)
+        high_role_count = sum(1 for p in role_pressures if p >= 0.45)
+        diversity_score = clamp01(stdev(role_pressures) * 2.25)
+        center_background_separation = clamp01(abs(center_action_carrier - edge_background_anchor))
+        top_edge_separation = clamp01(abs(top_background_band - edge_background_anchor))
+        object_center_separation = clamp01(abs(object_contact_carrier - center_action_carrier))
+        tail_center_separation = clamp01(abs(selected_tail_source_carrier - center_action_carrier))
+        region_separation_score = clamp01(
+            0.34 * diversity_score
+            + 0.24 * center_background_separation
+            + 0.16 * top_edge_separation
+            + 0.14 * object_center_separation
+            + 0.12 * tail_center_separation
+        )
+        coverage_score = clamp01(role_count / 6.0)
+        high_coverage_score = clamp01(high_role_count / 4.0)
+        saturation_penalty = 0.36 if saturated_background_scalar else clamp01(0.18 * scalar_saturation_score)
+        region_readiness_score = clamp01(
+            0.46 * region_separation_score
+            + 0.32 * coverage_score
+            + 0.22 * high_coverage_score
+            - saturation_penalty
+        )
+
+        region_tiles = [
+            {
+                "region_id": "center_action_carrier",
+                "role": "action/body/motion carrier",
+                "normalized_roi_yxhw": [0.18, 0.18, 0.64, 0.64],
+                "pressure": float(center_action_carrier),
+                "formula_role": "ObservedBehavior motion carrier that must not be confused with background anchor",
+            },
+            {
+                "region_id": "edge_background_anchor",
+                "role": "edge/background/source anchor",
+                "normalized_roi_yxhw": [0.20, 0.00, 0.80, 1.00],
+                "pressure": float(edge_background_anchor),
+                "formula_role": "OutcomePrevious/source anchor carrier around the action center",
+            },
+            {
+                "region_id": "top_background_band",
+                "role": "top/background color and detail band",
+                "normalized_roi_yxhw": [0.00, 0.00, 0.22, 1.00],
+                "pressure": float(top_background_band),
+                "formula_role": "early warning region for color/noise collapse and background drift",
+            },
+            {
+                "region_id": "selected_tail_source_carrier",
+                "role": "selected tail / next source continuity",
+                "normalized_roi_yxhw": [0.00, 0.00, 1.00, 1.00],
+                "pressure": float(selected_tail_source_carrier),
+                "formula_role": "Outcome(t-1) selected by pause/continue before the next sampler",
+            },
+            {
+                "region_id": "object_contact_carrier",
+                "role": "object/contact/identity carrier",
+                "normalized_roi_yxhw": [0.38, 0.18, 0.54, 0.64],
+                "pressure": float(object_contact_carrier),
+                "formula_role": "carrier identity/contact boundary evidence, not negative prompt prose",
+            },
+            {
+                "region_id": "seam_transition_carrier",
+                "role": "cascade seam / late transition carrier",
+                "normalized_roi_yxhw": [0.00, 0.00, 1.00, 1.00],
+                "pressure": float(seam_transition_carrier),
+                "formula_role": "cascade boundary transition pressure separate from background/spatial pressure",
+            },
+        ]
+
+        dominant_region = max(region_tiles, key=lambda item: item["pressure"]) if region_tiles else {}
+        missing_evidence = []
+        if center_action_carrier < 0.18:
+            missing_evidence.append("center_action_carrier")
+        if edge_background_anchor < 0.18:
+            missing_evidence.append("edge_background_anchor")
+        if object_contact_carrier < 0.18:
+            missing_evidence.append("object_contact_carrier")
+        if selected_tail_source_carrier < 0.18:
+            missing_evidence.append("selected_tail_source_carrier")
+        if saturated_background_scalar:
+            missing_evidence.append("non_saturated_background_region_map")
+
+        visible_status = str(visible_gate.get("status", "") or "")
+        if not visible_gate:
+            status = "true_region_topology_not_recorded"
+            severity = "WARNING"
+            next_surface = "record_visible_motion_return_first"
+            next_action = "Record EventVisibleMotionStrategyReturnGate before interpreting region topology."
+        elif saturated_background_scalar and region_readiness_score < 0.55:
+            status = "saturated_scalar_not_region_topology"
+            severity = "WARNING"
+            next_surface = "pixel_region_motion_map_required"
+            next_action = "Do not activate spatial/background control; saturated pressure must be converted into real region evidence first."
+        elif region_readiness_score >= 0.58 and role_count >= 4:
+            status = "true_region_topology_candidate_report_only"
+            severity = "INFO"
+            next_surface = "bounded_region_low_mid_window_candidate"
+            next_action = "Candidate region map exists, but active control remains disabled until fixed-seed A/B proof."
+        elif region_readiness_score >= 0.35:
+            status = "true_region_topology_watch_report_only"
+            severity = "INFO"
+            next_surface = "collect_more_region_evidence"
+            next_action = "Region roles are partially separable; collect another fixed-seed report before active control."
+        else:
+            status = "insufficient_true_region_topology"
+            severity = "WARNING" if "coupled" in visible_status else "INFO"
+            next_surface = "pixel_region_motion_map_required"
+            next_action = "Current evidence is scalar pressure, not enough topology. Keep report-only."
+
+        return {
+            "stage": "EventTrueRegionTopologyEvidence",
+            "status": status,
+            "severity": severity,
+            "gate_version": "true_region_topology_evidence_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "Region topology evidence separates local Strategy carriers before any visible/background/spatial pressure may become active control.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "true_region_active_control_allowed_next": False,
+            "same_run_control_allowed": False,
+            "parent_strategy": "S_global_event_route",
+            "visible_motion_return_status": visible_status,
+            "region_readiness_score": float(region_readiness_score),
+            "region_separation_score": float(region_separation_score),
+            "region_coverage_score": float(coverage_score),
+            "region_high_coverage_score": float(high_coverage_score),
+            "scalar_saturation_score": float(scalar_saturation_score),
+            "saturated_background_scalar": bool(saturated_background_scalar),
+            "role_count": int(role_count),
+            "high_role_count": int(high_role_count),
+            "dominant_region_id": str(dominant_region.get("region_id", "") or ""),
+            "dominant_region_pressure": float(dominant_region.get("pressure", 0.0) or 0.0),
+            "region_tiles": region_tiles,
+            "pressure_vector": {
+                "visible_frame_motion_pressure": float(visible_frame_motion_pressure),
+                "seam_boundary_pressure": float(seam_boundary_pressure),
+                "late_segment_spike_pressure": float(late_segment_spike_pressure),
+                "background_anchor_pressure": float(background_anchor_pressure),
+                "top_band_pressure": float(top_band_pressure),
+                "spatial_anchor_pressure": float(spatial_anchor_pressure),
+                "background_region_pressure": float(background_region_pressure),
+                "tail_strategy_pressure": float(tail_strategy_pressure),
+                "source_anchor_pressure": float(source_anchor_pressure),
+                "object_relation_pressure": float(object_relation_pressure),
+                "carrier_loss_pressure": float(carrier_loss_pressure),
+            },
+            "future_candidate_surfaces": [
+                {
+                    "surface": "bounded_region_low_mid_window_candidate",
+                    "allowed_now": False,
+                    "requires": ["region_readiness_score >= 0.58", "role_count >= 4", "fixed_seed_ab_video_proof"],
+                },
+                {
+                    "surface": "pixel_region_motion_map_required",
+                    "allowed_now": False,
+                    "requires": ["non_saturated_background_region_map", "center/edge/top/object role separation"],
+                },
+                {
+                    "surface": "object_relation_topology_review",
+                    "allowed_now": False,
+                    "requires": ["object/contact carrier evidence", "carrier persistence improvement proof"],
+                },
+            ],
+            "missing_evidence": missing_evidence,
+            "do_not_do": [
+                "do not treat one saturated background scalar as a region map",
+                "do not activate spatial gain without center/edge/top/object separation",
+                "do not inject region explanations into the prompt text",
+                "do not freeze useful center motion while trying to preserve background",
+            ],
+            "evidence_stages": [
+                stage for stage in [
+                    str(visible_gate.get("stage", "") or ""),
+                    str(resolver.get("stage", "") or ""),
+                    str(frame_card.get("stage", "") or ""),
+                    str(tail_card.get("stage", "") or ""),
+                    str(source_card.get("stage", "") or ""),
+                    str(background_card.get("stage", "") or ""),
+                    str(spatial_card.get("stage", "") or ""),
+                    str(object_card.get("stage", "") or ""),
+                    str(object_relation_review.get("stage", "") or ""),
+                    str(topology_strategy_return_map.get("stage", "") or ""),
+                ] if stage
+            ],
+            "next_control_surface": next_surface,
+            "next_action": next_action,
+        }
+
+    def _event_fractal_strategy_intersection_map(
+        self,
+        execution_records=None,
+        topology_strategy_return_map=None,
+        strategy_return_pressure_resolver=None,
+        visible_motion_strategy_return_gate=None,
+        true_region_topology_evidence=None,
+        relation_pressure_cards=None,
+        vector_collisions=None,
+        object_relation_review=None,
+        depth=7,
+    ):
+        """
+        Report-only recursive topology pass.
+
+        The user-facing law is: every dynamic intersection can unfold the same
+        Strategy equality, and any new intersection created by that unfold must
+        also return to the parent Strategy. This record maps that idea without
+        changing prompt text, tensors, sampler state, cascade routing, or video.
+        """
+        records = [r for r in (execution_records or []) if isinstance(r, dict)]
+        topology_strategy_return_map = topology_strategy_return_map if isinstance(topology_strategy_return_map, dict) else {}
+        resolver = strategy_return_pressure_resolver if isinstance(strategy_return_pressure_resolver, dict) else {}
+        visible_gate = visible_motion_strategy_return_gate if isinstance(visible_motion_strategy_return_gate, dict) else {}
+        true_region = true_region_topology_evidence if isinstance(true_region_topology_evidence, dict) else {}
+        relation_pressure_cards = [
+            c for c in (relation_pressure_cards or [])
+            if isinstance(c, dict)
+        ]
+        vector_collisions = [
+            c for c in (vector_collisions or [])
+            if isinstance(c, dict)
+        ]
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def short(text, limit=120):
+            text = str(text or "")
+            if len(text) <= limit:
+                return text
+            return text[: limit - 3] + "..."
+
+        def pressure_from_status(status):
+            status = str(status or "")
+            if status in ("", "not_recorded"):
+                return 0.25
+            if any(token in status for token in ("missing", "failed", "blocked", "cancelled")):
+                return 1.0
+            if status.endswith("_high") or "watch_high" in status:
+                return 0.78
+            if status.endswith("_watch") or "watch" in status:
+                return 0.42
+            if any(token in status for token in ("candidate", "measured", "recorded", "info")):
+                return 0.24
+            if status.endswith("_nominal") or status.endswith("_stable") or "pass" in status.lower():
+                return 0.10
+            return 0.25
+
+        def latest(stage_name):
+            for rec in reversed(records):
+                if str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        def latest_prefix(prefix):
+            for rec in reversed(records):
+                if str(rec.get("stage", "") or "").startswith(prefix):
+                    return rec
+            return {}
+
+        local_routes = [
+            r for r in (topology_strategy_return_map.get("local_strategy_routes", []) or [])
+            if isinstance(r, dict)
+        ]
+        pressure_vector = resolver.get("pressure_vector", {}) if isinstance(resolver.get("pressure_vector", {}), dict) else {}
+        region_tiles = [
+            t for t in (true_region.get("region_tiles", []) or [])
+            if isinstance(t, dict)
+        ]
+        apply_records = [
+            r for r in records
+            if str(r.get("stage", "") or "").startswith("EventStrategyControlSurfaceApply_")
+        ]
+
+        topology_sync_score = clamp01(topology_strategy_return_map.get("topology_sync_score", 0.0))
+        strategy_return_pressure = clamp01(resolver.get("strategy_return_pressure", 1.0 - topology_sync_score))
+        region_readiness = clamp01(true_region.get("region_readiness_score", 0.0))
+        visible_coupling = clamp01(visible_gate.get("visible_motion_coupling_score", 0.0))
+        object_drift = clamp01(object_relation_review.get("object_relation_drift_score", 0.0))
+        seam_pressure = max(
+            clamp01(pressure_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(pressure_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(object_relation_review.get("cascade_post_seam_acceleration_score", 0.0)),
+        )
+        global_pressure = max(
+            clamp01(1.0 - topology_sync_score),
+            strategy_return_pressure,
+            visible_coupling,
+            object_drift,
+            seam_pressure,
+        )
+        region_gap = clamp01(1.0 - region_readiness)
+
+        primary_intersections = []
+        for route in local_routes:
+            collision_id = str(route.get("collision_id", "") or "unknown_collision")
+            pressure = max(
+                clamp01(route.get("return_pressure", 0.0)),
+                pressure_from_status(route.get("return_status")),
+            )
+            primary_intersections.append({
+                "intersection_id": collision_id,
+                "source": "topology_strategy_return_map",
+                "parent_strategy": str(route.get("parent_route", "S_global_event_route") or "S_global_event_route"),
+                "formula_role": short(route.get("return_requirement") or route.get("formula_role") or ""),
+                "carriers": route.get("carriers", []) if isinstance(route.get("carriers", []), list) else [],
+                "pressure": pressure,
+                "alignment_score": clamp01(1.0 - pressure),
+                "return_status": str(route.get("return_status", "") or ""),
+            })
+
+        for tile in region_tiles:
+            pressure = clamp01(tile.get("pressure", 0.0))
+            if pressure <= 0.0 and not tile.get("region_id"):
+                continue
+            primary_intersections.append({
+                "intersection_id": f"region_{tile.get('region_id', 'unknown')}",
+                "source": "true_region_topology_evidence",
+                "parent_strategy": "S_global_region_role_map",
+                "formula_role": short(tile.get("formula_role") or tile.get("role") or ""),
+                "carriers": [str(tile.get("role", "") or ""), str(tile.get("region_id", "") or "")],
+                "pressure": pressure,
+                "alignment_score": clamp01(1.0 - pressure),
+                "return_status": "region_pressure_measured",
+            })
+
+        for rec in apply_records:
+            unfold = rec.get("strategy_pressure_unfold", {}) if isinstance(rec.get("strategy_pressure_unfold", {}), dict) else {}
+            field = rec.get("strategy_field", {}) if isinstance(rec.get("strategy_field", {}), dict) else {}
+            branch = str(rec.get("branch_key", rec.get("branch_name", "")) or "unknown")
+            depth_value = unfold.get("recursive_relation_depth", field.get("recursive_relation_depth", 0))
+            combined_delta = safe_float(unfold.get("combined_delta", unfold.get("recursive_relation_delta", 0.0)), 0.0)
+            max_delta = max(
+                abs(safe_float(unfold.get("combined_limit", rec.get("max_delta_window", 0.0)), 0.0)),
+                1e-9,
+            )
+            pressure = clamp01(abs(combined_delta) / max_delta) if str(unfold.get("status", "")) == "active" else pressure_from_status(rec.get("status"))
+            primary_intersections.append({
+                "intersection_id": f"sampler_recursive_relation_{branch}",
+                "source": "strategy_control_surface_apply",
+                "parent_strategy": str(rec.get("parent_strategy", "S_global_event_route") or "S_global_event_route"),
+                "formula_role": f"{branch} sampler StrategyField recursive relation depth={depth_value}",
+                "carriers": [str(rec.get("branch_name", "") or branch), str(rec.get("apply_policy", "") or "")],
+                "pressure": pressure,
+                "alignment_score": clamp01(1.0 - pressure),
+                "return_status": str(unfold.get("status", rec.get("status", "")) or ""),
+            })
+
+        if visible_gate:
+            primary_intersections.append({
+                "intersection_id": "visible_motion_to_next_strategy",
+                "source": "visible_motion_strategy_return_gate",
+                "parent_strategy": "S_global_visible_outcome",
+                "formula_role": "Visible Outcome(t+1) returns as next Strategy evidence before any active control.",
+                "carriers": visible_gate.get("coupling_evidence", []) if isinstance(visible_gate.get("coupling_evidence", []), list) else [],
+                "pressure": max(visible_coupling, pressure_from_status(visible_gate.get("status"))),
+                "alignment_score": clamp01(1.0 - max(visible_coupling, pressure_from_status(visible_gate.get("status")))),
+                "return_status": str(visible_gate.get("status", "") or ""),
+            })
+
+        # Keep the report compact and deterministic: highest-pressure intersections
+        # carry the strongest evidence for recursive Strategy unfold.
+        primary_intersections = sorted(
+            primary_intersections,
+            key=lambda item: (clamp01(item.get("pressure", 0.0)), str(item.get("intersection_id", ""))),
+            reverse=True,
+        )
+        primary_intersections = primary_intersections[:16]
+
+        requested_depth = max(1, min(7, int(depth or 7)))
+        layers = []
+        previous_nodes = []
+        seed_nodes = primary_intersections[:]
+        if seed_nodes:
+            for layer_index in range(1, requested_depth + 1):
+                if layer_index == 1:
+                    layer_nodes = []
+                    for item in seed_nodes:
+                        pressure = clamp01(item.get("pressure", 0.0))
+                        layer_nodes.append({
+                            "node_id": f"L1::{item.get('intersection_id')}",
+                            "source_intersections": [str(item.get("intersection_id", ""))],
+                            "parent_strategy": str(item.get("parent_strategy", "S_global_event_route") or "S_global_event_route"),
+                            "formula_role": short(item.get("formula_role", "")),
+                            "pressure": pressure,
+                            "alignment_score": clamp01(1.0 - pressure),
+                            "status": (
+                                "fractal_return_watch_high"
+                                if pressure >= 0.70
+                                else "fractal_return_watch"
+                                if pressure >= 0.35
+                                else "fractal_return_aligned"
+                            ),
+                        })
+                else:
+                    layer_nodes = []
+                    previous_sorted = sorted(
+                        previous_nodes,
+                        key=lambda item: clamp01(item.get("pressure", 0.0)),
+                        reverse=True,
+                    )[:10]
+                    for idx, prev in enumerate(previous_sorted):
+                        mate = seed_nodes[(idx + layer_index - 2) % len(seed_nodes)]
+                        prev_pressure = clamp01(prev.get("pressure", 0.0))
+                        mate_pressure = clamp01(mate.get("pressure", 0.0))
+                        recursive_pressure = clamp01(
+                            (prev_pressure * 0.52)
+                            + (mate_pressure * 0.24)
+                            + (global_pressure * 0.14)
+                            + (region_gap * 0.06)
+                            + (visible_coupling * 0.04)
+                        )
+                        node_id = (
+                            f"L{layer_index}::{prev.get('source_intersections', ['unknown'])[0]}"
+                            f"->${mate.get('intersection_id', 'unknown')}"
+                        )
+                        layer_nodes.append({
+                            "node_id": node_id.replace("$", ""),
+                            "source_intersections": list(dict.fromkeys(
+                                [str(x) for x in (prev.get("source_intersections", []) or [])]
+                                + [str(mate.get("intersection_id", "") or "unknown")]
+                            ))[:6],
+                            "parent_strategy": "S_global_event_route",
+                            "formula_role": (
+                                "Derived Strategy intersection: previous local return is rechecked "
+                                f"against {mate.get('intersection_id', 'unknown')} and folded back to the parent Strategy."
+                            ),
+                            "pressure": recursive_pressure,
+                            "alignment_score": clamp01(1.0 - recursive_pressure),
+                            "status": (
+                                "fractal_return_watch_high"
+                                if recursive_pressure >= 0.70
+                                else "fractal_return_watch"
+                                if recursive_pressure >= 0.35
+                                else "fractal_return_aligned"
+                            ),
+                        })
+                layer_pressures = [clamp01(n.get("pressure", 0.0)) for n in layer_nodes]
+                mean_pressure = sum(layer_pressures) / max(1, len(layer_pressures))
+                max_pressure = max(layer_pressures) if layer_pressures else 0.0
+                layers.append({
+                    "layer": layer_index,
+                    "formula_application": (
+                        "Outcome(t-1)+ObservedBehavior(t-1)=Strategy(t)="
+                        "ObservedBehavior(t+1)+Outcome(t+1)"
+                    ),
+                    "intersection_count": len(layer_nodes),
+                    "mean_pressure": mean_pressure,
+                    "mean_alignment_score": clamp01(1.0 - mean_pressure),
+                    "max_pressure": max_pressure,
+                    "dominant_intersections": [
+                        n.get("node_id", "") for n in sorted(
+                            layer_nodes,
+                            key=lambda item: clamp01(item.get("pressure", 0.0)),
+                            reverse=True,
+                        )[:3]
+                    ],
+                    "nodes": layer_nodes,
+                })
+                previous_nodes = layer_nodes
+
+        if not primary_intersections:
+            status = "fractal_strategy_intersections_not_recorded"
+            severity = "WARNING"
+            next_surface = "record_strategy_matrix_first"
+            next_action = "No readable intersections were present; record Strategy Matrix and relation cards first."
+            convergence_state = "unknown"
+        else:
+            first_pressure = clamp01(layers[0].get("mean_pressure", 0.0)) if layers else 0.0
+            final_pressure = clamp01(layers[-1].get("mean_pressure", 0.0)) if layers else 0.0
+            final_max = clamp01(layers[-1].get("max_pressure", 0.0)) if layers else 0.0
+            alignment_score = clamp01(1.0 - final_pressure)
+            if final_pressure < first_pressure - 0.08:
+                convergence_state = "fractal_alignment_improving"
+            elif final_pressure > first_pressure + 0.08:
+                convergence_state = "fractal_alignment_diverging"
+            else:
+                convergence_state = "fractal_alignment_flat"
+
+            if final_max >= 0.70 or convergence_state == "fractal_alignment_diverging":
+                status = "fractal_strategy_alignment_watch_high_report_only"
+                severity = "WARNING"
+                next_surface = "cascade_local_strategy_partition_report_only"
+                next_action = "Topology expands into unstable intersections; keep current body, but split/route cascade-local Strategy evidence before active control."
+            elif final_max >= 0.35:
+                status = "fractal_strategy_alignment_watch_report_only"
+                severity = "INFO"
+                next_surface = "same_sampler_strategy_ring_report_only"
+                next_action = "Topology is readable but not closed; compare fixed-seed runs before changing active math."
+            else:
+                status = "fractal_strategy_alignment_candidate_report_only"
+                severity = "INFO"
+                next_surface = "bounded_model_attractor_candidate"
+                next_action = "Seven-layer intersection map is aligned enough for the next report-only candidate surface."
+
+        dominant_axis = [
+            item.get("intersection_id", "") for item in primary_intersections[:5]
+        ]
+        final_layer = layers[-1] if layers else {}
+
+        return {
+            "stage": "EventFractalStrategyIntersectionMap",
+            "status": status,
+            "severity": severity,
+            "map_version": "fractal_strategy_intersection_map_v1_depth7_report_only",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "Every dynamic intersection unfolds the same Strategy equality; each derived intersection is folded back into S_global_event_route across seven report-only layers.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "same_run_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "parent_strategy": "S_global_event_route",
+            "fractal_depth": requested_depth,
+            "primary_intersection_count": len(primary_intersections),
+            "formula_inserted_intersection_count": sum(int(layer.get("intersection_count", 0) or 0) for layer in layers),
+            "topology_sync_score": topology_sync_score,
+            "strategy_return_pressure": strategy_return_pressure,
+            "true_region_readiness_score": region_readiness,
+            "global_pressure": global_pressure,
+            "final_layer_mean_pressure": clamp01(final_layer.get("mean_pressure", 0.0)),
+            "final_layer_alignment_score": clamp01(final_layer.get("mean_alignment_score", 0.0)),
+            "final_layer_max_pressure": clamp01(final_layer.get("max_pressure", 0.0)),
+            "convergence_state": convergence_state,
+            "dominant_intersection_axis": dominant_axis,
+            "primary_intersections": primary_intersections,
+            "fractal_layers": layers,
+            "next_control_surface": next_surface,
+            "do_not_do": [
+                "do not inject formula prose into prompt text",
+                "do not treat report-only alignment as visual proof",
+                "do not rewrite the sampler loop until this map identifies a stable route",
+                "do not let derived local strategies become independent controllers",
+            ],
+            "next_action": next_action,
+        }
+
+    def _event_region_weighted_fractal_strategy_return(
+        self,
+        fractal_strategy_intersection_map=None,
+        true_region_topology_evidence=None,
+        visible_motion_strategy_return_gate=None,
+        strategy_return_pressure_resolver=None,
+        object_relation_review=None,
+    ):
+        """
+        R142 report-only confidence bridge.
+
+        R141 can name a dominant fractal axis, but a loud scalar region can
+        still over-dominate the reading. R142 does not change generation. It
+        asks whether the fractal axis agrees with visible/video-region evidence
+        before any future route treats that axis as useful control evidence.
+        """
+        fractal = fractal_strategy_intersection_map if isinstance(fractal_strategy_intersection_map, dict) else {}
+        true_region = true_region_topology_evidence if isinstance(true_region_topology_evidence, dict) else {}
+        visible_gate = visible_motion_strategy_return_gate if isinstance(visible_motion_strategy_return_gate, dict) else {}
+        resolver = strategy_return_pressure_resolver if isinstance(strategy_return_pressure_resolver, dict) else {}
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def axis_class(axis):
+            axis = str(axis or "").lower()
+            if any(token in axis for token in ("edge_background", "background", "spatial", "top_band", "top_background")):
+                return "background"
+            if any(token in axis for token in ("object", "contact", "carrier_identity")):
+                return "object_contact"
+            if any(token in axis for token in ("seam", "tail_next", "selected_tail", "cascade")):
+                return "cascade_boundary"
+            if any(token in axis for token in ("previous_next_frame", "visible_motion", "center_action", "motion")):
+                return "visible_motion"
+            if any(token in axis for token in ("high_low", "sampler", "low_branch")):
+                return "sampler_handoff"
+            if any(token in axis for token in ("prompt", "conditioning", "image_anchor")):
+                return "prompt_source"
+            return "unknown"
+
+        def strongest_axis(pressure_map):
+            if not pressure_map:
+                return "unknown"
+            return max(pressure_map.items(), key=lambda item: (clamp01(item[1]), str(item[0])))[0]
+
+        def get_tile(region_id):
+            for tile in true_region.get("region_tiles", []) or []:
+                if isinstance(tile, dict) and str(tile.get("region_id", "") or "") == region_id:
+                    return tile
+            return {}
+
+        resolver_vector = resolver.get("pressure_vector", {}) if isinstance(resolver.get("pressure_vector", {}), dict) else {}
+        visible_vector = visible_gate.get("pressure_vector", {}) if isinstance(visible_gate.get("pressure_vector", {}), dict) else {}
+        region_vector = true_region.get("pressure_vector", {}) if isinstance(true_region.get("pressure_vector", {}), dict) else {}
+
+        center_action_pressure = max(
+            clamp01(get_tile("center_action_carrier").get("pressure", 0.0)),
+            clamp01(visible_vector.get("visible_frame_motion_pressure", 0.0)),
+            clamp01(region_vector.get("visible_frame_motion_pressure", 0.0)),
+        )
+        edge_background_pressure = max(
+            clamp01(get_tile("edge_background_anchor").get("pressure", 0.0)),
+            clamp01(visible_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(visible_vector.get("spatial_anchor_pressure", 0.0)),
+            clamp01(resolver_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(resolver_vector.get("spatial_anchor_pressure", 0.0)),
+            clamp01(region_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(region_vector.get("spatial_anchor_pressure", 0.0)),
+        )
+        top_background_pressure = max(
+            clamp01(get_tile("top_background_band").get("pressure", 0.0)),
+            clamp01(visible_vector.get("top_band_pressure", 0.0)),
+            clamp01(region_vector.get("top_band_pressure", 0.0)),
+        )
+        object_contact_pressure = max(
+            clamp01(get_tile("object_contact_carrier").get("pressure", 0.0)),
+            clamp01(visible_vector.get("object_relation_pressure", 0.0)),
+            clamp01(visible_vector.get("carrier_loss_pressure", 0.0)),
+            clamp01(resolver_vector.get("object_relation_pressure", 0.0)),
+            clamp01(object_relation_review.get("object_relation_drift_score", 0.0)),
+            clamp01(1.0 - safe_float(object_relation_review.get("carrier_persistence_score", 1.0), 1.0)),
+            clamp01(1.0 - safe_float(object_relation_review.get("contact_boundary_continuity_score", 1.0), 1.0)),
+        )
+        seam_transition_pressure = max(
+            clamp01(get_tile("seam_transition_carrier").get("pressure", 0.0)),
+            clamp01(visible_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(visible_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(resolver_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(resolver_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(object_relation_review.get("cascade_post_seam_acceleration_score", 0.0)),
+        )
+        tail_source_pressure = clamp01(get_tile("selected_tail_source_carrier").get("pressure", 0.0))
+        sampler_handoff_pressure = clamp01(resolver_vector.get("high_low_sampler_pressure", 0.0))
+        if sampler_handoff_pressure <= 0.0:
+            high_low_candidates = [
+                clamp01(item.get("pressure", 0.0))
+                for item in (fractal.get("primary_intersections", []) or [])
+                if isinstance(item, dict)
+                and "high_low" in str(item.get("intersection_id", "") or "")
+            ]
+            sampler_handoff_pressure = max(high_low_candidates) if high_low_candidates else 0.0
+
+        region_readiness = clamp01(true_region.get("region_readiness_score", 0.0))
+        region_separation = clamp01(true_region.get("region_separation_score", 0.0))
+        fractal_alignment = clamp01(fractal.get("final_layer_alignment_score", 0.0))
+        fractal_final_pressure = clamp01(fractal.get("final_layer_mean_pressure", 0.0))
+        saturated_scalar = bool(true_region.get("saturated_background_scalar", False))
+        scalar_saturation = clamp01(true_region.get("scalar_saturation_score", 0.0))
+
+        raw_axis_pressure = {
+            "background": max(edge_background_pressure, top_background_pressure),
+            "visible_motion": center_action_pressure,
+            "object_contact": object_contact_pressure,
+            "cascade_boundary": max(seam_transition_pressure, tail_source_pressure),
+            "sampler_handoff": sampler_handoff_pressure,
+        }
+        center_edge_ratio = center_action_pressure / max(0.001, edge_background_pressure)
+        action_cluster_pressure = max(center_action_pressure, object_contact_pressure, seam_transition_pressure, sampler_handoff_pressure)
+        background_overweight_score = clamp01(
+            max(0.0, edge_background_pressure - action_cluster_pressure)
+            * (1.0 - region_separation)
+            + (0.20 if saturated_scalar else 0.0)
+            + (0.08 * scalar_saturation if edge_background_pressure >= 0.92 else 0.0)
+        )
+        background_confidence = clamp01(
+            0.25
+            + 0.35 * region_separation
+            + 0.25 * region_readiness
+            + 0.15 * max(0.0, 1.0 - background_overweight_score)
+        )
+        guarded_axis_pressure = dict(raw_axis_pressure)
+        guarded_axis_pressure["background"] = clamp01(raw_axis_pressure["background"] * background_confidence)
+
+        raw_evidence_axis = strongest_axis(raw_axis_pressure)
+        guarded_evidence_axis = strongest_axis(guarded_axis_pressure)
+        dominant_axis = [
+            str(axis or "") for axis in (fractal.get("dominant_intersection_axis", []) or [])
+            if str(axis or "")
+        ]
+        fractal_axis = dominant_axis[0] if dominant_axis else ""
+        fractal_axis_class = axis_class(fractal_axis)
+        dominant_axis_evidence_match = (
+            fractal_axis_class == guarded_evidence_axis
+            or guarded_evidence_axis in [axis_class(axis) for axis in dominant_axis[:3]]
+        )
+        match_score = 1.0 if dominant_axis_evidence_match else 0.35 if fractal_axis_class == raw_evidence_axis else 0.0
+        background_overweight_guard = (
+            raw_evidence_axis == "background"
+            and guarded_evidence_axis != "background"
+            and background_overweight_score >= 0.12
+        )
+        region_axis_confidence = clamp01(
+            0.30 * region_readiness
+            + 0.24 * region_separation
+            + 0.20 * fractal_alignment
+            + 0.16 * match_score
+            + 0.10 * max(0.0, 1.0 - background_overweight_score)
+        )
+
+        if not fractal:
+            status = "region_weighted_fractal_not_recorded"
+            severity = "WARNING"
+            next_surface = "record_fractal_strategy_intersection_map_first"
+            next_action = "Record EventFractalStrategyIntersectionMap before weighting the dominant axis."
+        elif background_overweight_guard:
+            status = "region_weighted_fractal_background_overweight_guard_report_only"
+            severity = "WARNING"
+            next_surface = "action_background_separation_report_only"
+            next_action = "Background/edge pressure is too dominant for its region confidence; refine action/background separation before active control."
+        elif region_axis_confidence >= 0.62 and dominant_axis_evidence_match:
+            status = "region_weighted_fractal_axis_candidate_report_only"
+            severity = "INFO"
+            next_surface = (
+                "same_sampler_strategy_ring_report_only"
+                if guarded_evidence_axis in ("visible_motion", "sampler_handoff", "cascade_boundary")
+                else "object_relation_topology_report_only"
+                if guarded_evidence_axis == "object_contact"
+                else "action_background_separation_report_only"
+            )
+            next_action = "Dominant fractal axis matches weighted evidence; keep report-only and require fixed-seed A/B before active math."
+        else:
+            status = "region_weighted_fractal_axis_watch_report_only"
+            severity = "INFO"
+            next_surface = "collect_region_weighted_fractal_evidence"
+            next_action = "Axis confidence is readable but not enough for active control; compare the next fixed-seed run."
+
+        return {
+            "stage": "EventRegionWeightedFractalStrategyReturn",
+            "status": status,
+            "severity": severity,
+            "map_version": "region_weighted_fractal_strategy_return_v1_report_only",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "Dominant fractal Strategy axes must be weighted by visible region evidence before they may nominate the next control surface.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "same_run_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "parent_strategy": "S_global_event_route",
+            "raw_fractal_dominant_axis": fractal_axis,
+            "raw_fractal_axis_class": fractal_axis_class,
+            "raw_visible_evidence_axis": raw_evidence_axis,
+            "guarded_visible_evidence_axis": guarded_evidence_axis,
+            "dominant_axis_evidence_match": bool(dominant_axis_evidence_match),
+            "region_axis_confidence": float(region_axis_confidence),
+            "center_action_vs_edge_background_ratio": float(center_edge_ratio),
+            "background_overweight_guard": bool(background_overweight_guard),
+            "background_overweight_score": float(background_overweight_score),
+            "background_confidence": float(background_confidence),
+            "axis_pressure_vector": {k: float(clamp01(v)) for k, v in raw_axis_pressure.items()},
+            "guarded_axis_pressure_vector": {k: float(clamp01(v)) for k, v in guarded_axis_pressure.items()},
+            "confidence_terms": {
+                "region_readiness": float(region_readiness),
+                "region_separation": float(region_separation),
+                "fractal_alignment": float(fractal_alignment),
+                "fractal_final_pressure": float(fractal_final_pressure),
+                "match_score": float(match_score),
+                "scalar_saturation": float(scalar_saturation),
+            },
+            "dominant_intersection_axis": dominant_axis,
+            "next_control_surface": next_surface,
+            "do_not_do": [
+                "do not let edge/background scalar pressure become active control by itself",
+                "do not freeze center action to satisfy background stability",
+                "do not inject region-weighting explanations into prompt text",
+                "do not treat this report-only confidence as visual proof",
+            ],
+            "next_action": next_action,
+        }
+
+    def _event_action_background_separation_evidence(
+        self,
+        region_weighted_fractal_strategy_return=None,
+        true_region_topology_evidence=None,
+        visible_motion_strategy_return_gate=None,
+        strategy_return_pressure_resolver=None,
+        object_relation_review=None,
+        pixel_region_motion_map=None,
+    ):
+        """
+        R143 report-only separation bridge.
+
+        R142 can tell when background/edge pressure is too loud. R143 asks
+        which part of the pressure belongs to the action carrier and which part
+        belongs to the scene/background carrier before any future route can
+        safely nominate active math.
+        """
+        region_weighted = region_weighted_fractal_strategy_return if isinstance(region_weighted_fractal_strategy_return, dict) else {}
+        true_region = true_region_topology_evidence if isinstance(true_region_topology_evidence, dict) else {}
+        visible_gate = visible_motion_strategy_return_gate if isinstance(visible_motion_strategy_return_gate, dict) else {}
+        resolver = strategy_return_pressure_resolver if isinstance(strategy_return_pressure_resolver, dict) else {}
+        object_relation_review = object_relation_review if isinstance(object_relation_review, dict) else {}
+        pixel_region = pixel_region_motion_map if isinstance(pixel_region_motion_map, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def ratio(numerator, denominator):
+            return safe_float(numerator, 0.0) / max(0.001, safe_float(denominator, 0.0))
+
+        def get_tile(region_id):
+            for tile in true_region.get("region_tiles", []) or []:
+                if isinstance(tile, dict) and str(tile.get("region_id", "") or "") == region_id:
+                    return tile
+            return {}
+
+        visible_vector = visible_gate.get("pressure_vector", {}) if isinstance(visible_gate.get("pressure_vector", {}), dict) else {}
+        resolver_vector = resolver.get("pressure_vector", {}) if isinstance(resolver.get("pressure_vector", {}), dict) else {}
+        region_vector = true_region.get("pressure_vector", {}) if isinstance(true_region.get("pressure_vector", {}), dict) else {}
+        raw_axis_vector = region_weighted.get("axis_pressure_vector", {}) if isinstance(region_weighted.get("axis_pressure_vector", {}), dict) else {}
+        guarded_axis_vector = region_weighted.get("guarded_axis_pressure_vector", {}) if isinstance(region_weighted.get("guarded_axis_pressure_vector", {}), dict) else {}
+
+        center_action_pressure = max(
+            clamp01(get_tile("center_action_carrier").get("pressure", 0.0)),
+            clamp01(raw_axis_vector.get("visible_motion", 0.0)),
+            clamp01(guarded_axis_vector.get("visible_motion", 0.0)),
+            clamp01(visible_vector.get("visible_frame_motion_pressure", 0.0)),
+            clamp01(region_vector.get("visible_frame_motion_pressure", 0.0)),
+        )
+        object_contact_pressure = max(
+            clamp01(get_tile("object_contact_carrier").get("pressure", 0.0)),
+            clamp01(raw_axis_vector.get("object_contact", 0.0)),
+            clamp01(guarded_axis_vector.get("object_contact", 0.0)),
+            clamp01(visible_vector.get("object_relation_pressure", 0.0)),
+            clamp01(resolver_vector.get("object_relation_pressure", 0.0)),
+            clamp01(object_relation_review.get("object_relation_drift_score", 0.0)),
+            clamp01(1.0 - safe_float(object_relation_review.get("carrier_persistence_score", 1.0), 1.0)),
+            clamp01(1.0 - safe_float(object_relation_review.get("contact_boundary_continuity_score", 1.0), 1.0)),
+        )
+        seam_transition_pressure = max(
+            clamp01(get_tile("seam_transition_carrier").get("pressure", 0.0)),
+            clamp01(raw_axis_vector.get("cascade_boundary", 0.0)),
+            clamp01(guarded_axis_vector.get("cascade_boundary", 0.0)),
+            clamp01(visible_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(visible_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(resolver_vector.get("seam_boundary_pressure", 0.0)),
+            clamp01(resolver_vector.get("late_segment_spike_pressure", 0.0)),
+            clamp01(object_relation_review.get("cascade_post_seam_acceleration_score", 0.0)),
+        )
+        background_pressure = max(
+            clamp01(get_tile("edge_background_anchor").get("pressure", 0.0)),
+            clamp01(get_tile("top_background_band").get("pressure", 0.0)),
+            clamp01(raw_axis_vector.get("background", 0.0)),
+            clamp01(visible_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(visible_vector.get("spatial_anchor_pressure", 0.0)),
+            clamp01(resolver_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(resolver_vector.get("spatial_anchor_pressure", 0.0)),
+            clamp01(region_vector.get("background_anchor_pressure", 0.0)),
+            clamp01(region_vector.get("spatial_anchor_pressure", 0.0)),
+        )
+        guarded_background_pressure = max(
+            clamp01(guarded_axis_vector.get("background", 0.0)),
+            clamp01(background_pressure * safe_float(region_weighted.get("background_confidence", 1.0), 1.0)),
+        )
+        sampler_handoff_pressure = max(
+            clamp01(raw_axis_vector.get("sampler_handoff", 0.0)),
+            clamp01(guarded_axis_vector.get("sampler_handoff", 0.0)),
+            clamp01(resolver_vector.get("high_low_sampler_pressure", 0.0)),
+        )
+
+        action_cluster_pressure = max(center_action_pressure, object_contact_pressure, sampler_handoff_pressure)
+        scene_cluster_pressure = max(background_pressure, guarded_background_pressure)
+        action_to_background_ratio = ratio(action_cluster_pressure, scene_cluster_pressure)
+        guarded_action_to_background_ratio = ratio(action_cluster_pressure, guarded_background_pressure)
+        center_object_coupling = clamp01(1.0 - abs(center_action_pressure - object_contact_pressure))
+        region_separation = clamp01(true_region.get("region_separation_score", 0.0))
+        region_readiness = clamp01(true_region.get("region_readiness_score", 0.0))
+        region_axis_confidence = clamp01(region_weighted.get("region_axis_confidence", 0.0))
+        background_overweight_score = clamp01(region_weighted.get("background_overweight_score", 0.0))
+        background_overweight_guard = bool(region_weighted.get("background_overweight_guard", False))
+
+        background_leakage_score = clamp01(
+            max(0.0, background_pressure - guarded_background_pressure)
+            + (1.0 - region_separation) * 0.30
+            + background_overweight_score * 0.40
+        )
+        pixel_center_edge_ratio = safe_float(pixel_region.get("center_edge_pixel_ratio", 0.0), 0.0)
+        pixel_edge_center_ratio = safe_float(pixel_region.get("edge_center_pixel_ratio", 0.0), 0.0)
+        pixel_background_leakage = clamp01(pixel_region.get("background_pixel_leakage_score", 0.0))
+        pixel_seam_ratio = safe_float(pixel_region.get("estimated_seam_ratio", 0.0), 0.0)
+        pressure_pixel_agreement = clamp01(
+            1.0
+            - min(
+                1.0,
+                abs(pixel_edge_center_ratio - ratio(guarded_background_pressure, action_cluster_pressure))
+            )
+        ) if pixel_region else 0.0
+        pressure_pixel_disagreement = clamp01(1.0 - pressure_pixel_agreement) if pixel_region else 0.0
+        if pixel_region and pixel_center_edge_ratio >= 1.10 and background_leakage_score >= 0.45:
+            background_leakage_interpretation = "pressure_overweighted_relative_to_pixels"
+        elif pixel_region and pixel_edge_center_ratio >= 0.95:
+            background_leakage_interpretation = "pixel_background_leakage_visible"
+        elif pixel_region:
+            background_leakage_interpretation = "pixel_center_action_dominant"
+        else:
+            background_leakage_interpretation = "pixel_region_not_recorded"
+        seam_interference_score = clamp01(
+            0.55 * seam_transition_pressure
+            + 0.25 * max(0.0, seam_transition_pressure - action_cluster_pressure)
+            + 0.20 * max(0.0, seam_transition_pressure - guarded_background_pressure)
+            + (0.12 * max(0.0, pixel_seam_ratio - 1.5) if pixel_region else 0.0)
+        )
+        separation_confidence = clamp01(
+            0.30 * region_readiness
+            + 0.28 * region_separation
+            + 0.18 * region_axis_confidence
+            + 0.14 * max(0.0, 1.0 - background_leakage_score)
+            + 0.10 * center_object_coupling
+        )
+        action_dominance_score = clamp01(action_cluster_pressure - guarded_background_pressure + 0.5)
+
+        if not region_weighted:
+            status = "action_background_separation_not_recorded"
+            severity = "WARNING"
+            next_surface = "record_region_weighted_fractal_first"
+            next_action = "Record EventRegionWeightedFractalStrategyReturn before action/background separation."
+            recommended_axis = "unknown"
+        elif background_overweight_guard or background_leakage_score >= 0.40:
+            status = "action_background_separation_needed_report_only"
+            severity = "WARNING"
+            next_surface = (
+                "pixel_pressure_disagreement_review_report_only"
+                if background_leakage_interpretation == "pressure_overweighted_relative_to_pixels"
+                else "separate_center_action_background_tiles_report_only"
+            )
+            next_action = "Separate center action/object motion from edge/background pressure before any active control; compare pressure with pixel-region evidence."
+            recommended_axis = "center_action_over_background"
+        elif seam_interference_score >= 0.52:
+            status = "action_background_seam_watch_report_only"
+            severity = "WARNING"
+            next_surface = "seam_local_action_background_review_report_only"
+            next_action = "Seam motion is mixed with action/background evidence; keep the next route local to the cascade boundary."
+            recommended_axis = "seam_local"
+        elif separation_confidence >= 0.62 and action_to_background_ratio >= 0.75:
+            status = "action_background_separation_candidate_report_only"
+            severity = "INFO"
+            next_surface = "same_sampler_strategy_ring_report_only"
+            next_action = "Action/background separation is readable; next report-only route can test same-sampler Strategy ring evidence."
+            recommended_axis = "action_cluster"
+        else:
+            status = "action_background_separation_watch_report_only"
+            severity = "INFO"
+            next_surface = "collect_action_background_evidence"
+            next_action = "Action/background separation is readable but not stable enough; collect another fixed-seed comparison."
+            recommended_axis = "watch"
+
+        return {
+            "stage": "EventActionBackgroundSeparationEvidence",
+            "status": status,
+            "severity": severity,
+            "map_version": "action_background_separation_evidence_v1_report_only",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "Center action, object/contact, seam, and background carriers are separated as local Strategy returns before any next route may nominate active control.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "same_run_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "parent_strategy": "S_global_event_route",
+            "source_surface": "EventRegionWeightedFractalStrategyReturn",
+            "center_action_pressure": float(center_action_pressure),
+            "object_contact_pressure": float(object_contact_pressure),
+            "seam_transition_pressure": float(seam_transition_pressure),
+            "sampler_handoff_pressure": float(sampler_handoff_pressure),
+            "background_pressure": float(background_pressure),
+            "guarded_background_pressure": float(guarded_background_pressure),
+            "action_cluster_pressure": float(action_cluster_pressure),
+            "scene_cluster_pressure": float(scene_cluster_pressure),
+            "center_object_coupling": float(center_object_coupling),
+            "action_to_background_ratio": float(action_to_background_ratio),
+            "guarded_action_to_background_ratio": float(guarded_action_to_background_ratio),
+            "background_leakage_score": float(background_leakage_score),
+            "pixel_region_motion_status": str(pixel_region.get("status", "not_recorded") if pixel_region else "not_recorded"),
+            "pixel_center_edge_ratio": float(pixel_center_edge_ratio),
+            "pixel_edge_center_ratio": float(pixel_edge_center_ratio),
+            "pixel_background_leakage_score": float(pixel_background_leakage),
+            "pixel_estimated_seam_ratio": float(pixel_seam_ratio),
+            "pressure_pixel_agreement": float(pressure_pixel_agreement),
+            "pressure_pixel_disagreement": float(pressure_pixel_disagreement),
+            "background_leakage_interpretation": background_leakage_interpretation,
+            "seam_interference_score": float(seam_interference_score),
+            "separation_confidence": float(separation_confidence),
+            "action_dominance_score": float(action_dominance_score),
+            "background_overweight_guard": bool(background_overweight_guard),
+            "recommended_axis": recommended_axis,
+            "next_control_surface": next_surface,
+            "carrier_roles": {
+                "action": ["center_action_carrier", "visible_motion", "sampler_handoff"],
+                "object_contact": ["object_contact_carrier", "object_relation_review"],
+                "background": ["edge_background_anchor", "top_background_band", "spatial_anchor"],
+                "seam": ["seam_transition_carrier", "tail/cascade boundary"],
+            },
+            "do_not_do": [
+                "do not globally freeze the background to fix action drift",
+                "do not mix seam jumps with center action pressure",
+                "do not move this report into prompt text",
+                "do not activate control until fixed-seed visual proof confirms the separated axis",
+            ],
+            "next_action": next_action,
+        }
+
+    def _event_pixel_pressure_disagreement_review(
+        self,
+        pixel_region_motion_map=None,
+        action_background_separation_evidence=None,
+        region_weighted_fractal_strategy_return=None,
+        true_region_topology_evidence=None,
+        visible_motion_strategy_return_gate=None,
+    ):
+        """
+        R146 report-only review.
+
+        Pixel-region motion is visible Outcome evidence. Scalar pressure can be
+        useful, but it must not call the edge/background the main problem when
+        the decoded pixels show center/action dominance. This review reconciles
+        that disagreement before the next route is nominated.
+        """
+        pixel_region = pixel_region_motion_map if isinstance(pixel_region_motion_map, dict) else {}
+        action_background = action_background_separation_evidence if isinstance(action_background_separation_evidence, dict) else {}
+        region_weighted = region_weighted_fractal_strategy_return if isinstance(region_weighted_fractal_strategy_return, dict) else {}
+        true_region = true_region_topology_evidence if isinstance(true_region_topology_evidence, dict) else {}
+        visible_gate = visible_motion_strategy_return_gate if isinstance(visible_motion_strategy_return_gate, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def ratio(numerator, denominator):
+            return safe_float(numerator, 0.0) / max(0.001, safe_float(denominator, 0.0))
+
+        pixel_center_edge_ratio = safe_float(pixel_region.get("center_edge_pixel_ratio", 0.0), 0.0)
+        pixel_edge_center_ratio = safe_float(pixel_region.get("edge_center_pixel_ratio", 0.0), 0.0)
+        pixel_background_leakage = clamp01(pixel_region.get("background_pixel_leakage_score", 0.0))
+        pixel_seam_ratio = safe_float(pixel_region.get("estimated_seam_ratio", 0.0), 0.0)
+        pixel_center_dominance = clamp01((pixel_center_edge_ratio - 1.0) / 0.75)
+        pixel_edge_visibility = clamp01(pixel_edge_center_ratio)
+        pixel_center_action_dominant = bool(pixel_region and pixel_center_edge_ratio >= 1.10 and pixel_edge_center_ratio < 0.95)
+        pixel_background_visible = bool(pixel_region and pixel_edge_center_ratio >= 0.95)
+
+        pressure_background_leakage = clamp01(action_background.get("background_leakage_score", 0.0))
+        pressure_action_to_background_ratio = safe_float(action_background.get("action_to_background_ratio", 0.0), 0.0)
+        pressure_guarded_action_to_background_ratio = safe_float(action_background.get("guarded_action_to_background_ratio", 0.0), 0.0)
+        pressure_seam_interference = clamp01(action_background.get("seam_interference_score", 0.0))
+        pressure_pixel_agreement = clamp01(action_background.get("pressure_pixel_agreement", 0.0))
+        pressure_pixel_disagreement = clamp01(action_background.get("pressure_pixel_disagreement", 1.0 if pixel_region else 0.0))
+        background_overweight_score = clamp01(region_weighted.get("background_overweight_score", 0.0))
+        background_overweight_guard = bool(region_weighted.get("background_overweight_guard", False))
+        region_readiness = clamp01(true_region.get("region_readiness_score", 0.0))
+        region_separation = clamp01(true_region.get("region_separation_score", 0.0))
+        visible_motion_pressure = clamp01((visible_gate.get("pressure_vector", {}) or {}).get("visible_frame_motion_pressure", 0.0)) if isinstance(visible_gate.get("pressure_vector", {}), dict) else 0.0
+
+        pressure_background_claim = bool(
+            background_overweight_guard
+            or background_overweight_score >= 0.38
+            or pressure_background_leakage >= 0.40
+            or str(action_background.get("background_leakage_interpretation", "") or "") == "pressure_overweighted_relative_to_pixels"
+        )
+        pressure_background_claim_strength = clamp01(
+            0.35 * background_overweight_score
+            + 0.30 * pressure_background_leakage
+            + 0.20 * (1.0 if background_overweight_guard else 0.0)
+            + 0.15 * pressure_pixel_disagreement
+        )
+        scalar_pressure_overweight_score = clamp01(
+            0.34 * pressure_background_claim_strength
+            + 0.28 * pixel_center_dominance
+            + 0.20 * max(0.0, 1.0 - pixel_edge_visibility)
+            + 0.18 * max(0.0, pressure_background_leakage - pixel_background_leakage * 0.75)
+        ) if pressure_background_claim and pixel_region else 0.0
+        seam_locality_score = clamp01(
+            0.45 * pressure_seam_interference
+            + 0.35 * max(0.0, min(1.0, (pixel_seam_ratio - 1.0) / 1.25))
+            + 0.20 * max(0.0, pixel_background_leakage - pixel_center_dominance)
+        ) if pixel_region else pressure_seam_interference
+        corrected_background_leakage_score = clamp01(
+            0.58 * pixel_background_leakage
+            + 0.30 * pressure_background_leakage
+            + 0.12 * background_overweight_score
+            - 0.22 * pixel_center_dominance
+        )
+        corrected_action_center_confidence = clamp01(
+            0.36 * pixel_center_dominance
+            + 0.22 * max(0.0, 1.0 - pixel_edge_visibility)
+            + 0.18 * pressure_pixel_agreement
+            + 0.14 * region_separation
+            + 0.10 * visible_motion_pressure
+        )
+        corrected_action_to_background_ratio = ratio(
+            corrected_action_center_confidence + max(0.0, pressure_action_to_background_ratio),
+            corrected_background_leakage_score + 0.25,
+        )
+
+        if not pixel_region:
+            status = "pixel_pressure_disagreement_not_recorded"
+            severity = "WARNING"
+            recommended_axis = "unknown"
+            next_surface = "record_pixel_region_motion_map_first"
+            next_action = "Record selected visible pixel-region motion before interpreting pressure disagreement."
+        elif not action_background:
+            status = "pixel_pressure_disagreement_missing_pressure_evidence"
+            severity = "WARNING"
+            recommended_axis = "unknown"
+            next_surface = "record_action_background_separation_first"
+            next_action = "Record action/background pressure evidence before pixel-pressure review."
+        elif pixel_center_action_dominant and pressure_background_claim and scalar_pressure_overweight_score >= 0.30:
+            status = "pixel_pressure_disagreement_scalar_overweight_report_only"
+            severity = "WARNING"
+            recommended_axis = "center_action_pixel_outcome"
+            next_surface = "pressure_pixel_reweighting_report_only"
+            next_action = "Visible pixels show center/action dominance; reduce trust in scalar background pressure before any active route."
+        elif seam_locality_score >= 0.52 and pixel_center_action_dominant:
+            status = "pixel_pressure_disagreement_seam_local_report_only"
+            severity = "INFO"
+            recommended_axis = "seam_local_center_action"
+            next_surface = "seam_local_action_background_review_report_only"
+            next_action = "Treat the disagreement as local seam/transition pressure, not global background leakage."
+        elif pixel_background_visible:
+            status = "pixel_pressure_disagreement_background_visible_report_only"
+            severity = "INFO"
+            recommended_axis = "visible_background_motion"
+            next_surface = "separate_center_action_background_tiles_report_only"
+            next_action = "Background motion is visible in pixels; keep separating action and background before control."
+        else:
+            status = "pixel_pressure_disagreement_balanced_report_only"
+            severity = "INFO"
+            recommended_axis = "balanced_pixel_pressure"
+            next_surface = "same_sampler_strategy_ring_report_only"
+            next_action = "Pixel and pressure evidence are close enough for the next report-only continuity route."
+
+        return {
+            "stage": "EventPixelPressureDisagreementReview",
+            "status": status,
+            "severity": severity,
+            "map_version": "pixel_pressure_disagreement_review_v1_report_only",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "Selected visible pixel Outcome corrects scalar pressure interpretation before Strategy returns to the next route.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "same_run_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "parent_strategy": "S_global_event_route",
+            "source_surfaces": [
+                "EventPixelRegionMotionMapSelection",
+                "EventActionBackgroundSeparationEvidence",
+                "EventRegionWeightedFractalStrategyReturn",
+            ],
+            "selected_pixel_source_stage": str(pixel_region.get("source_stage", "") if pixel_region else ""),
+            "selected_pixel_selection_reason": str(pixel_region.get("selection_reason", "") if pixel_region else ""),
+            "pixel_region_motion_status": str(pixel_region.get("status", "not_recorded") if pixel_region else "not_recorded"),
+            "pixel_center_edge_ratio": float(pixel_center_edge_ratio),
+            "pixel_edge_center_ratio": float(pixel_edge_center_ratio),
+            "pixel_background_leakage_score": float(pixel_background_leakage),
+            "pixel_estimated_seam_ratio": float(pixel_seam_ratio),
+            "pixel_center_dominance_score": float(pixel_center_dominance),
+            "pixel_center_action_dominant": bool(pixel_center_action_dominant),
+            "pixel_background_visible": bool(pixel_background_visible),
+            "pressure_background_claim": bool(pressure_background_claim),
+            "pressure_background_claim_strength": float(pressure_background_claim_strength),
+            "pressure_background_leakage_score": float(pressure_background_leakage),
+            "pressure_action_to_background_ratio": float(pressure_action_to_background_ratio),
+            "pressure_guarded_action_to_background_ratio": float(pressure_guarded_action_to_background_ratio),
+            "pressure_pixel_agreement": float(pressure_pixel_agreement),
+            "pressure_pixel_disagreement": float(pressure_pixel_disagreement),
+            "background_overweight_guard": bool(background_overweight_guard),
+            "background_overweight_score": float(background_overweight_score),
+            "scalar_pressure_overweight_score": float(scalar_pressure_overweight_score),
+            "seam_locality_score": float(seam_locality_score),
+            "corrected_background_leakage_score": float(corrected_background_leakage_score),
+            "corrected_action_center_confidence": float(corrected_action_center_confidence),
+            "corrected_action_to_background_ratio": float(corrected_action_to_background_ratio),
+            "region_readiness_score": float(region_readiness),
+            "region_separation_score": float(region_separation),
+            "visible_motion_pressure": float(visible_motion_pressure),
+            "recommended_axis": recommended_axis,
+            "next_control_surface": next_surface,
+            "do_not_do": [
+                "do not let scalar background pressure overrule selected visible pixel Outcome",
+                "do not globally freeze the background when the center/action pixels dominate",
+                "do not inject pixel-pressure explanations into prompt text",
+                "do not activate this route without fixed-seed visual proof",
+            ],
+            "next_action": next_action,
+        }
+
+    def _event_pressure_pixel_reweighting_proposal(
+        self,
+        pixel_pressure_disagreement_review=None,
+        pixel_region_motion_map=None,
+        action_background_separation_evidence=None,
+        region_weighted_fractal_strategy_return=None,
+    ):
+        """
+        R147 report-only proposal.
+
+        R146 tells us when scalar pressure and visible pixels disagree. R147 does
+        not control the sampler. It converts that disagreement into bounded
+        future weights so the next A/B can test whether pressure should trust
+        visible pixel Outcome more than scalar background/action claims.
+        """
+        review = pixel_pressure_disagreement_review if isinstance(pixel_pressure_disagreement_review, dict) else {}
+        pixel_region = pixel_region_motion_map if isinstance(pixel_region_motion_map, dict) else {}
+        action_background = action_background_separation_evidence if isinstance(action_background_separation_evidence, dict) else {}
+        region_weighted = region_weighted_fractal_strategy_return if isinstance(region_weighted_fractal_strategy_return, dict) else {}
+
+        def safe_float(value, default=0.0):
+            try:
+                out = float(value)
+            except Exception:
+                return default
+            return out if math.isfinite(out) else default
+
+        def clamp01(value):
+            return max(0.0, min(1.0, safe_float(value, 0.0)))
+
+        def clamp_range(value, minimum, maximum):
+            return max(float(minimum), min(float(maximum), safe_float(value, float(minimum))))
+
+        if not review:
+            return {
+                "stage": "EventPressurePixelReweightingProposal",
+                "status": "pressure_pixel_reweighting_not_recorded",
+                "severity": "WARNING",
+                "map_version": "pressure_pixel_reweighting_proposal_v1_report_only",
+                "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+                "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+                "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+                "formula": "A bounded pressure/pixel proposal requires EventPixelPressureDisagreementReview first.",
+                "control_mode": "REPORT_ONLY",
+                "active_control_allowed": False,
+                "same_run_control_allowed": False,
+                "prompt_text_injection_allowed": False,
+                "semantic_math_in_prompt_allowed": False,
+                "generation_side_effect": "none",
+                "next_control_surface": "record_pixel_pressure_disagreement_review_first",
+                "next_action": "Record R146 pixel-pressure disagreement before building R147 weights.",
+            }
+
+        scalar_overweight = clamp01(review.get("scalar_pressure_overweight_score", 0.0))
+        corrected_leakage = clamp01(review.get("corrected_background_leakage_score", 0.0))
+        corrected_action = clamp01(review.get("corrected_action_center_confidence", 0.0))
+        seam_locality = clamp01(review.get("seam_locality_score", 0.0))
+        pressure_pixel_agreement = clamp01(review.get("pressure_pixel_agreement", 0.0))
+        pressure_pixel_disagreement = clamp01(review.get("pressure_pixel_disagreement", 1.0 - pressure_pixel_agreement))
+        pixel_center_dominance = clamp01(review.get("pixel_center_dominance_score", 0.0))
+        pixel_center_edge_ratio = safe_float(review.get("pixel_center_edge_ratio", pixel_region.get("center_edge_pixel_ratio", 0.0)), 0.0)
+        pixel_center_dominance = max(pixel_center_dominance, clamp01((pixel_center_edge_ratio - 1.0) / 0.75))
+        pixel_center_action_dominant = bool(review.get("pixel_center_action_dominant", False))
+        background_overweight_score = clamp01(review.get("background_overweight_score", region_weighted.get("background_overweight_score", 0.0)))
+        action_background_confidence = clamp01(action_background.get("separation_confidence", 0.0))
+
+        pixel_outcome_trust_weight = clamp01(
+            0.45
+            + 0.28 * corrected_action
+            + 0.18 * pixel_center_dominance
+            + 0.09 * pressure_pixel_agreement
+        )
+        scalar_pressure_trust_weight = clamp01(
+            0.72
+            - 0.45 * scalar_overweight
+            - 0.20 * pixel_center_dominance
+            + 0.12 * pressure_pixel_agreement
+        )
+        bounded_background_pressure_factor = clamp_range(
+            1.0
+            - 0.32 * scalar_overweight
+            - 0.18 * pixel_center_dominance
+            + 0.08 * seam_locality,
+            0.68,
+            1.0,
+        )
+        action_preservation_factor = clamp_range(
+            1.0
+            + 0.18 * corrected_action
+            + 0.08 * pixel_center_dominance
+            - 0.10 * seam_locality,
+            0.96,
+            1.12,
+        )
+        seam_protection_weight = clamp01(
+            0.35
+            + 0.45 * seam_locality
+            + 0.20 * pressure_pixel_disagreement
+        )
+        center_action_priority = clamp01(
+            0.42 * corrected_action
+            + 0.30 * pixel_center_dominance
+            + 0.18 * pressure_pixel_agreement
+            + 0.10 * (1.0 - bounded_background_pressure_factor)
+        )
+        global_background_damping_allowed = False
+        bounded_reweighting_candidate = bool(
+            pixel_center_action_dominant
+            and 0.20 <= scalar_overweight <= 0.60
+            and corrected_action >= 0.45
+            and seam_locality < 0.55
+        )
+
+        if seam_locality >= 0.55:
+            status = "pressure_pixel_reweighting_seam_guard_report_only"
+            severity = "INFO"
+            next_surface = "seam_local_pressure_pixel_reweighting_report_only"
+            next_action = "Treat the candidate as seam-local first; do not turn it into global background damping."
+        elif bounded_reweighting_candidate:
+            status = "pressure_pixel_reweighting_candidate_report_only"
+            severity = "INFO"
+            next_surface = "fixed_seed_ab_pressure_pixel_reweighting_report_only"
+            next_action = "Run a fixed-seed A/B before active low-mid-window pressure/pixel reweighting."
+        elif scalar_overweight < 0.20:
+            status = "pressure_pixel_reweighting_balanced_watch_report_only"
+            severity = "INFO"
+            next_surface = "keep_observing_pixel_pressure_balance"
+            next_action = "Scalar and pixel evidence are close; keep the route report-only."
+        elif scalar_overweight > 0.60 or corrected_action < 0.35:
+            status = "pressure_pixel_reweighting_unstable_report_only"
+            severity = "WARNING"
+            next_surface = "stabilize_pixel_pressure_evidence_before_control"
+            next_action = "Evidence is too unstable for active reweighting; collect another same-seed report first."
+        else:
+            status = "pressure_pixel_reweighting_guarded_report_only"
+            severity = "INFO"
+            next_surface = "pressure_pixel_reweighting_more_evidence_report_only"
+            next_action = "The route is plausible but not strong enough for active control."
+
+        return {
+            "stage": "EventPressurePixelReweightingProposal",
+            "status": status,
+            "severity": severity,
+            "map_version": "pressure_pixel_reweighting_proposal_v1_report_only",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "canonical_formula": "Outcome(t-1) + ObservedBehavior(t-1) = Strategy(t) = ObservedBehavior(t+1) + Outcome(t+1)",
+            "formula": "Pixel-corrected pressure returns as bounded future weights while Strategy remains centered on the model attractor.",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "same_run_control_allowed": False,
+            "prompt_text_injection_allowed": False,
+            "semantic_math_in_prompt_allowed": False,
+            "generation_side_effect": "none",
+            "parent_strategy": "S_global_event_route",
+            "source_surfaces": [
+                "EventPixelPressureDisagreementReview",
+                "EventPixelRegionMotionMapSelection",
+                "EventActionBackgroundSeparationEvidence",
+            ],
+            "r146_reference_status": str(review.get("status", "")),
+            "r146_reference_axis": str(review.get("recommended_axis", "")),
+            "scalar_pressure_overweight_score": float(scalar_overweight),
+            "corrected_background_leakage_score": float(corrected_leakage),
+            "corrected_action_center_confidence": float(corrected_action),
+            "seam_locality_score": float(seam_locality),
+            "pressure_pixel_agreement": float(pressure_pixel_agreement),
+            "pressure_pixel_disagreement": float(pressure_pixel_disagreement),
+            "pixel_center_dominance_score": float(pixel_center_dominance),
+            "pixel_center_action_dominant": bool(pixel_center_action_dominant),
+            "background_overweight_score": float(background_overweight_score),
+            "action_background_separation_confidence": float(action_background_confidence),
+            "pixel_outcome_trust_weight": float(pixel_outcome_trust_weight),
+            "scalar_pressure_trust_weight": float(scalar_pressure_trust_weight),
+            "bounded_background_pressure_factor": float(bounded_background_pressure_factor),
+            "action_preservation_factor": float(action_preservation_factor),
+            "seam_protection_weight": float(seam_protection_weight),
+            "center_action_priority": float(center_action_priority),
+            "global_background_damping_allowed": bool(global_background_damping_allowed),
+            "bounded_reweighting_candidate": bool(bounded_reweighting_candidate),
+            "future_control_surface": "low_mid_window_pressure_pixel_reweighting_candidate",
+            "next_control_surface": next_surface,
+            "proposal": {
+                "pixel_outcome_trust_weight": float(pixel_outcome_trust_weight),
+                "scalar_pressure_trust_weight": float(scalar_pressure_trust_weight),
+                "bounded_background_pressure_factor": float(bounded_background_pressure_factor),
+                "action_preservation_factor": float(action_preservation_factor),
+                "seam_protection_weight": float(seam_protection_weight),
+                "center_action_priority": float(center_action_priority),
+            },
+            "do_not_do": [
+                "do not globally damp the background from this report",
+                "do not inject pressure/pixel wording into prompt text",
+                "do not activate same-run control from this proposal",
+                "do not let the proposal become an independent controller outside the model attractor",
+            ],
+            "next_action": next_action,
+        }
+
+    def _select_primary_pixel_region_motion_map(self, execution_records):
+        """
+        Select the pixel-region record that represents the visible video
+        outcome, not the last auxiliary preview/tail record.
+        """
+        candidates = [
+            rec for rec in (execution_records or [])
+            if isinstance(rec, dict)
+            and str(rec.get("stage", "") or "") == "EventPixelRegionMotionMap"
+        ]
+        if not candidates:
+            return {}
+
+        def with_selection(rec, reason, rank):
+            out = dict(rec)
+            out["selected_for_strategy_return"] = True
+            out["selection_reason"] = str(reason)
+            out["selection_rank"] = int(rank)
+            out["available_pixel_region_map_count"] = len(candidates)
+            out["preferred_outcome_source_order"] = [
+                "EventMath_concatenated_frame_motion",
+                "EventMath_decoded_frame_motion",
+                "EventMath_cascade_*_frame_motion",
+                "fallback_latest",
+            ]
+            return out
+
+        preferred_exact = [
+            ("EventMath_concatenated_frame_motion", "final_concatenated_visible_outcome", 1),
+            ("EventMath_decoded_frame_motion", "decoded_visible_outcome", 2),
+        ]
+        for source_stage, reason, rank in preferred_exact:
+            for rec in reversed(candidates):
+                if str(rec.get("source_stage", "") or "") == source_stage:
+                    return with_selection(rec, reason, rank)
+
+        for rec in reversed(candidates):
+            source_stage = str(rec.get("source_stage", "") or "")
+            if source_stage.startswith("EventMath_cascade_") and source_stage.endswith("_frame_motion"):
+                return with_selection(rec, "latest_cascade_visible_outcome", 3)
+
+        return with_selection(candidates[-1], "fallback_latest_pixel_region_record", 9)
+
     def _event_core_cascade_progress(self, execution_records, result_status="", saved_video_path=""):
         records = [r for r in (execution_records or []) if isinstance(r, dict)]
         result_status_u = str(result_status or "").upper()
@@ -2933,6 +5689,126 @@ class SingularityTelemetryMixin:
             "strategy_return_primary_attribution": (body.get("strategy_return_pressure_resolver", {}) or {}).get("primary_attribution", "") if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else "",
             "strategy_return_next_control_surface": (body.get("strategy_return_pressure_resolver", {}) or {}).get("next_control_surface", "") if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else "",
             "strategy_return_active_control_allowed": (body.get("strategy_return_pressure_resolver", {}) or {}).get("active_control_allowed", False) if isinstance(body.get("strategy_return_pressure_resolver", {}), dict) else False,
+            "visible_motion_strategy_return_status": (body.get("visible_motion_strategy_return_gate", {}) or {}).get("status", "not_recorded") if isinstance(body.get("visible_motion_strategy_return_gate", {}), dict) else "not_recorded",
+            "visible_motion_strategy_return_severity": (body.get("visible_motion_strategy_return_gate", {}) or {}).get("severity", "") if isinstance(body.get("visible_motion_strategy_return_gate", {}), dict) else "",
+            "visible_motion_next_control_surface": (body.get("visible_motion_strategy_return_gate", {}) or {}).get("next_control_surface", "") if isinstance(body.get("visible_motion_strategy_return_gate", {}), dict) else "",
+            "visible_motion_active_control_allowed_next": (body.get("visible_motion_strategy_return_gate", {}) or {}).get("visible_motion_active_control_allowed_next", False) if isinstance(body.get("visible_motion_strategy_return_gate", {}), dict) else False,
+            "true_region_topology_status": (body.get("true_region_topology_evidence", {}) or {}).get("status", "not_recorded") if isinstance(body.get("true_region_topology_evidence", {}), dict) else "not_recorded",
+            "true_region_topology_severity": (body.get("true_region_topology_evidence", {}) or {}).get("severity", "") if isinstance(body.get("true_region_topology_evidence", {}), dict) else "",
+            "true_region_readiness_score": (body.get("true_region_topology_evidence", {}) or {}).get("region_readiness_score", "") if isinstance(body.get("true_region_topology_evidence", {}), dict) else "",
+            "true_region_separation_score": (body.get("true_region_topology_evidence", {}) or {}).get("region_separation_score", "") if isinstance(body.get("true_region_topology_evidence", {}), dict) else "",
+            "true_region_dominant_region_id": (body.get("true_region_topology_evidence", {}) or {}).get("dominant_region_id", "") if isinstance(body.get("true_region_topology_evidence", {}), dict) else "",
+            "true_region_next_control_surface": (body.get("true_region_topology_evidence", {}) or {}).get("next_control_surface", "") if isinstance(body.get("true_region_topology_evidence", {}), dict) else "",
+            "true_region_active_control_allowed_next": (body.get("true_region_topology_evidence", {}) or {}).get("true_region_active_control_allowed_next", False) if isinstance(body.get("true_region_topology_evidence", {}), dict) else False,
+            "fractal_strategy_intersection_status": (body.get("fractal_strategy_intersection_map", {}) or {}).get("status", "not_recorded") if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else "not_recorded",
+            "fractal_strategy_intersection_severity": (body.get("fractal_strategy_intersection_map", {}) or {}).get("severity", "") if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else "",
+            "fractal_strategy_depth": (body.get("fractal_strategy_intersection_map", {}) or {}).get("fractal_depth", "") if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else "",
+            "fractal_strategy_primary_intersection_count": (body.get("fractal_strategy_intersection_map", {}) or {}).get("primary_intersection_count", 0) if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else 0,
+            "fractal_strategy_final_alignment_score": (body.get("fractal_strategy_intersection_map", {}) or {}).get("final_layer_alignment_score", "") if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else "",
+            "fractal_strategy_convergence_state": (body.get("fractal_strategy_intersection_map", {}) or {}).get("convergence_state", "") if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else "",
+            "fractal_strategy_dominant_axis": (body.get("fractal_strategy_intersection_map", {}) or {}).get("dominant_intersection_axis", []) if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else [],
+            "fractal_strategy_next_control_surface": (body.get("fractal_strategy_intersection_map", {}) or {}).get("next_control_surface", "") if isinstance(body.get("fractal_strategy_intersection_map", {}), dict) else "",
+            "region_weighted_fractal_status": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("status", "not_recorded") if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else "not_recorded",
+            "region_weighted_fractal_severity": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("severity", "") if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else "",
+            "region_axis_confidence": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("region_axis_confidence", "") if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else "",
+            "dominant_axis_evidence_match": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("dominant_axis_evidence_match", False) if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else False,
+            "background_overweight_guard": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("background_overweight_guard", False) if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else False,
+            "guarded_visible_evidence_axis": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("guarded_visible_evidence_axis", "") if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else "",
+            "region_weighted_fractal_next_control_surface": (body.get("region_weighted_fractal_strategy_return", {}) or {}).get("next_control_surface", "") if isinstance(body.get("region_weighted_fractal_strategy_return", {}), dict) else "",
+            "pixel_region_motion_status": (body.get("pixel_region_motion_map", {}) or {}).get("status", "not_recorded") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "not_recorded",
+            "pixel_region_motion_severity": (body.get("pixel_region_motion_map", {}) or {}).get("severity", "") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "",
+            "pixel_center_edge_ratio": (body.get("pixel_region_motion_map", {}) or {}).get("center_edge_pixel_ratio", "") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "",
+            "pixel_edge_center_ratio": (body.get("pixel_region_motion_map", {}) or {}).get("edge_center_pixel_ratio", "") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "",
+            "pixel_estimated_seam_ratio": (body.get("pixel_region_motion_map", {}) or {}).get("estimated_seam_ratio", "") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "",
+            "pixel_background_leakage_score": (body.get("pixel_region_motion_map", {}) or {}).get("background_pixel_leakage_score", "") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "",
+            "pixel_region_next_control_surface": (body.get("pixel_region_motion_map", {}) or {}).get("next_control_surface", "") if isinstance(body.get("pixel_region_motion_map", {}), dict) else "",
+            "cascade_seam_impulse_status": (body.get("cascade_seam_impulse_review", {}) or {}).get("status", "not_recorded") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "not_recorded",
+            "cascade_seam_impulse_severity": (body.get("cascade_seam_impulse_review", {}) or {}).get("severity", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_impulse_score": (body.get("cascade_seam_impulse_review", {}) or {}).get("seam_impulse_score", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_vector_score": (body.get("cascade_seam_impulse_review", {}) or {}).get("vector_seam_impulse_score", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_visible_score": (body.get("cascade_seam_impulse_review", {}) or {}).get("visible_seam_delta_score", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_visible_over_median": (body.get("cascade_seam_impulse_review", {}) or {}).get("visible_seam_over_median_ratio", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_visible_transition_index": (body.get("cascade_seam_impulse_review", {}) or {}).get("visible_boundary_transition_index", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_visible_top_rank": (body.get("cascade_seam_impulse_review", {}) or {}).get("visible_window_top_transition_rank", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_worst_boundary_index": (body.get("cascade_seam_impulse_review", {}) or {}).get("worst_boundary_index", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_boundary_jump_score": (body.get("cascade_seam_impulse_review", {}) or {}).get("boundary_jump_score", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_entry_acceleration_score": (body.get("cascade_seam_impulse_review", {}) or {}).get("entry_acceleration_score", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_direction_switch_score": (body.get("cascade_seam_impulse_review", {}) or {}).get("direction_switch_score", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_tail_entry_direction_cosine": (body.get("cascade_seam_impulse_review", {}) or {}).get("tail_entry_direction_cosine", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "cascade_seam_next_control_surface": (body.get("cascade_seam_impulse_review", {}) or {}).get("next_control_surface", "") if isinstance(body.get("cascade_seam_impulse_review", {}), dict) else "",
+            "tail_next_source_continuity_status": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("status", "not_recorded") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "not_recorded",
+            "tail_next_source_continuity_severity": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("severity", "") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "",
+            "tail_next_source_continuity_pressure": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("continuity_pressure_score", "") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "",
+            "tail_next_source_source_gap_score": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("source_gap_score", "") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "",
+            "tail_next_source_entry_ratio_score": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("entry_ratio_score", "") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "",
+            "tail_next_source_source_delta_over_median": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("source_delta_over_global_median", "") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "",
+            "tail_next_source_next_surface": (body.get("tail_next_source_continuity_proposal", {}) or {}).get("next_control_surface", "") if isinstance(body.get("tail_next_source_continuity_proposal", {}), dict) else "",
+            "cascade_seam_phase_status": (body.get("cascade_seam_phase_classifier", {}) or {}).get("status", "not_recorded") if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else "not_recorded",
+            "cascade_seam_phase_severity": (body.get("cascade_seam_phase_classifier", {}) or {}).get("severity", "") if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else "",
+            "cascade_seam_phase_dominant_axis": (body.get("cascade_seam_phase_classifier", {}) or {}).get("dominant_axis", "") if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else "",
+            "cascade_seam_phase_dominant_score": (body.get("cascade_seam_phase_classifier", {}) or {}).get("dominant_score", "") if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else "",
+            "cascade_seam_phase_semantic_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("semantic_phase_reentry", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_prompt_text_change_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("prompt_text_change", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_prompt_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("prompt_phase_reentry", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_latent_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("latent_carrier_mismatch", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_background_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("background_anchor_conflict", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_center_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("center_action_overdrive", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_sampler_score": ((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) or {}).get("sampler_handoff_reset", "") if isinstance((body.get("cascade_seam_phase_classifier", {}) or {}).get("axis_scores", {}) if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else {}, dict) else "",
+            "cascade_seam_phase_next_surface": (body.get("cascade_seam_phase_classifier", {}) or {}).get("next_control_surface", "") if isinstance(body.get("cascade_seam_phase_classifier", {}), dict) else "",
+            "semantic_phase_schedule_status": (body.get("semantic_phase_schedule_proposal", {}) or {}).get("status", "not_recorded") if isinstance(body.get("semantic_phase_schedule_proposal", {}), dict) else "not_recorded",
+            "semantic_phase_schedule_severity": (body.get("semantic_phase_schedule_proposal", {}) or {}).get("severity", "") if isinstance(body.get("semantic_phase_schedule_proposal", {}), dict) else "",
+            "semantic_phase_schedule_score": (body.get("semantic_phase_schedule_proposal", {}) or {}).get("semantic_phase_reentry_score", "") if isinstance(body.get("semantic_phase_schedule_proposal", {}), dict) else "",
+            "semantic_phase_schedule_prompt_clean": (body.get("semantic_phase_schedule_proposal", {}) or {}).get("prompt_carrier_clean", "") if isinstance(body.get("semantic_phase_schedule_proposal", {}), dict) else "",
+            "semantic_phase_schedule_next_surface": (body.get("semantic_phase_schedule_proposal", {}) or {}).get("next_control_surface", "") if isinstance(body.get("semantic_phase_schedule_proposal", {}), dict) else "",
+            "action_background_separation_status": (body.get("action_background_separation_evidence", {}) or {}).get("status", "not_recorded") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "not_recorded",
+            "action_background_separation_severity": (body.get("action_background_separation_evidence", {}) or {}).get("severity", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "action_background_separation_confidence": (body.get("action_background_separation_evidence", {}) or {}).get("separation_confidence", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "action_to_background_ratio": (body.get("action_background_separation_evidence", {}) or {}).get("action_to_background_ratio", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "background_leakage_score": (body.get("action_background_separation_evidence", {}) or {}).get("background_leakage_score", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "seam_interference_score": (body.get("action_background_separation_evidence", {}) or {}).get("seam_interference_score", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "action_background_recommended_axis": (body.get("action_background_separation_evidence", {}) or {}).get("recommended_axis", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "action_background_next_control_surface": (body.get("action_background_separation_evidence", {}) or {}).get("next_control_surface", "") if isinstance(body.get("action_background_separation_evidence", {}), dict) else "",
+            "pixel_pressure_disagreement_status": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("status", "not_recorded") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "not_recorded",
+            "pixel_pressure_disagreement_severity": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("severity", "") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "",
+            "pixel_pressure_scalar_overweight_score": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("scalar_pressure_overweight_score", "") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "",
+            "pixel_pressure_corrected_background_leakage_score": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("corrected_background_leakage_score", "") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "",
+            "pixel_pressure_corrected_action_center_confidence": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("corrected_action_center_confidence", "") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "",
+            "pixel_pressure_recommended_axis": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("recommended_axis", "") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "",
+            "pixel_pressure_next_control_surface": (body.get("pixel_pressure_disagreement_review", {}) or {}).get("next_control_surface", "") if isinstance(body.get("pixel_pressure_disagreement_review", {}), dict) else "",
+            "pressure_pixel_reweighting_status": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("status", "not_recorded") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "not_recorded",
+            "pressure_pixel_reweighting_severity": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("severity", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "pressure_pixel_outcome_trust_weight": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("pixel_outcome_trust_weight", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "pressure_pixel_scalar_trust_weight": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("scalar_pressure_trust_weight", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "pressure_pixel_background_factor": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("bounded_background_pressure_factor", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "pressure_pixel_action_factor": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("action_preservation_factor", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "pressure_pixel_seam_protection_weight": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("seam_protection_weight", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "pressure_pixel_next_control_surface": (body.get("pressure_pixel_reweighting_proposal", {}) or {}).get("next_control_surface", "") if isinstance(body.get("pressure_pixel_reweighting_proposal", {}), dict) else "",
+            "public_release_readiness_status": (body.get("public_release_readiness_gate", {}) or {}).get("status", "not_recorded") if isinstance(body.get("public_release_readiness_gate", {}), dict) else "not_recorded",
+            "public_release_readiness_severity": (body.get("public_release_readiness_gate", {}) or {}).get("severity", "") if isinstance(body.get("public_release_readiness_gate", {}), dict) else "",
+            "public_release_readiness_blocker_count": len((body.get("public_release_readiness_gate", {}) or {}).get("blockers", []) or []) if isinstance(body.get("public_release_readiness_gate", {}), dict) else 0,
+            "public_release_readiness_warning_count": len((body.get("public_release_readiness_gate", {}) or {}).get("warnings", []) or []) if isinstance(body.get("public_release_readiness_gate", {}), dict) else 0,
+            "public_release_readiness_research_flag_count": len((body.get("public_release_readiness_gate", {}) or {}).get("research_flags", []) or []) if isinstance(body.get("public_release_readiness_gate", {}), dict) else 0,
+            "public_release_readiness_next_action": (body.get("public_release_readiness_gate", {}) or {}).get("next_action", "") if isinstance(body.get("public_release_readiness_gate", {}), dict) else "",
+            "public_surface_contract_status": (body.get("public_surface_contract", {}) or {}).get("status", "not_recorded") if isinstance(body.get("public_surface_contract", {}), dict) else "not_recorded",
+            "public_surface_contract_severity": (body.get("public_surface_contract", {}) or {}).get("severity", "") if isinstance(body.get("public_surface_contract", {}), dict) else "",
+            "public_surface_contract_warning_count": len((body.get("public_surface_contract", {}) or {}).get("warnings", []) or []) if isinstance(body.get("public_surface_contract", {}), dict) else 0,
+            "public_surface_contract_research_flag_count": len((body.get("public_surface_contract", {}) or {}).get("research_flags", []) or []) if isinstance(body.get("public_surface_contract", {}), dict) else 0,
+            "public_package_static_scan_status": (body.get("public_package_static_scan", {}) or {}).get("status", "not_recorded") if isinstance(body.get("public_package_static_scan", {}), dict) else "not_recorded",
+            "public_package_static_scan_severity": (body.get("public_package_static_scan", {}) or {}).get("severity", "") if isinstance(body.get("public_package_static_scan", {}), dict) else "",
+            "public_package_static_scan_forbidden_dir_count": (body.get("public_package_static_scan", {}) or {}).get("forbidden_dir_count", 0) if isinstance(body.get("public_package_static_scan", {}), dict) else 0,
+            "public_package_static_scan_forbidden_file_count": (body.get("public_package_static_scan", {}) or {}).get("forbidden_file_count", 0) if isinstance(body.get("public_package_static_scan", {}), dict) else 0,
+            "math_topology_ledger_status": (body.get("math_topology_ledger", {}) or {}).get("status", "not_recorded") if isinstance(body.get("math_topology_ledger", {}), dict) else "not_recorded",
+            "math_topology_ledger_severity": (body.get("math_topology_ledger", {}) or {}).get("severity", "") if isinstance(body.get("math_topology_ledger", {}), dict) else "",
+            "math_topology_surface_count": (body.get("math_topology_ledger", {}) or {}).get("surface_count", 0) if isinstance(body.get("math_topology_ledger", {}), dict) else 0,
+            "math_topology_present_surface_count": (body.get("math_topology_ledger", {}) or {}).get("present_surface_count", 0) if isinstance(body.get("math_topology_ledger", {}), dict) else 0,
+            "math_topology_active_generation_surface_count": (body.get("math_topology_ledger", {}) or {}).get("active_generation_surface_count", 0) if isinstance(body.get("math_topology_ledger", {}), dict) else 0,
+            "math_topology_research_surface_count": (body.get("math_topology_ledger", {}) or {}).get("research_surface_count", 0) if isinstance(body.get("math_topology_ledger", {}), dict) else 0,
+            "math_topology_graph_status": (body.get("math_topology_dependency_graph", {}) or {}).get("status", "not_recorded") if isinstance(body.get("math_topology_dependency_graph", {}), dict) else "not_recorded",
+            "math_topology_graph_severity": (body.get("math_topology_dependency_graph", {}) or {}).get("severity", "") if isinstance(body.get("math_topology_dependency_graph", {}), dict) else "",
+            "math_topology_graph_node_count": (body.get("math_topology_dependency_graph", {}) or {}).get("node_count", 0) if isinstance(body.get("math_topology_dependency_graph", {}), dict) else 0,
+            "math_topology_graph_edge_count": (body.get("math_topology_dependency_graph", {}) or {}).get("edge_count", 0) if isinstance(body.get("math_topology_dependency_graph", {}), dict) else 0,
+            "math_topology_graph_active_generation_edge_count": (body.get("math_topology_dependency_graph", {}) or {}).get("active_generation_edge_count", 0) if isinstance(body.get("math_topology_dependency_graph", {}), dict) else 0,
+            "math_topology_graph_research_edge_count": (body.get("math_topology_dependency_graph", {}) or {}).get("research_edge_count", 0) if isinstance(body.get("math_topology_dependency_graph", {}), dict) else 0,
             "top_conflict_collision": (body.get("strategy_matrix", {}) or {}).get("top_conflict_collision", "") if isinstance(body.get("strategy_matrix", {}), dict) else "",
             "top_drift_collision": (body.get("strategy_matrix", {}) or {}).get("top_drift_collision", "") if isinstance(body.get("strategy_matrix", {}), dict) else "",
             "object_relation_review_status": (body.get("object_relation_review", {}) or {}).get("status", "not_recorded") if isinstance(body.get("object_relation_review", {}), dict) else "not_recorded",
@@ -2948,9 +5824,577 @@ class SingularityTelemetryMixin:
             "next_action": gate.get("next_action", "") if isinstance(gate, dict) else "",
         }
 
-    def _event_core_body_report_card(self, audit, gate=None):
+    def _event_public_release_readiness_gate(self, packet, execution_records, gate=None, body=None):
+        gate = gate if isinstance(gate, dict) else {}
+        body = body if isinstance(body, dict) else {}
+        metadata = packet.get("metadata", {}) if isinstance(packet, dict) else {}
+
+        def latest_record(stage_name):
+            for rec in reversed(execution_records or []):
+                if isinstance(rec, dict) and str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        def latest_prefix(prefix):
+            for rec in reversed(execution_records or []):
+                if isinstance(rec, dict) and str(rec.get("stage", "") or "").startswith(prefix):
+                    return rec
+            return {}
+
+        def as_bool(value, default=False):
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return bool(default)
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
+        def issue(reason, evidence=None):
+            out = {"reason": str(reason or "unknown")}
+            if evidence is not None:
+                out["evidence"] = evidence
+            return out
+
+        blockers = []
+        warnings = []
+        research_flags = []
+
+        completion_status = str(gate.get("status", "UNKNOWN") or "UNKNOWN")
+        result_status = str(body.get("result_status", "") or "")
+        final_output_ok = as_bool(gate.get("final_output_ok", False))
+        if completion_status != "PASS":
+            blockers.append(issue("completion_gate_not_pass", {"completion_gate": completion_status}))
+        if result_status and result_status != "VIDEO":
+            blockers.append(issue("result_status_is_not_video", {"result_status": result_status}))
+        if not final_output_ok:
+            blockers.append(issue("final_output_not_confirmed", {"final_output_ok": final_output_ok}))
+
+        input_normalization = latest_record("EventInputNormalization")
+        input_adjustments = latest_record("EventInputNormalizationAdjustments")
+        adjustment_count = 0
+        if isinstance(input_normalization, dict):
+            try:
+                adjustment_count = int(input_normalization.get("adjustment_count", 0) or 0)
+            except Exception:
+                adjustment_count = 0
+        adjustment_reasons = (
+            input_normalization.get("adjustment_reason_histogram", {})
+            if isinstance(input_normalization.get("adjustment_reason_histogram", {}), dict)
+            else {}
+        )
+        if adjustment_count > 0:
+            warnings.append(issue(
+                "input_normalization_adjusted_workflow_values",
+                {
+                    "adjustment_count": adjustment_count,
+                    "adjustment_reason_histogram": adjustment_reasons,
+                    "adjustments_stage_present": bool(input_adjustments),
+                },
+            ))
+
+        prompt_lock = latest_record("EventPromptPurityLock")
+        transcode_apply = latest_record("EventPromptStrategyTranscodeApply")
+        prompt_lock_present = bool(prompt_lock)
+        if not prompt_lock_present:
+            warnings.append(issue("prompt_purity_lock_not_recorded"))
+        else:
+            prompt_purity_lock = as_bool(prompt_lock.get("prompt_purity_lock", False))
+            prompt_text_injection_allowed = as_bool(prompt_lock.get("prompt_text_injection_allowed", True), True)
+            semantic_math_in_prompt_allowed = as_bool(prompt_lock.get("semantic_math_in_prompt_allowed", True), True)
+            if not prompt_purity_lock:
+                blockers.append(issue("prompt_purity_lock_false"))
+            if prompt_text_injection_allowed or semantic_math_in_prompt_allowed:
+                blockers.append(issue(
+                    "prompt_text_or_semantic_math_injection_allowed",
+                    {
+                        "prompt_text_injection_allowed": prompt_text_injection_allowed,
+                        "semantic_math_in_prompt_allowed": semantic_math_in_prompt_allowed,
+                    },
+                ))
+
+        prompt_transcode_mode = str(
+            transcode_apply.get("prompt_transcode_mode")
+            or prompt_lock.get("prompt_transcode_mode")
+            or "REPORT_ONLY"
+        ).upper()
+        if prompt_transcode_mode not in ("REPORT_ONLY", "OFF"):
+            warnings.append(issue(
+                "prompt_semantic_map_mode_enabled",
+                {
+                    "prompt_transcode_mode": prompt_transcode_mode,
+                    "policy": transcode_apply.get("transcode_policy", "") if isinstance(transcode_apply, dict) else "",
+                },
+            ))
+
+        math_summary = latest_record("EventMathControlSummary")
+        math_mode = str(math_summary.get("math_control_mode", "OBSERVE_ONLY") or "OBSERVE_ONLY").upper()
+        active_path = str(math_summary.get("active_generation_math_path", "") or "")
+        active_allowed = as_bool(math_summary.get("strategy_control_surface_active_allowed", False))
+        sampler_trace_mode = str(math_summary.get("sampler_trace_mode", "OFF") or "OFF").upper()
+        safe_public_modes = {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "SELECTED_TAIL_SOURCE_RECONSTRUCTION"}
+        research_modes = {"STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "PRESSURE_PIXEL_REWEIGHTING", "SOURCE_NOISE_FIELD_SHAPING", "MAX_RISK_STRATEGY_RING", "DEEP_STEP_DELTA_CONTROL"}
+        if math_mode == "MAX_RISK_STRATEGY_RING":
+            research_flags.append(issue(
+                "max_risk_strategy_ring_is_explicit_research_only",
+                {"math_control_mode": math_mode, "active_generation_math_path": active_path},
+            ))
+        if math_mode == "DEEP_STEP_DELTA_CONTROL":
+            research_flags.append(issue(
+                "deep_step_delta_control_is_research_only",
+                {"math_control_mode": math_mode, "active_generation_math_path": active_path},
+            ))
+        elif math_mode in research_modes:
+            research_flags.append(issue(
+                "research_math_mode_active",
+                {"math_control_mode": math_mode, "active_generation_math_path": active_path},
+            ))
+        elif math_mode not in safe_public_modes:
+            warnings.append(issue(
+                "unknown_or_unclassified_math_mode",
+                {"math_control_mode": math_mode, "active_generation_math_path": active_path},
+            ))
+        if active_allowed and math_mode not in safe_public_modes:
+            research_flags.append(issue(
+                "active_generation_math_surface_enabled",
+                {"math_control_mode": math_mode, "active_generation_math_path": active_path},
+            ))
+        if sampler_trace_mode not in ("", "OFF"):
+            warnings.append(issue(
+                "sampler_trace_diagnostic_mode_enabled",
+                {
+                    "sampler_trace_mode": sampler_trace_mode,
+                    "sampler_trace_max_steps": math_summary.get("sampler_trace_max_steps", ""),
+                },
+            ))
+
+        public_surface_contract = latest_record("EventPublicSurfaceContract")
+        if public_surface_contract:
+            surface_status = str(public_surface_contract.get("status", "") or "").lower()
+            surface_evidence = {
+                "status": public_surface_contract.get("status", ""),
+                "severity": public_surface_contract.get("severity", ""),
+                "blocker_count": len(public_surface_contract.get("blockers", []) or []),
+                "warning_count": len(public_surface_contract.get("warnings", []) or []),
+                "research_flag_count": len(public_surface_contract.get("research_flags", []) or []),
+                "default_deviation_count": len(public_surface_contract.get("default_deviations", []) or []),
+            }
+            if surface_status == "invalid_public_surface":
+                blockers.append(issue("public_surface_contract_blocked", surface_evidence))
+            elif surface_status == "research_mode":
+                research_flags.append(issue("public_surface_contract_research_mode", surface_evidence))
+            elif surface_status == "public_warning":
+                warnings.append(issue("public_surface_contract_warning", surface_evidence))
+        else:
+            warnings.append(issue("public_surface_contract_not_recorded"))
+
+        public_package_static = latest_record("EventPublicPackageStaticScan")
+        if public_package_static:
+            package_static_status = str(public_package_static.get("status", "") or "").lower()
+            package_static_evidence = {
+                "status": public_package_static.get("status", ""),
+                "severity": public_package_static.get("severity", ""),
+                "package_root": public_package_static.get("package_root", ""),
+                "missing_required_files": public_package_static.get("missing_required_files", []),
+                "missing_required_dirs": public_package_static.get("missing_required_dirs", []),
+                "forbidden_dir_count": public_package_static.get("forbidden_dir_count", 0),
+                "forbidden_file_count": public_package_static.get("forbidden_file_count", 0),
+                "blocker_count": len(public_package_static.get("blockers", []) or []),
+                "warning_count": len(public_package_static.get("warnings", []) or []),
+            }
+            if package_static_status == "public_package_static_blocked":
+                blockers.append(issue("public_package_static_scan_blocked", package_static_evidence))
+            elif package_static_status == "public_package_static_warning":
+                warnings.append(issue("public_package_static_scan_warning", package_static_evidence))
+            elif package_static_status != "public_package_static_clean":
+                warnings.append(issue("public_package_static_scan_unknown_status", package_static_evidence))
+        else:
+            warnings.append(issue("public_package_static_scan_not_recorded"))
+
+        math_topology_ledger = latest_record("EventMathTopologyLedger")
+        if math_topology_ledger:
+            ledger_status = str(math_topology_ledger.get("status", "") or "").lower()
+            ledger_evidence = {
+                "status": math_topology_ledger.get("status", ""),
+                "severity": math_topology_ledger.get("severity", ""),
+                "surface_count": math_topology_ledger.get("surface_count", 0),
+                "present_surface_count": math_topology_ledger.get("present_surface_count", 0),
+                "missing_required_surface_ids": math_topology_ledger.get("missing_required_surface_ids", []),
+                "active_generation_surface_count": math_topology_ledger.get("active_generation_surface_count", 0),
+                "active_generation_surface_ids": math_topology_ledger.get("active_generation_surface_ids", []),
+                "research_surface_count": math_topology_ledger.get("research_surface_count", 0),
+                "research_surface_ids": math_topology_ledger.get("research_surface_ids", []),
+            }
+            if ledger_status == "incomplete_math_topology":
+                warnings.append(issue("math_topology_ledger_incomplete", ledger_evidence))
+            elif int(math_topology_ledger.get("active_generation_surface_count", 0) or 0) > 0:
+                research_flags.append(issue("math_topology_active_generation_surfaces_present", ledger_evidence))
+            elif int(math_topology_ledger.get("research_surface_count", 0) or 0) > 0:
+                warnings.append(issue("math_topology_research_or_diagnostic_surfaces_present", ledger_evidence))
+        else:
+            warnings.append(issue("math_topology_ledger_not_recorded"))
+
+        math_topology_graph = latest_record("EventMathTopologyDependencyGraph")
+        if math_topology_graph:
+            graph_status = str(math_topology_graph.get("status", "") or "").lower()
+            graph_evidence = {
+                "status": math_topology_graph.get("status", ""),
+                "severity": math_topology_graph.get("severity", ""),
+                "node_count": math_topology_graph.get("node_count", 0),
+                "edge_count": math_topology_graph.get("edge_count", 0),
+                "required_missing_edge_ids": math_topology_graph.get("required_missing_edge_ids", []),
+                "active_generation_edge_count": math_topology_graph.get("active_generation_edge_count", 0),
+                "active_generation_edge_ids": math_topology_graph.get("active_generation_edge_ids", []),
+                "research_edge_count": math_topology_graph.get("research_edge_count", 0),
+                "research_edge_ids": math_topology_graph.get("research_edge_ids", []),
+            }
+            if graph_status in ("missing_math_topology_ledger", "incomplete_math_topology_graph"):
+                warnings.append(issue("math_topology_dependency_graph_incomplete", graph_evidence))
+            elif int(math_topology_graph.get("active_generation_edge_count", 0) or 0) > 0:
+                research_flags.append(issue("math_topology_dependency_graph_active_edges_present", graph_evidence))
+            elif int(math_topology_graph.get("research_edge_count", 0) or 0) > 0:
+                warnings.append(issue("math_topology_dependency_graph_research_edges_present", graph_evidence))
+        else:
+            warnings.append(issue("math_topology_dependency_graph_not_recorded"))
+
+        r126_route = latest_prefix("EventR126LowMidWindowSpatialControlRoute_")
+        if r126_route and str(r126_route.get("status", "") or "") == "active":
+            research_flags.append(issue(
+                "r126_low_mid_window_spatial_route_active",
+                {
+                    "stage": r126_route.get("stage", ""),
+                    "route_key": r126_route.get("route_key", ""),
+                    "additional_sampler_calls": r126_route.get("additional_sampler_calls", ""),
+                },
+            ))
+
+        tail_summary = metadata.get("tail_5_formula_summary", {})
+        if not isinstance(tail_summary, dict):
+            tail_summary = metadata.get("tail_3_formula_summary", {})
+        if isinstance(tail_summary, dict):
+            selection_policy = str(tail_summary.get("formula_recommendation_selection_policy", "") or "")
+            if selection_policy.startswith("system_best_for_continuation_when_enabled"):
+                warnings.append(issue(
+                    "formula_tail_recommendation_selected_initial_tail",
+                    {
+                        "initial_selected_tail_index": tail_summary.get("initial_selected_tail_index", ""),
+                        "system_best_for_continuation": tail_summary.get("system_best_for_continuation", ""),
+                    },
+                ))
+
+        if blockers:
+            status = "not_public_ready"
+            severity = "BLOCKED"
+            next_action = "Fix blockers first; do not package this run as public-ready evidence."
+        elif research_flags:
+            status = "research_mode"
+            severity = "RESEARCH"
+            next_action = "Use this run for internal math evidence; package only after a safe-mode comparison passes."
+        elif warnings:
+            status = "public_warning"
+            severity = "WARNING"
+            next_action = "Public route is structurally safe but review warnings and the actual mp4 before release."
+        else:
+            status = "public_ready"
+            severity = "PASS"
+            next_action = "This run is public-safe evidence structurally; still inspect the video for visual quality."
+
+        return {
+            "stage": "EventPublicReleaseReadinessGate",
+            "status": status,
+            "severity": severity,
+            "gate_version": "public_release_readiness_gate_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "formula": "Public readiness reads the whole finalized event route: clean carriers, completion, math mode, and research flags return to one Strategy safety verdict.",
+            "does_not_measure_visual_quality": True,
+            "completion_gate": completion_status,
+            "result_status": result_status,
+            "final_output_ok": final_output_ok,
+            "math_control_mode": math_mode,
+            "active_generation_math_path": active_path,
+            "strategy_control_surface_active_allowed": active_allowed,
+            "prompt_purity_lock_present": prompt_lock_present,
+            "prompt_transcode_mode": prompt_transcode_mode,
+            "input_adjustment_count": adjustment_count,
+            "sampler_trace_mode": sampler_trace_mode,
+            "math_topology_ledger_status": math_topology_ledger.get("status", "not_recorded") if isinstance(math_topology_ledger, dict) else "not_recorded",
+            "math_topology_active_generation_surface_count": math_topology_ledger.get("active_generation_surface_count", 0) if isinstance(math_topology_ledger, dict) else 0,
+            "math_topology_research_surface_count": math_topology_ledger.get("research_surface_count", 0) if isinstance(math_topology_ledger, dict) else 0,
+            "math_topology_graph_status": math_topology_graph.get("status", "not_recorded") if isinstance(math_topology_graph, dict) else "not_recorded",
+            "math_topology_graph_active_generation_edge_count": math_topology_graph.get("active_generation_edge_count", 0) if isinstance(math_topology_graph, dict) else 0,
+            "math_topology_graph_research_edge_count": math_topology_graph.get("research_edge_count", 0) if isinstance(math_topology_graph, dict) else 0,
+            "public_package_static_scan_status": public_package_static.get("status", "not_recorded") if isinstance(public_package_static, dict) else "not_recorded",
+            "public_package_static_scan_severity": public_package_static.get("severity", "") if isinstance(public_package_static, dict) else "",
+            "public_package_static_scan_forbidden_dir_count": public_package_static.get("forbidden_dir_count", 0) if isinstance(public_package_static, dict) else 0,
+            "public_package_static_scan_forbidden_file_count": public_package_static.get("forbidden_file_count", 0) if isinstance(public_package_static, dict) else 0,
+            "blockers": blockers,
+            "warnings": warnings,
+            "research_flags": research_flags,
+            "public_safe_modes": sorted(safe_public_modes),
+            "research_modes": sorted(research_modes),
+            "next_action": next_action,
+        }
+
+    def _event_public_release_candidate_manifest(self, packet, execution_records, saved_report_path="", saved_video_path=""):
+        metadata = packet.get("metadata", {}) if isinstance(packet, dict) else {}
+        program_status = metadata.get("event_program_status", {}) if isinstance(metadata, dict) else {}
+        if not isinstance(program_status, dict):
+            program_status = {}
+
+        def latest_record(stage_name):
+            for rec in reversed(execution_records or []):
+                if isinstance(rec, dict) and str(rec.get("stage", "") or "") == stage_name:
+                    return rec
+            return {}
+
+        def as_bool(value, default=False):
+            if isinstance(value, bool):
+                return value
+            if value is None:
+                return bool(default)
+            if isinstance(value, str):
+                return value.strip().lower() in ("1", "true", "yes", "on")
+            return bool(value)
+
+        def issue(reason, evidence=None):
+            out = {"reason": str(reason or "unknown")}
+            if evidence is not None:
+                out["evidence"] = evidence
+            return out
+
+        gate = latest_record("EventCoreBodyCompletionGate")
+        release_gate = latest_record("EventPublicReleaseReadinessGate")
+        public_surface = latest_record("EventPublicSurfaceContract")
+        public_package_static = latest_record("EventPublicPackageStaticScan")
+        math_ledger = latest_record("EventMathTopologyLedger")
+        math_graph = latest_record("EventMathTopologyDependencyGraph")
+        save_report_record = latest_record("EventSaveReport")
+        sidecars = latest_record("EventRuntimeMonitorSidecars")
+
+        result_status = str(
+            release_gate.get("result_status")
+            or program_status.get("result_status")
+            or metadata.get("result_status")
+            or ""
+        )
+        final_output_ok = as_bool(gate.get("final_output_ok", False))
+        completion_status = str(gate.get("status", "UNKNOWN") or "UNKNOWN")
+        video_path = str(saved_video_path or program_status.get("saved_video_path") or metadata.get("saved_video_path") or "")
+        report_path = str(saved_report_path or save_report_record.get("path", "") or "")
+
+        blockers = []
+        warnings = []
+        research_flags = []
+
+        if str(EVENT_HORIZON_RUNTIME_VERSION).lower().endswith("-dev"):
+            blockers.append(issue(
+                "dev_runtime_version_cannot_be_public_archive",
+                {"runtime_version": EVENT_HORIZON_RUNTIME_VERSION, "runtime_name": EVENT_HORIZON_RUNTIME_NAME},
+            ))
+        if completion_status != "PASS":
+            blockers.append(issue("completion_gate_not_pass", {"completion_gate": completion_status}))
+        if result_status != "VIDEO":
+            blockers.append(issue("result_status_is_not_video", {"result_status": result_status}))
+        if not final_output_ok:
+            blockers.append(issue("final_output_not_confirmed", {"final_output_ok": final_output_ok}))
+        if not video_path:
+            blockers.append(issue("saved_video_path_missing"))
+        elif Path(video_path).is_absolute() and not Path(video_path).exists():
+            warnings.append(issue("saved_video_path_not_found_on_disk", {"saved_video_path": video_path}))
+        if not report_path:
+            blockers.append(issue("saved_report_path_missing"))
+        elif Path(report_path).is_absolute() and not Path(report_path).exists():
+            blockers.append(issue("saved_report_path_not_found_on_disk", {"saved_report_path": report_path}))
+
+        report_status = str(save_report_record.get("status", "not_recorded") or "not_recorded")
+        if report_status != "standard_comfy_output_ok":
+            blockers.append(issue("report_save_not_confirmed", {"event_save_report_status": report_status}))
+        elif not as_bool(save_report_record.get("nonempty", False)):
+            blockers.append(issue("saved_report_empty", {"bytes": save_report_record.get("bytes", "")}))
+
+        release_status = str(release_gate.get("status", "not_recorded") or "not_recorded")
+        if release_status == "not_public_ready":
+            blockers.append(issue("public_release_readiness_blocked", {"status": release_status}))
+        elif release_status == "research_mode":
+            research_flags.append(issue("public_release_readiness_research_mode", {"status": release_status}))
+        elif release_status == "public_warning":
+            warnings.append(issue("public_release_readiness_warning", {"status": release_status}))
+        elif release_status != "public_ready":
+            warnings.append(issue("public_release_readiness_not_recorded_or_unknown", {"status": release_status}))
+
+        public_surface_status = str(public_surface.get("status", "not_recorded") or "not_recorded")
+        if public_surface_status == "invalid_public_surface":
+            blockers.append(issue("public_surface_invalid", {"status": public_surface_status}))
+        elif public_surface_status == "research_mode":
+            research_flags.append(issue("public_surface_research_mode", {"status": public_surface_status}))
+        elif public_surface_status == "public_warning":
+            warnings.append(issue("public_surface_warning", {"status": public_surface_status}))
+        elif public_surface_status not in ("public_safe", "not_recorded"):
+            warnings.append(issue("public_surface_unknown_status", {"status": public_surface_status}))
+
+        package_static_status = str(public_package_static.get("status", "not_recorded") or "not_recorded")
+        if package_static_status == "public_package_static_blocked":
+            blockers.append(issue(
+                "public_package_static_scan_blocked",
+                {
+                    "status": package_static_status,
+                    "package_root": public_package_static.get("package_root", ""),
+                    "missing_required_files": public_package_static.get("missing_required_files", []),
+                    "missing_required_dirs": public_package_static.get("missing_required_dirs", []),
+                    "forbidden_dir_count": public_package_static.get("forbidden_dir_count", 0),
+                    "forbidden_file_count": public_package_static.get("forbidden_file_count", 0),
+                },
+            ))
+        elif package_static_status == "public_package_static_warning":
+            warnings.append(issue(
+                "public_package_static_scan_warning",
+                {
+                    "status": package_static_status,
+                    "package_root": public_package_static.get("package_root", ""),
+                    "warning_count": len(public_package_static.get("warnings", []) or []),
+                },
+            ))
+        elif package_static_status != "public_package_static_clean":
+            warnings.append(issue("public_package_static_scan_not_recorded_or_unknown", {"status": package_static_status}))
+
+        graph_status = str(math_graph.get("status", "not_recorded") or "not_recorded")
+        if graph_status in ("missing_math_topology_ledger", "incomplete_math_topology_graph"):
+            warnings.append(issue("math_dependency_graph_incomplete", {"status": graph_status}))
+        graph_nodes = math_graph.get("nodes", []) if isinstance(math_graph.get("nodes", []), list) else []
+        graph_edges = math_graph.get("edges", []) if isinstance(math_graph.get("edges", []), list) else []
+        graph_node_ids = {
+            str(item.get("node_id", "") or "")
+            for item in graph_nodes
+            if isinstance(item, dict)
+        }
+        graph_edge_ids = {
+            str(item.get("edge_id", "") or "")
+            for item in graph_edges
+            if isinstance(item, dict)
+        }
+        graph_contains_release_manifest = "public_release_candidate_manifest" in graph_node_ids
+        graph_contains_package_verdict = "public_package_verdict" in graph_node_ids
+        graph_contains_manifest_to_package_edge = "release_manifest_to_package_verdict" in graph_edge_ids
+        graph_contains_package_static_scan = "public_package_static_scan" in graph_node_ids
+        graph_contains_package_static_to_manifest_edge = "package_static_scan_to_release_manifest" in graph_edge_ids
+        if math_graph and not graph_contains_package_static_scan:
+            warnings.append(issue(
+                "math_dependency_graph_missing_public_package_static_scan_node",
+                {"required_node_id": "public_package_static_scan"},
+            ))
+        if math_graph and not graph_contains_package_static_to_manifest_edge:
+            warnings.append(issue(
+                "math_dependency_graph_missing_package_static_to_manifest_edge",
+                {"required_edge_id": "package_static_scan_to_release_manifest"},
+            ))
+        if math_graph and not graph_contains_release_manifest:
+            warnings.append(issue(
+                "math_dependency_graph_missing_release_manifest_node",
+                {"required_node_id": "public_release_candidate_manifest"},
+            ))
+        if math_graph and not graph_contains_package_verdict:
+            warnings.append(issue(
+                "math_dependency_graph_missing_public_package_verdict_node",
+                {"required_node_id": "public_package_verdict"},
+            ))
+        if math_graph and not graph_contains_manifest_to_package_edge:
+            warnings.append(issue(
+                "math_dependency_graph_missing_manifest_to_package_edge",
+                {"required_edge_id": "release_manifest_to_package_verdict"},
+            ))
+        if int(math_graph.get("active_generation_edge_count", 0) or 0) > 0:
+            research_flags.append(issue(
+                "math_dependency_graph_has_active_generation_edges",
+                {"active_generation_edge_ids": math_graph.get("active_generation_edge_ids", [])},
+            ))
+        if int(math_ledger.get("active_generation_surface_count", 0) or 0) > 0:
+            research_flags.append(issue(
+                "math_topology_has_active_generation_surfaces",
+                {"active_generation_surface_ids": math_ledger.get("active_generation_surface_ids", [])},
+            ))
+
+        if sidecars:
+            if str(sidecars.get("status", "") or "") != "ok":
+                warnings.append(issue("runtime_monitor_sidecars_not_ok", {"status": sidecars.get("status", "")}))
+        else:
+            warnings.append(issue("runtime_monitor_sidecars_not_recorded"))
+
+        if blockers:
+            status = "not_release_candidate"
+            severity = "BLOCKED"
+            can_package = False
+            next_action = "Do not package this exact run; fix blockers or promote a non-dev release build first."
+        elif research_flags:
+            status = "research_candidate_only"
+            severity = "RESEARCH"
+            can_package = False
+            next_action = "Use as internal math evidence only; create a safe public run before packaging."
+        elif warnings:
+            status = "release_candidate_with_warnings"
+            severity = "WARNING"
+            can_package = True
+            next_action = "Candidate can support release notes after human video review and warning triage."
+        else:
+            status = "release_candidate"
+            severity = "PASS"
+            can_package = True
+            next_action = "Candidate is structurally packageable after human video review."
+
+        return {
+            "stage": "EventPublicReleaseCandidateManifest",
+            "status": status,
+            "severity": severity,
+            "manifest_version": "public_release_candidate_manifest_v1",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "formula": "Public release is a Strategy Return over artifacts: runtime label, VIDEO outcome, saved report, public/research gates, math topology, and human video review must converge before packaging.",
+            "control_mode": "REPORT_ONLY",
+            "does_not_change_generation": True,
+            "does_not_measure_visual_quality": True,
+            "requires_human_video_review": True,
+            "can_package_public_archive": bool(can_package),
+            "completion_gate": completion_status,
+            "result_status": result_status,
+            "final_output_ok": final_output_ok,
+            "saved_video_path": video_path,
+            "saved_report_path": report_path,
+            "event_save_report_status": report_status,
+            "public_release_readiness_status": release_status,
+            "public_surface_contract_status": public_surface_status,
+            "public_package_static_scan_status": package_static_status,
+            "math_topology_ledger_status": math_ledger.get("status", "not_recorded") if isinstance(math_ledger, dict) else "not_recorded",
+            "math_topology_graph_status": graph_status,
+            "math_topology_graph_contains_release_manifest": bool(graph_contains_release_manifest),
+            "math_topology_graph_contains_public_package_verdict": bool(graph_contains_package_verdict),
+            "math_topology_graph_contains_manifest_to_package_edge": bool(graph_contains_manifest_to_package_edge),
+            "math_topology_graph_contains_public_package_static_scan": bool(graph_contains_package_static_scan),
+            "math_topology_graph_contains_package_static_to_manifest_edge": bool(graph_contains_package_static_to_manifest_edge),
+            "math_active_surface_count": math_ledger.get("active_generation_surface_count", 0) if isinstance(math_ledger, dict) else 0,
+            "math_active_edge_count": math_graph.get("active_generation_edge_count", 0) if isinstance(math_graph, dict) else 0,
+            "blockers": blockers,
+            "warnings": warnings,
+            "research_flags": research_flags,
+            "public_package_requirements": [
+                "non-dev runtime version",
+                "VIDEO result",
+                "CompletionGate PASS",
+                "saved nonempty Markdown report",
+                "EventPublicReleaseReadinessGate not research/not_public_ready",
+                "EventMathTopologyDependencyGraph not active research",
+                "human mp4 visual inspection",
+                "English-only public package scan",
+                "zip contents scan with no pycache/internal clutter",
+            ],
+            "next_action": next_action,
+        }
+
+    def _event_core_body_report_card(self, audit, gate=None, public_release_gate=None, math_topology_ledger=None, math_topology_graph=None):
         checks = audit.get("checks", {}) if isinstance(audit, dict) else {}
         gate = gate if isinstance(gate, dict) else {}
+        public_release_gate = public_release_gate if isinstance(public_release_gate, dict) else {}
+        math_topology_ledger = math_topology_ledger if isinstance(math_topology_ledger, dict) else {}
+        math_topology_graph = math_topology_graph if isinstance(math_topology_graph, dict) else {}
         gate_status = gate.get("status", audit.get("status", "unknown") if isinstance(audit, dict) else "unknown")
         return {
             "stage": "EventCoreBodyReportCard",
@@ -2967,6 +6411,34 @@ class SingularityTelemetryMixin:
             "route_complete": gate.get("route_complete", False),
             "final_output_ok": gate.get("final_output_ok", False),
             "blocking_reasons": gate.get("blocking_reasons", []),
+            "public_release_readiness_status": public_release_gate.get("status", "not_recorded"),
+            "public_release_readiness_severity": public_release_gate.get("severity", ""),
+            "public_release_readiness_blockers": public_release_gate.get("blockers", []),
+            "public_release_readiness_warnings": public_release_gate.get("warnings", []),
+            "public_release_readiness_research_flags": public_release_gate.get("research_flags", []),
+            "public_surface_contract_status": (audit.get("public_surface_contract_status", "not_recorded") if isinstance(audit, dict) else "not_recorded"),
+            "public_surface_contract_severity": (audit.get("public_surface_contract_severity", "") if isinstance(audit, dict) else ""),
+            "public_surface_contract_warning_count": (audit.get("public_surface_contract_warning_count", 0) if isinstance(audit, dict) else 0),
+            "public_surface_contract_research_flag_count": (audit.get("public_surface_contract_research_flag_count", 0) if isinstance(audit, dict) else 0),
+            "public_package_static_scan_status": (audit.get("public_package_static_scan_status", "not_recorded") if isinstance(audit, dict) else "not_recorded"),
+            "public_package_static_scan_severity": (audit.get("public_package_static_scan_severity", "") if isinstance(audit, dict) else ""),
+            "public_package_static_scan_forbidden_dir_count": (audit.get("public_package_static_scan_forbidden_dir_count", 0) if isinstance(audit, dict) else 0),
+            "public_package_static_scan_forbidden_file_count": (audit.get("public_package_static_scan_forbidden_file_count", 0) if isinstance(audit, dict) else 0),
+            "math_topology_ledger_status": math_topology_ledger.get("status", "not_recorded"),
+            "math_topology_ledger_severity": math_topology_ledger.get("severity", ""),
+            "math_topology_surface_count": math_topology_ledger.get("surface_count", 0),
+            "math_topology_present_surface_count": math_topology_ledger.get("present_surface_count", 0),
+            "math_topology_active_generation_surface_count": math_topology_ledger.get("active_generation_surface_count", 0),
+            "math_topology_research_surface_count": math_topology_ledger.get("research_surface_count", 0),
+            "math_topology_active_generation_surface_ids": math_topology_ledger.get("active_generation_surface_ids", []),
+            "math_topology_graph_status": math_topology_graph.get("status", "not_recorded"),
+            "math_topology_graph_severity": math_topology_graph.get("severity", ""),
+            "math_topology_graph_node_count": math_topology_graph.get("node_count", 0),
+            "math_topology_graph_edge_count": math_topology_graph.get("edge_count", 0),
+            "math_topology_graph_active_generation_edge_count": math_topology_graph.get("active_generation_edge_count", 0),
+            "math_topology_graph_research_edge_count": math_topology_graph.get("research_edge_count", 0),
+            "math_topology_graph_active_generation_edge_ids": math_topology_graph.get("active_generation_edge_ids", []),
+            "math_topology_graph_research_edge_ids": math_topology_graph.get("research_edge_ids", []),
             "next_action": (
                 "Continue only if EventCoreBodyCompletionGate is PASS on normal and cascade runs."
                 if gate_status == "PASS" else
@@ -3038,6 +6510,58 @@ class SingularityTelemetryMixin:
         body["strategy_matrix"] = strategy_matrix
         body["vector_collision_records"] = vector_collisions
         body["object_relation_review"] = object_relation_review
+
+        def latest_execution_record(stage_name):
+            for rec in reversed(execution_records or []):
+                if isinstance(rec, dict) and str(rec.get("stage", "") or "") == str(stage_name):
+                    return rec
+            return {}
+
+        cascade_seam_impulse_review = latest_execution_record("EventCascadeSeamImpulseReview")
+        body["cascade_seam_impulse_review"] = cascade_seam_impulse_review
+        strategy_matrix["cascade_seam_impulse_status"] = cascade_seam_impulse_review.get("status", "not_recorded") if isinstance(cascade_seam_impulse_review, dict) else "not_recorded"
+        strategy_matrix["cascade_seam_impulse_score"] = cascade_seam_impulse_review.get("seam_impulse_score", "") if isinstance(cascade_seam_impulse_review, dict) else ""
+        strategy_matrix["cascade_seam_vector_score"] = cascade_seam_impulse_review.get("vector_seam_impulse_score", "") if isinstance(cascade_seam_impulse_review, dict) else ""
+        strategy_matrix["cascade_seam_visible_score"] = cascade_seam_impulse_review.get("visible_seam_delta_score", "") if isinstance(cascade_seam_impulse_review, dict) else ""
+        strategy_matrix["cascade_seam_visible_over_median"] = cascade_seam_impulse_review.get("visible_seam_over_median_ratio", "") if isinstance(cascade_seam_impulse_review, dict) else ""
+        strategy_matrix["cascade_seam_impulse_next_surface"] = cascade_seam_impulse_review.get("next_control_surface", "") if isinstance(cascade_seam_impulse_review, dict) else ""
+        tail_next_source_continuity_proposal = latest_execution_record("EventTailNextSourceStrategyContinuityProposal")
+        body["tail_next_source_continuity_proposal"] = tail_next_source_continuity_proposal
+        strategy_matrix["tail_next_source_continuity_status"] = tail_next_source_continuity_proposal.get("status", "not_recorded") if isinstance(tail_next_source_continuity_proposal, dict) else "not_recorded"
+        strategy_matrix["tail_next_source_continuity_pressure"] = tail_next_source_continuity_proposal.get("continuity_pressure_score", "") if isinstance(tail_next_source_continuity_proposal, dict) else ""
+        strategy_matrix["tail_next_source_next_surface"] = tail_next_source_continuity_proposal.get("next_control_surface", "") if isinstance(tail_next_source_continuity_proposal, dict) else ""
+        cascade_seam_phase_classifier = latest_execution_record("EventCascadeSeamPhaseClassifier")
+        body["cascade_seam_phase_classifier"] = cascade_seam_phase_classifier
+        phase_scores = cascade_seam_phase_classifier.get("axis_scores", {}) if isinstance(cascade_seam_phase_classifier, dict) else {}
+        if not isinstance(phase_scores, dict):
+            phase_scores = {}
+        strategy_matrix["cascade_seam_phase_status"] = cascade_seam_phase_classifier.get("status", "not_recorded") if isinstance(cascade_seam_phase_classifier, dict) else "not_recorded"
+        strategy_matrix["cascade_seam_phase_dominant_axis"] = cascade_seam_phase_classifier.get("dominant_axis", "") if isinstance(cascade_seam_phase_classifier, dict) else ""
+        strategy_matrix["cascade_seam_phase_dominant_score"] = cascade_seam_phase_classifier.get("dominant_score", "") if isinstance(cascade_seam_phase_classifier, dict) else ""
+        strategy_matrix["cascade_seam_phase_semantic_score"] = phase_scores.get("semantic_phase_reentry", "")
+        strategy_matrix["cascade_seam_phase_prompt_text_change_score"] = phase_scores.get("prompt_text_change", "")
+        strategy_matrix["cascade_seam_phase_prompt_score"] = phase_scores.get("prompt_phase_reentry", "")
+        strategy_matrix["cascade_seam_phase_latent_score"] = phase_scores.get("latent_carrier_mismatch", "")
+        strategy_matrix["cascade_seam_phase_background_score"] = phase_scores.get("background_anchor_conflict", "")
+        strategy_matrix["cascade_seam_phase_center_score"] = phase_scores.get("center_action_overdrive", "")
+        strategy_matrix["cascade_seam_phase_sampler_score"] = phase_scores.get("sampler_handoff_reset", "")
+        strategy_matrix["cascade_seam_phase_next_surface"] = cascade_seam_phase_classifier.get("next_control_surface", "") if isinstance(cascade_seam_phase_classifier, dict) else ""
+        semantic_phase_schedule_proposal = latest_execution_record("EventCascadeSemanticPhaseScheduleProposal")
+        body["semantic_phase_schedule_proposal"] = semantic_phase_schedule_proposal
+        strategy_matrix["semantic_phase_schedule_status"] = semantic_phase_schedule_proposal.get("status", "not_recorded") if isinstance(semantic_phase_schedule_proposal, dict) else "not_recorded"
+        strategy_matrix["semantic_phase_schedule_score"] = semantic_phase_schedule_proposal.get("semantic_phase_reentry_score", "") if isinstance(semantic_phase_schedule_proposal, dict) else ""
+        strategy_matrix["semantic_phase_schedule_prompt_clean"] = semantic_phase_schedule_proposal.get("prompt_carrier_clean", "") if isinstance(semantic_phase_schedule_proposal, dict) else ""
+        strategy_matrix["semantic_phase_schedule_next_surface"] = semantic_phase_schedule_proposal.get("next_control_surface", "") if isinstance(semantic_phase_schedule_proposal, dict) else ""
+        selected_tail_source_package = latest_execution_record("EventSelectedTailSourceReconstructionPackage")
+        max_risk_strategy_package = latest_execution_record("EventMaxRiskStrategyRingPackage")
+        body["selected_tail_source_reconstruction_package"] = selected_tail_source_package
+        body["max_risk_strategy_ring_package"] = max_risk_strategy_package
+        strategy_matrix["safe_math_package_status"] = selected_tail_source_package.get("status", "not_recorded") if isinstance(selected_tail_source_package, dict) else "not_recorded"
+        strategy_matrix["safe_math_package_rebirth_risk"] = selected_tail_source_package.get("rebirth_risk_score", "") if isinstance(selected_tail_source_package, dict) else ""
+        strategy_matrix["safe_math_package_next_surface"] = selected_tail_source_package.get("next_control_surface", "") if isinstance(selected_tail_source_package, dict) else ""
+        strategy_matrix["max_risk_math_package_status"] = max_risk_strategy_package.get("status", "not_recorded") if isinstance(max_risk_strategy_package, dict) else "not_recorded"
+        strategy_matrix["max_risk_math_package_ring_pressure"] = max_risk_strategy_package.get("strategy_ring_pressure_score", "") if isinstance(max_risk_strategy_package, dict) else ""
+        strategy_matrix["max_risk_math_package_active"] = max_risk_strategy_package.get("active_control_allowed", "") if isinstance(max_risk_strategy_package, dict) else ""
         local_micro_formula_records = []
         for collision in vector_collisions:
             local_formula = collision.get("local_formula") if isinstance(collision, dict) else None
@@ -3102,6 +6626,124 @@ class SingularityTelemetryMixin:
         strategy_matrix["strategy_return_pressure"] = strategy_return_pressure_resolver.get("strategy_return_pressure", "")
         strategy_matrix["strategy_return_primary_attribution"] = strategy_return_pressure_resolver.get("primary_attribution", "")
         strategy_matrix["strategy_return_next_control_surface"] = strategy_return_pressure_resolver.get("next_control_surface", "")
+        visible_motion_strategy_return_gate = self._event_visible_motion_strategy_return_gate(
+            strategy_return_pressure_resolver=strategy_return_pressure_resolver,
+            relation_pressure_cards=relation_pressure_cards,
+            object_relation_review=object_relation_review,
+            topology_strategy_return_map=topology_strategy_return_map,
+        )
+        body["visible_motion_strategy_return_gate"] = visible_motion_strategy_return_gate
+        strategy_matrix["visible_motion_strategy_return_status"] = visible_motion_strategy_return_gate.get("status", "")
+        strategy_matrix["visible_motion_next_control_surface"] = visible_motion_strategy_return_gate.get("next_control_surface", "")
+        strategy_matrix["visible_motion_active_control_allowed_next"] = visible_motion_strategy_return_gate.get("visible_motion_active_control_allowed_next", False)
+        true_region_topology_evidence = self._event_true_region_topology_evidence(
+            visible_motion_strategy_return_gate=visible_motion_strategy_return_gate,
+            strategy_return_pressure_resolver=strategy_return_pressure_resolver,
+            relation_pressure_cards=relation_pressure_cards,
+            object_relation_review=object_relation_review,
+            topology_strategy_return_map=topology_strategy_return_map,
+        )
+        body["true_region_topology_evidence"] = true_region_topology_evidence
+        strategy_matrix["true_region_topology_status"] = true_region_topology_evidence.get("status", "")
+        strategy_matrix["true_region_readiness_score"] = true_region_topology_evidence.get("region_readiness_score", "")
+        strategy_matrix["true_region_next_control_surface"] = true_region_topology_evidence.get("next_control_surface", "")
+        strategy_matrix["true_region_active_control_allowed_next"] = true_region_topology_evidence.get("true_region_active_control_allowed_next", False)
+        fractal_strategy_intersection_map = self._event_fractal_strategy_intersection_map(
+            execution_records=execution_records,
+            topology_strategy_return_map=topology_strategy_return_map,
+            strategy_return_pressure_resolver=strategy_return_pressure_resolver,
+            visible_motion_strategy_return_gate=visible_motion_strategy_return_gate,
+            true_region_topology_evidence=true_region_topology_evidence,
+            relation_pressure_cards=relation_pressure_cards,
+            vector_collisions=vector_collisions,
+            object_relation_review=object_relation_review,
+            depth=7,
+        )
+        body["fractal_strategy_intersection_map"] = fractal_strategy_intersection_map
+        strategy_matrix["fractal_strategy_intersection_status"] = fractal_strategy_intersection_map.get("status", "")
+        strategy_matrix["fractal_strategy_intersection_depth"] = fractal_strategy_intersection_map.get("fractal_depth", "")
+        strategy_matrix["fractal_strategy_alignment_score"] = fractal_strategy_intersection_map.get("final_layer_alignment_score", "")
+        strategy_matrix["fractal_strategy_next_control_surface"] = fractal_strategy_intersection_map.get("next_control_surface", "")
+        region_weighted_fractal_strategy_return = self._event_region_weighted_fractal_strategy_return(
+            fractal_strategy_intersection_map=fractal_strategy_intersection_map,
+            true_region_topology_evidence=true_region_topology_evidence,
+            visible_motion_strategy_return_gate=visible_motion_strategy_return_gate,
+            strategy_return_pressure_resolver=strategy_return_pressure_resolver,
+            object_relation_review=object_relation_review,
+        )
+        body["region_weighted_fractal_strategy_return"] = region_weighted_fractal_strategy_return
+        strategy_matrix["region_weighted_fractal_status"] = region_weighted_fractal_strategy_return.get("status", "")
+        strategy_matrix["region_axis_confidence"] = region_weighted_fractal_strategy_return.get("region_axis_confidence", "")
+        strategy_matrix["dominant_axis_evidence_match"] = region_weighted_fractal_strategy_return.get("dominant_axis_evidence_match", False)
+        strategy_matrix["background_overweight_guard"] = region_weighted_fractal_strategy_return.get("background_overweight_guard", False)
+        strategy_matrix["region_weighted_fractal_next_control_surface"] = region_weighted_fractal_strategy_return.get("next_control_surface", "")
+        pixel_region_motion_map = self._select_primary_pixel_region_motion_map(execution_records)
+        body["pixel_region_motion_map"] = pixel_region_motion_map
+        strategy_matrix["pixel_region_motion_status"] = pixel_region_motion_map.get("status", "not_recorded") if isinstance(pixel_region_motion_map, dict) else "not_recorded"
+        strategy_matrix["pixel_center_edge_ratio"] = pixel_region_motion_map.get("center_edge_pixel_ratio", "") if isinstance(pixel_region_motion_map, dict) else ""
+        strategy_matrix["pixel_edge_center_ratio"] = pixel_region_motion_map.get("edge_center_pixel_ratio", "") if isinstance(pixel_region_motion_map, dict) else ""
+        strategy_matrix["pixel_estimated_seam_ratio"] = pixel_region_motion_map.get("estimated_seam_ratio", "") if isinstance(pixel_region_motion_map, dict) else ""
+        strategy_matrix["pixel_background_leakage_score"] = pixel_region_motion_map.get("background_pixel_leakage_score", "") if isinstance(pixel_region_motion_map, dict) else ""
+        strategy_matrix["pixel_region_next_control_surface"] = pixel_region_motion_map.get("next_control_surface", "") if isinstance(pixel_region_motion_map, dict) else ""
+        pixel_region_motion_selection = {
+            "stage": "EventPixelRegionMotionMapSelection",
+            "status": "selected_primary_visible_outcome" if pixel_region_motion_map else "not_recorded",
+            "severity": "INFO" if pixel_region_motion_map else "WARNING",
+            "runtime_version": EVENT_HORIZON_RUNTIME_VERSION,
+            "runtime_name": EVENT_HORIZON_RUNTIME_NAME,
+            "selected_source_stage": str(pixel_region_motion_map.get("source_stage", "") if isinstance(pixel_region_motion_map, dict) else ""),
+            "selected_status": str(pixel_region_motion_map.get("status", "") if isinstance(pixel_region_motion_map, dict) else ""),
+            "selection_reason": str(pixel_region_motion_map.get("selection_reason", "") if isinstance(pixel_region_motion_map, dict) else ""),
+            "available_pixel_region_map_count": int(pixel_region_motion_map.get("available_pixel_region_map_count", 0) if isinstance(pixel_region_motion_map, dict) else 0),
+            "center_edge_pixel_ratio": pixel_region_motion_map.get("center_edge_pixel_ratio", "") if isinstance(pixel_region_motion_map, dict) else "",
+            "edge_center_pixel_ratio": pixel_region_motion_map.get("edge_center_pixel_ratio", "") if isinstance(pixel_region_motion_map, dict) else "",
+            "estimated_seam_ratio": pixel_region_motion_map.get("estimated_seam_ratio", "") if isinstance(pixel_region_motion_map, dict) else "",
+            "background_pixel_leakage_score": pixel_region_motion_map.get("background_pixel_leakage_score", "") if isinstance(pixel_region_motion_map, dict) else "",
+            "control_mode": "REPORT_ONLY",
+            "active_control_allowed": False,
+            "same_run_control_allowed": False,
+            "formula": "The primary pixel-region record must represent the visible video Outcome, not an auxiliary tail preview record.",
+        }
+        body["pixel_region_motion_map_selection"] = pixel_region_motion_selection
+        action_background_separation_evidence = self._event_action_background_separation_evidence(
+            region_weighted_fractal_strategy_return=region_weighted_fractal_strategy_return,
+            true_region_topology_evidence=true_region_topology_evidence,
+            visible_motion_strategy_return_gate=visible_motion_strategy_return_gate,
+            strategy_return_pressure_resolver=strategy_return_pressure_resolver,
+            object_relation_review=object_relation_review,
+            pixel_region_motion_map=pixel_region_motion_map,
+        )
+        body["action_background_separation_evidence"] = action_background_separation_evidence
+        strategy_matrix["action_background_separation_status"] = action_background_separation_evidence.get("status", "")
+        strategy_matrix["action_background_separation_confidence"] = action_background_separation_evidence.get("separation_confidence", "")
+        strategy_matrix["action_background_next_control_surface"] = action_background_separation_evidence.get("next_control_surface", "")
+        pixel_pressure_disagreement_review = self._event_pixel_pressure_disagreement_review(
+            pixel_region_motion_map=pixel_region_motion_map,
+            action_background_separation_evidence=action_background_separation_evidence,
+            region_weighted_fractal_strategy_return=region_weighted_fractal_strategy_return,
+            true_region_topology_evidence=true_region_topology_evidence,
+            visible_motion_strategy_return_gate=visible_motion_strategy_return_gate,
+        )
+        body["pixel_pressure_disagreement_review"] = pixel_pressure_disagreement_review
+        strategy_matrix["pixel_pressure_disagreement_status"] = pixel_pressure_disagreement_review.get("status", "")
+        strategy_matrix["pixel_pressure_scalar_overweight_score"] = pixel_pressure_disagreement_review.get("scalar_pressure_overweight_score", "")
+        strategy_matrix["pixel_pressure_corrected_background_leakage_score"] = pixel_pressure_disagreement_review.get("corrected_background_leakage_score", "")
+        strategy_matrix["pixel_pressure_corrected_action_center_confidence"] = pixel_pressure_disagreement_review.get("corrected_action_center_confidence", "")
+        strategy_matrix["pixel_pressure_recommended_axis"] = pixel_pressure_disagreement_review.get("recommended_axis", "")
+        strategy_matrix["pixel_pressure_next_control_surface"] = pixel_pressure_disagreement_review.get("next_control_surface", "")
+        pressure_pixel_reweighting_proposal = self._event_pressure_pixel_reweighting_proposal(
+            pixel_pressure_disagreement_review=pixel_pressure_disagreement_review,
+            pixel_region_motion_map=pixel_region_motion_map,
+            action_background_separation_evidence=action_background_separation_evidence,
+            region_weighted_fractal_strategy_return=region_weighted_fractal_strategy_return,
+        )
+        body["pressure_pixel_reweighting_proposal"] = pressure_pixel_reweighting_proposal
+        strategy_matrix["pressure_pixel_reweighting_status"] = pressure_pixel_reweighting_proposal.get("status", "")
+        strategy_matrix["pressure_pixel_outcome_trust_weight"] = pressure_pixel_reweighting_proposal.get("pixel_outcome_trust_weight", "")
+        strategy_matrix["pressure_pixel_scalar_trust_weight"] = pressure_pixel_reweighting_proposal.get("scalar_pressure_trust_weight", "")
+        strategy_matrix["pressure_pixel_background_factor"] = pressure_pixel_reweighting_proposal.get("bounded_background_pressure_factor", "")
+        strategy_matrix["pressure_pixel_action_factor"] = pressure_pixel_reweighting_proposal.get("action_preservation_factor", "")
+        strategy_matrix["pressure_pixel_next_control_surface"] = pressure_pixel_reweighting_proposal.get("next_control_surface", "")
         execution_records.append(object_relation_review)
         execution_records.extend(vector_collisions)
         execution_records.extend(local_micro_formula_records)
@@ -3109,7 +6751,21 @@ class SingularityTelemetryMixin:
         execution_records.extend(relation_pressure_cards)
         execution_records.append(topology_strategy_return_map)
         execution_records.append(strategy_return_pressure_resolver)
+        execution_records.append(visible_motion_strategy_return_gate)
+        execution_records.append(true_region_topology_evidence)
+        execution_records.append(fractal_strategy_intersection_map)
+        execution_records.append(region_weighted_fractal_strategy_return)
+        execution_records.append(pixel_region_motion_selection)
+        execution_records.append(action_background_separation_evidence)
+        execution_records.append(pixel_pressure_disagreement_review)
+        execution_records.append(pressure_pixel_reweighting_proposal)
         execution_records.append(strategy_matrix)
+        math_topology_ledger = self._event_math_topology_ledger_from_records(execution_records)
+        body["math_topology_ledger"] = math_topology_ledger
+        execution_records.append(math_topology_ledger)
+        math_topology_graph = self._event_math_topology_dependency_graph(math_topology_ledger)
+        body["math_topology_dependency_graph"] = math_topology_graph
+        execution_records.append(math_topology_graph)
         if body.get("runtime_monitor_summary"):
             execution_records.append({
                 "stage": "EventRuntimeMonitorSummary",
@@ -3117,10 +6773,24 @@ class SingularityTelemetryMixin:
                 **body.get("runtime_monitor_summary", {}),
                 "formula": "Runtime timing and memory are observer-only ObservedBehavior extensions.",
             })
+        public_release_gate = self._event_public_release_readiness_gate(
+            packet,
+            execution_records,
+            gate=gate,
+            body=body,
+        )
+        body["public_release_readiness_gate"] = public_release_gate
+        execution_records.append(public_release_gate)
         summary = self._event_core_body_summary_record(audit, order_audit, gate, body=body)
         body["summary"] = summary
         execution_records.append(summary)
-        execution_records.append(self._event_core_body_report_card(audit, gate))
+        execution_records.append(self._event_core_body_report_card(
+            audit,
+            gate,
+            public_release_gate=public_release_gate,
+            math_topology_ledger=math_topology_ledger,
+            math_topology_graph=math_topology_graph,
+        ))
         execution_records.append({
             "stage": "EventCoreBodyFinalize",
             "status": "recorded",

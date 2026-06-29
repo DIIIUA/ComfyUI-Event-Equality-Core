@@ -102,9 +102,9 @@ from .utils.tensor_stats import compute_tensor_delta, extract_latent_samples, sa
 from .utils.frozen_helpers import build_input_signatures, build_passthrough_status, score_observability, collect_shared_targets, now_run_id
 from .adapters.wan.wan_adapter import apply_wan_adapter
 
-EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r113"
-EVENT_HORIZON_RUNTIME_NAME = "Singularity R113 Widget Order Hotfix"
-EVENT_HORIZON_BODY_VERSION = "0.1-r113"
+EVENT_HORIZON_RUNTIME_VERSION = "0.1.1-r178"
+EVENT_HORIZON_RUNTIME_NAME = "Singularity R178 Tail 5 Continuation Gate"
+EVENT_HORIZON_BODY_VERSION = "0.1-R178"
 
 
 def _event_horizon_release_label(version):
@@ -123,7 +123,11 @@ _PROMPT_TRANSCODE_MODE_OPTIONS = [
     "REPORT_ONLY",
     "TRANSFORM_PROMPT",
 ]
-_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS = _PROMPT_TRANSCODE_MODE_OPTIONS
+_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS = [
+    "Report Only",
+    "Transform Prompt",
+    *_PROMPT_TRANSCODE_MODE_OPTIONS,
+]
 _PROMPT_TRANSCODE_MODE_ALIASES = {
     0: "REPORT_ONLY",
     1: "TRANSFORM_PROMPT",
@@ -132,7 +136,9 @@ _PROMPT_TRANSCODE_MODE_ALIASES = {
     "1": "TRANSFORM_PROMPT",
     "2": "TRANSFORM_PROMPT",
     "REPORT_ONLY": "REPORT_ONLY",
+    "Report Only": "REPORT_ONLY",
     "TRANSFORM_PROMPT": "TRANSFORM_PROMPT",
+    "Transform Prompt": "TRANSFORM_PROMPT",
     "TRANSFORM_STRUCTURED_PROMPT": "TRANSFORM_PROMPT",
     "APPEND_TRANSCODE": "TRANSFORM_PROMPT",
     "APPEND_STRUCTURED_TRANSCODE": "TRANSFORM_PROMPT",
@@ -142,6 +148,11 @@ _PROMPT_TRANSCODE_MODE_ALIASES = {
     "append_transcode": "TRANSFORM_PROMPT",
     "append_structured_transcode": "TRANSFORM_PROMPT",
 }
+
+
+def _event_enum_key(value):
+    text = str(value if value is not None else "").strip()
+    return re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_").upper()
 
 
 def _normalize_prompt_transcode_mode_value(value, default="REPORT_ONLY"):
@@ -155,6 +166,9 @@ def _normalize_prompt_transcode_mode_value(value, default="REPORT_ONLY"):
     upper = text.upper()
     if upper in _PROMPT_TRANSCODE_MODE_ALIASES:
         return _PROMPT_TRANSCODE_MODE_ALIASES[upper]
+    key = _event_enum_key(text)
+    if key in _PROMPT_TRANSCODE_MODE_ALIASES:
+        return _PROMPT_TRANSCODE_MODE_ALIASES[key]
     return str(default)
 
 
@@ -187,6 +201,24 @@ def _event_json_safe(value, depth=0):
     if isinstance(value, (list, tuple)):
         return [_event_json_safe(v, depth + 1) for v in value]
     return str(value)
+
+
+def _event_finite_float(value, default=0.0):
+    try:
+        out = float(value)
+    except Exception:
+        return float(default)
+    return out if math.isfinite(out) else float(default)
+
+
+def _event_finite_int(value, default=0):
+    try:
+        out = float(value)
+    except Exception:
+        return int(default)
+    if not math.isfinite(out):
+        return int(default)
+    return int(out)
 
 
 
@@ -2683,48 +2715,65 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 "primary_model": ("MODEL",),
                 "clip": ("CLIP",),
                 "vae": ("VAE",),
-                "source_image_file": (_event_core_list_input_images(), {"image_upload": True, "default": "none"}),
+                "source_image_file": (_event_core_list_input_images(), {"image_upload": True, "default": "none", "tooltip": "Reference image used as the source state for the cascade."}),
 
-                "positive_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False}),
-                "negative_prompt": ("STRING", {"default": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走", "multiline": True, "height": 180, "dynamicPrompts": False}),
-                "temporal_texture_lock": ("BOOLEAN", {"default": False}),
+                "positive_prompt": ("STRING", {"default": "", "multiline": True, "height": 180, "dynamicPrompts": False, "tooltip": "Clean model-facing strategy text. Math records must not inject extra prompt prose here."}),
+                "negative_prompt": ("STRING", {"default": "色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走", "multiline": True, "height": 180, "dynamicPrompts": False, "tooltip": "Negative prompt passed to the Wan conditioning route."}),
+                "temporal_texture_lock": ("BOOLEAN", {"default": False, "advanced": True, "tooltip": "Experimental continuity guard for temporal texture drift. Keep off for baseline comparisons."}),
 
-                                "cascade_count": ("INT", {"default": 2, "min": 1, "max": 5}),
-                "pause_after_cascade_1": ("BOOLEAN", {"default": True}),
-                "pause_after_cascade_2": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_3": ("BOOLEAN", {"default": False}),
-                "pause_after_cascade_4": ("BOOLEAN", {"default": False}),
-                "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096}),
-                "width": ("INT", {"default": 704, "min": 16, "max": 8192, "step": 8}),
-                "height": ("INT", {"default": 1280, "min": 16, "max": 8192, "step": 8}),
-                "fps": ("INT", {"default": 16, "min": 1, "max": 240}),
-                "seed": ("INT", {"default": 123, "min": 0, "max": 0xffffffffffffffff}),
+                "cascade_count": ("INT", {"default": 2, "min": 1, "max": 5, "tooltip": "How many video segments to generate and stitch."}),
+                "pause_after_cascade_1": ("BOOLEAN", {"default": True, "tooltip": "Pause after segment 1 and show the Tail 5 frame picker."}),
+                "pause_after_cascade_2": ("BOOLEAN", {"default": False, "tooltip": "Pause after segment 2 and show the Tail 5 frame picker."}),
+                "pause_after_cascade_3": ("BOOLEAN", {"default": False, "tooltip": "Pause after segment 3 and show the Tail 5 frame picker."}),
+                "pause_after_cascade_4": ("BOOLEAN", {"default": False, "tooltip": "Pause after segment 4 and show the Tail 5 frame picker."}),
+                "frames_per_cascade": ("INT", {"default": 49, "min": 1, "max": 4096, "tooltip": "Frames generated per cascade segment."}),
+                "width": ("INT", {"default": 704, "min": 16, "max": 8192, "step": 8, "tooltip": "Output width in pixels. Values align to multiples of 8."}),
+                "height": ("INT", {"default": 1280, "min": 16, "max": 8192, "step": 8, "tooltip": "Output height in pixels. Values align to multiples of 8."}),
+                "fps": ("INT", {"default": 16, "min": 1, "max": 240, "tooltip": "Saved video frame rate."}),
+                "seed": ("INT", {"default": 123, "min": 0, "max": 0xffffffffffffffff, "tooltip": "Seed used for repeatable fixed-seed comparisons."}),
 
-                "sampler_name": ("STRING", {"default": "euler"}),
-                "scheduler": ("STRING", {"default": "simple"}),
-                "global_steps": ("INT", {"default": 4, "min": 0, "max": 10000}),
-                "primary_cfg": ("FLOAT", {"default": 1.0, "min": -1000.0, "max": 1000.0, "step": 0.01}),
-                "secondary_cfg": ("FLOAT", {"default": 1.0, "min": -1000.0, "max": 1000.0, "step": 0.01}),
-                "primary_start_step": ("INT", {"default": 0, "min": 0, "max": 10000}),
-                "primary_end_step": ("INT", {"default": 1, "min": 0, "max": 10000}),
-                "secondary_start_step": ("INT", {"default": 1, "min": 0, "max": 10000}),
-                "secondary_end_step": ("INT", {"default": 4, "min": 0, "max": 10000}),
+                "sampler_name": ("STRING", {"default": "euler", "tooltip": "Sampler name passed to the internal high/low sampling windows."}),
+                "scheduler": ("STRING", {"default": "simple", "tooltip": "Scheduler name passed to the internal high/low sampling windows."}),
+                "global_steps": ("INT", {"default": 4, "min": 0, "max": 10000, "tooltip": "Total sampler step count for the high/low windows."}),
+                "primary_cfg": ("FLOAT", {"default": 1.0, "min": -1000.0, "max": 1000.0, "step": 0.01, "tooltip": "CFG used for the high/noise stage."}),
+                "secondary_cfg": ("FLOAT", {"default": 1.0, "min": -1000.0, "max": 1000.0, "step": 0.01, "tooltip": "CFG used for the low/refinement stage."}),
+                "primary_start_step": ("INT", {"default": 0, "min": 0, "max": 10000, "advanced": True, "tooltip": "High/noise stage start step."}),
+                "primary_end_step": ("INT", {"default": 1, "min": 0, "max": 10000, "advanced": True, "tooltip": "High/noise stage end step."}),
+                "secondary_start_step": ("INT", {"default": 1, "min": 0, "max": 10000, "advanced": True, "tooltip": "Low/refinement stage start step."}),
+                "secondary_end_step": ("INT", {"default": 4, "min": 0, "max": 10000, "advanced": True, "tooltip": "Low/refinement stage end step."}),
 
                 # Keep combo UX, but include lowercase legacy tokens so stale workflows do not hard-fail before normalization.
                 "math_control_mode": ([
+                    "Observe Only",
+                    "Latent Delta Scale",
+                    "Strategy Pressure Window",
+                    "Latent Memory Bridge",
+                    "Pressure Pixel Reweighting",
+                    "Tail Source Reconstruction",
+                    "Source Noise Field Shaping",
+                    "Max Risk Strategy Ring",
+                    "Deep Step Delta Control",
                     "OBSERVE_ONLY",
                     "LATENT_DELTA_SCALE",
                     "STRATEGY_PRESSURE_WINDOW",
                     "LATENT_MEMORY_BRIDGE",
+                    "PRESSURE_PIXEL_REWEIGHTING",
+                    "SELECTED_TAIL_SOURCE_RECONSTRUCTION",
+                    "SOURCE_NOISE_FIELD_SHAPING",
+                    "MAX_RISK_STRATEGY_RING",
                     "DEEP_STEP_DELTA_CONTROL",
                     "observe_only",
                     "latent_delta_scale",
                     "strategy_pressure_window",
                     "latent_memory_bridge",
+                    "pressure_pixel_reweighting",
+                    "selected_tail_source_reconstruction",
+                    "source_noise_field_shaping",
+                    "max_risk_strategy_ring",
                     "deep_step_delta_control",
-                ], {"default": "OBSERVE_ONLY"}),
-                "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.00001, "round": 0.000001}),
-                "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.00001, "round": 0.000001}),
+                ], {"default": "Observe Only", "tooltip": "Main math surface. Observe Only records evidence; active modes apply bounded numeric control."}),
+                "high_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.00001, "round": 0.000001, "tooltip": "High/noise stage delta multiplier. 1.0 is neutral."}),
+                "low_delta_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.00001, "round": 0.000001, "tooltip": "Low/refinement stage delta multiplier. 1.0 is neutral."}),
                 "strategy_field_mode": ([
                     "OFF",
                     "REPORT_ONLY",
@@ -2736,27 +2785,27 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                     "high_noise_field",
                     "low_refinement_field",
                     "dual_field",
-                ], {"default": "OFF"}),
+                ], {"default": "OFF", "advanced": True, "tooltip": "Research StrategyField router. Keep off unless testing semantic pressure surfaces."}),
 
-                "decode_tile_size": ("INT", {"default": 512, "min": 64, "max": 8192, "step": 8}),
+                "decode_tile_size": ("INT", {"default": 512, "min": 64, "max": 8192, "step": 8, "tooltip": "VAE decode tile size."}),
                 # Allow wider transport range; runtime normalization will clamp to safe decode constraints.
-                "decode_overlap": ("INT", {"default": 64, "min": 0, "max": 65535, "step": 8}),
-                "decode_temporal_size": ("INT", {"default": 32, "min": 1, "max": 4096}),
-                "decode_temporal_overlap": ("INT", {"default": 12, "min": 0, "max": 65535}),
+                "decode_overlap": ("INT", {"default": 64, "min": 0, "max": 65535, "step": 8, "tooltip": "VAE spatial overlap; runtime clamps impossible values."}),
+                "decode_temporal_size": ("INT", {"default": 32, "min": 1, "max": 4096, "advanced": True, "tooltip": "Frames decoded per temporal VAE tile."}),
+                "decode_temporal_overlap": ("INT", {"default": 12, "min": 0, "max": 65535, "advanced": True, "tooltip": "Temporal overlap for video VAE decode."}),
 
-                "image_upscale_method": (["nearest-exact", "nearest", "bilinear", "area", "bicubic", "lanczos"], {"default": "nearest-exact"}),
-                "image_crop": (["wan_native", "disabled", "center"], {"default": "wan_native"}),
+                "image_upscale_method": (["nearest-exact", "nearest", "bilinear", "area", "bicubic", "lanczos"], {"default": "nearest-exact", "tooltip": "Resize method for source image preparation."}),
+                "image_crop": (["wan_native", "disabled", "center"], {"default": "wan_native", "tooltip": "How the source image is fitted to the Wan frame size."}),
 
-                "save_video": ("BOOLEAN", {"default": True}),
-                "video_format": (["video/h264-mp4", "video/h265-mp4", "image/webp", "image/gif"], {"default": "video/h264-mp4"}),
-                "save_report": ("BOOLEAN", {"default": True}),
-                "save_prefix": ("STRING", {"default": "Singularity"}),
-                "sampler_trace_mode": (["OFF", "SHADOW_STEP_TRACE"], {"default": "OFF"}),
-                "sampler_trace_max_steps": ("INT", {"default": 64, "min": 1, "max": 65535}),
+                "save_video": ("BOOLEAN", {"default": True, "tooltip": "Save the stitched cascade video."}),
+                "video_format": (["video/h264-mp4", "video/h265-mp4", "image/webp", "image/gif"], {"default": "video/h264-mp4", "tooltip": "Output format for saved video/animation."}),
+                "save_report": ("BOOLEAN", {"default": True, "tooltip": "Save the Markdown report with runtime evidence."}),
+                "save_prefix": ("STRING", {"default": "Singularity", "tooltip": "Filename prefix for saved outputs."}),
+                "sampler_trace_mode": (["OFF", "SHADOW_STEP_TRACE"], {"default": "OFF", "advanced": True, "tooltip": "Optional sampler shadow trace diagnostics."}),
+                "sampler_trace_max_steps": ("INT", {"default": 64, "min": 1, "max": 65535, "advanced": True, "tooltip": "Maximum sampler steps recorded by shadow trace."}),
 
                 # Tail frame selection UI layer control (always manual green outline primary)
-                "use_formula_recommendation": ("BOOLEAN", {"default": False}),
-                "prompt_transcode_mode": (_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS, {"default": "REPORT_ONLY"}),
+                "use_formula_recommendation": ("BOOLEAN", {"default": False, "tooltip": "Show formula frame suggestion in Tail 5; manual green selection remains primary."}),
+                "prompt_transcode_mode": (_PROMPT_TRANSCODE_MODE_INPUT_OPTIONS, {"default": "Report Only", "advanced": True, "tooltip": "Prompt strategy transform. Transform Prompt builds a semantic map without adding extra prose to the prompt."}),
                 "auto_calibration_mode": ([
                     "OFF",
                     "REPORT_ONLY",
@@ -2764,16 +2813,16 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                     "off",
                     "report_only",
                     "auto_apply",
-                ], {"default": "OFF"}),
+                ], {"default": "OFF", "advanced": True, "tooltip": "Research auto-calibration proposal/apply mode. Keep off for public-safe baseline."}),
 
                 # Research controls for LATENT_MEMORY_BRIDGE. They are declared
-                # at the end to preserve saved workflow widget order. R113 keeps
+                # at the end to preserve saved workflow widget order. Singularity keeps
                 # node.widgets in backend order because ComfyUI serializes widget
                 # values positionally.
-                "bridge_wan_alpha": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 0.50, "step": 0.001, "round": 0.000001}),
-                "bridge_concat_alpha": ("FLOAT", {"default": 0.06, "min": 0.0, "max": 0.50, "step": 0.001, "round": 0.000001}),
-                "bridge_wan_max_step": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 2.0, "step": 0.001, "round": 0.000001}),
-                "bridge_concat_max_step": ("FLOAT", {"default": 0.28, "min": 0.0, "max": 2.0, "step": 0.001, "round": 0.000001}),
+                "bridge_wan_alpha": ("FLOAT", {"default": 0.10, "min": 0.0, "max": 0.50, "step": 0.001, "round": 0.000001, "advanced": True, "tooltip": "Internal latent memory bridge alpha for Wan latent path."}),
+                "bridge_concat_alpha": ("FLOAT", {"default": 0.06, "min": 0.0, "max": 0.50, "step": 0.001, "round": 0.000001, "advanced": True, "tooltip": "Internal latent memory bridge alpha for concat/source path."}),
+                "bridge_wan_max_step": ("FLOAT", {"default": 0.45, "min": 0.0, "max": 2.0, "step": 0.001, "round": 0.000001, "advanced": True, "tooltip": "Maximum Wan latent bridge step size."}),
+                "bridge_concat_max_step": ("FLOAT", {"default": 0.28, "min": 0.0, "max": 2.0, "step": 0.001, "round": 0.000001, "advanced": True, "tooltip": "Maximum concat/source bridge step size."}),
             },
             "optional": {
                 "secondary_model": ("MODEL",),
@@ -2916,11 +2965,22 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
 
         def clamp_int(field, value, default, min_value, max_value):
             original = value
+            used_fallback = False
             try:
-                out = int(value)
+                raw = float(value)
+                if not math.isfinite(raw):
+                    raise ValueError("non-finite integer input")
+                out = int(raw)
             except Exception:
                 out = int(default)
-                self._append_input_adjustment(adjustments, field, original, out, "invalid_int_fallback")
+                used_fallback = True
+                self._append_input_adjustment(adjustments, field, original, out, "invalid_or_nonfinite_int_fallback")
+            if not used_fallback:
+                try:
+                    if str(original).strip() != str(out) and float(original) != float(out):
+                        self._append_input_adjustment(adjustments, field, original, out, "fractional_int_truncated")
+                except Exception:
+                    pass
             clamped = max(int(min_value), min(int(max_value), int(out)))
             if clamped != out:
                 self._append_input_adjustment(adjustments, field, out, clamped, f"clamped_to_{min_value}_{max_value}")
@@ -2930,9 +2990,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             original = value
             try:
                 out = float(value)
+                if not math.isfinite(out):
+                    raise ValueError("non-finite float input")
             except Exception:
                 out = float(default)
-                self._append_input_adjustment(adjustments, field, original, out, "invalid_float_fallback")
+                self._append_input_adjustment(adjustments, field, original, out, "invalid_or_nonfinite_float_fallback")
             clamped = max(float(min_value), min(float(max_value), float(out)))
             if digits is not None:
                 rounded = round(clamped, int(digits))
@@ -2947,8 +3009,11 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             original = value
             text = str(value if value is not None else default_value)
             if casefold:
-                text_cmp = text.upper()
-                allowed_cmp = {str(v).upper(): str(v) for v in allowed_values}
+                text_cmp = _event_enum_key(text)
+                text_cmp = {
+                    "TAIL_SOURCE_RECONSTRUCTION": "SELECTED_TAIL_SOURCE_RECONSTRUCTION",
+                }.get(text_cmp, text_cmp)
+                allowed_cmp = {_event_enum_key(v): str(v) for v in allowed_values}
                 if text_cmp in allowed_cmp:
                     out = allowed_cmp[text_cmp]
                 else:
@@ -3065,7 +3130,7 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         math_control_mode_n = clamp_enum(
             "math_control_mode",
             math_control_mode,
-            {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "DEEP_STEP_DELTA_CONTROL"},
+            {"OBSERVE_ONLY", "LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW", "LATENT_MEMORY_BRIDGE", "PRESSURE_PIXEL_REWEIGHTING", "SELECTED_TAIL_SOURCE_RECONSTRUCTION", "SOURCE_NOISE_FIELD_SHAPING", "MAX_RISK_STRATEGY_RING", "DEEP_STEP_DELTA_CONTROL"},
             "OBSERVE_ONLY",
             casefold=True,
         )
@@ -3256,19 +3321,19 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "source_image_file": str(source_image_file or ""),
             "positive_prompt_sha256": hashlib.sha256(str(positive_prompt or "").encode("utf-8", errors="ignore")).hexdigest(),
             "negative_prompt_sha256": hashlib.sha256(str(negative_prompt or "").encode("utf-8", errors="ignore")).hexdigest(),
-            "width": int(settings.get("width", 0) or 0),
-            "height": int(settings.get("height", 0) or 0),
-            "fps": int(settings.get("fps", 0) or 0),
-            "seed": int(settings.get("seed", 0) or 0),
+            "width": _event_finite_int(settings.get("width", 0) or 0, 0),
+            "height": _event_finite_int(settings.get("height", 0) or 0, 0),
+            "fps": _event_finite_int(settings.get("fps", 0) or 0, 0),
+            "seed": _event_finite_int(settings.get("seed", 0) or 0, 0),
             "sampler_name": str(settings.get("sampler_name", "")),
             "scheduler": str(settings.get("scheduler", "")),
-            "global_steps": int(settings.get("global_steps", 0) or 0),
-            "primary_cfg": round(float(settings.get("primary_cfg", 0.0) or 0.0), 4),
-            "secondary_cfg": round(float(settings.get("secondary_cfg", 0.0) or 0.0), 4),
-            "primary_start_step": int(settings.get("primary_start_step", 0) or 0),
-            "primary_end_step": int(settings.get("primary_end_step", 0) or 0),
-            "secondary_start_step": int(settings.get("secondary_start_step", 0) or 0),
-            "secondary_end_step": int(settings.get("secondary_end_step", 0) or 0),
+            "global_steps": _event_finite_int(settings.get("global_steps", 0) or 0, 0),
+            "primary_cfg": round(_event_finite_float(settings.get("primary_cfg", 0.0) or 0.0, 0.0), 4),
+            "secondary_cfg": round(_event_finite_float(settings.get("secondary_cfg", 0.0) or 0.0, 0.0), 4),
+            "primary_start_step": _event_finite_int(settings.get("primary_start_step", 0) or 0, 0),
+            "primary_end_step": _event_finite_int(settings.get("primary_end_step", 0) or 0, 0),
+            "secondary_start_step": _event_finite_int(settings.get("secondary_start_step", 0) or 0, 0),
+            "secondary_end_step": _event_finite_int(settings.get("secondary_end_step", 0) or 0, 0),
             "image_crop": str(settings.get("image_crop", "")),
             "prompt_transcode_mode": str(settings.get("prompt_transcode_mode", "")),
             "strategy_field_mode": str(settings.get("strategy_field_mode", "")),
@@ -3332,8 +3397,8 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "cache_entry_found": bool(entry),
             "requested": {
                 "math_control_mode": str(math_control_mode or "OBSERVE_ONLY"),
-                "high_delta_strength": float(high_delta_strength),
-                "low_delta_strength": float(low_delta_strength),
+                "high_delta_strength": _event_finite_float(high_delta_strength, 1.0),
+                "low_delta_strength": _event_finite_float(low_delta_strength, 1.0),
             },
             "applied": {},
             "entry": entry if isinstance(entry, dict) else {},
@@ -3354,10 +3419,14 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             state["status"] = "auto_apply_blocked_low_confidence"
             return state
         try:
-            rec_high = float(rec.get("recommended_high_delta_strength", high_delta_strength))
-            rec_low = float(rec.get("recommended_low_delta_strength", low_delta_strength))
+            rec_high = _event_finite_float(rec.get("recommended_high_delta_strength", high_delta_strength), high_delta_strength)
+            rec_low = _event_finite_float(rec.get("recommended_low_delta_strength", low_delta_strength), low_delta_strength)
         except Exception:
             state["status"] = "auto_apply_blocked_invalid_cache"
+            return state
+        if not math.isfinite(float(rec_high)) or not math.isfinite(float(rec_low)):
+            state["status"] = "auto_apply_blocked_invalid_cache"
+            state["reason"] = "nonfinite_cached_delta_recommendation"
             return state
         rec_mode = str(rec.get("recommended_math_control_mode") or "STRATEGY_PRESSURE_WINDOW").upper()
         if rec_mode not in {"LATENT_DELTA_SCALE", "STRATEGY_PRESSURE_WINDOW"}:
@@ -3373,27 +3442,15 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "source_report_path": str(entry.get("source_report_path", "")),
         }
         evidence = rec.get("evidence", {}) if isinstance(rec, dict) and isinstance(rec.get("evidence", {}), dict) else {}
-        try:
-            background_pressure = float(evidence.get("background_anchor_pressure", 0.0) or 0.0)
-        except Exception:
-            background_pressure = 0.0
+        background_pressure = _event_finite_float(evidence.get("background_anchor_pressure", 0.0) or 0.0, 0.0)
         background_status = str(evidence.get("background_anchor_status", "") or "")
-        try:
-            late_segment_pressure = float(evidence.get("late_segment_pressure", evidence.get("post_seam_acceleration_score", 0.0)) or 0.0)
-        except Exception:
-            late_segment_pressure = 0.0
-        try:
-            top_band_pressure = float(evidence.get("top_band_pressure", 0.0) or 0.0)
-        except Exception:
-            top_band_pressure = 0.0
-        try:
-            spatial_anchor_pressure = float(evidence.get("spatial_anchor_pressure", 0.0) or 0.0)
-        except Exception:
-            spatial_anchor_pressure = 0.0
-        try:
-            background_region_pressure = float(evidence.get("background_region_pressure", 0.0) or 0.0)
-        except Exception:
-            background_region_pressure = 0.0
+        late_segment_pressure = _event_finite_float(
+            evidence.get("late_segment_pressure", evidence.get("post_seam_acceleration_score", 0.0)) or 0.0,
+            0.0,
+        )
+        top_band_pressure = _event_finite_float(evidence.get("top_band_pressure", 0.0) or 0.0, 0.0)
+        spatial_anchor_pressure = _event_finite_float(evidence.get("spatial_anchor_pressure", 0.0) or 0.0, 0.0)
+        background_region_pressure = _event_finite_float(evidence.get("background_region_pressure", 0.0) or 0.0, 0.0)
         dominant_background_region = str(evidence.get("dominant_background_region", "") or "")
         if (
             background_status == "global_scene_drift_high"
@@ -3478,6 +3535,8 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             try:
                 out = float(value)
             except Exception:
+                out = lo
+            if not math.isfinite(out):
                 out = lo
             return max(float(lo), min(float(hi), out))
 
@@ -3898,8 +3957,8 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
         applied_calibration = auto_calibration_state.get("applied", {}) if isinstance(auto_calibration_state, dict) else {}
         if applied_calibration:
             math_control_mode = str(applied_calibration.get("math_control_mode", math_control_mode))
-            high_delta_strength = float(applied_calibration.get("high_delta_strength", high_delta_strength))
-            low_delta_strength = float(applied_calibration.get("low_delta_strength", low_delta_strength))
+            high_delta_strength = _event_finite_float(applied_calibration.get("high_delta_strength", high_delta_strength), high_delta_strength)
+            low_delta_strength = _event_finite_float(applied_calibration.get("low_delta_strength", low_delta_strength), low_delta_strength)
             if isinstance(normalized, dict):
                 normalized["math_control_mode"] = math_control_mode
                 normalized["high_delta_strength"] = high_delta_strength
@@ -3915,15 +3974,15 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
             "status": str(background_preservation.get("status", "inactive") or "inactive"),
             "source": str(background_preservation.get("source", "") or ""),
             "background_anchor_status": str(background_preservation.get("background_anchor_status", "") or ""),
-            "background_anchor_pressure": float(background_preservation.get("background_anchor_pressure", 0.0) or 0.0),
-            "late_segment_pressure": float(background_preservation.get("late_segment_pressure", 0.0) or 0.0),
-            "top_band_pressure": float(background_preservation.get("top_band_pressure", 0.0) or 0.0),
-            "spatial_anchor_pressure": float(background_preservation.get("spatial_anchor_pressure", 0.0) or 0.0),
-            "background_region_pressure": float(background_preservation.get("background_region_pressure", 0.0) or 0.0),
+            "background_anchor_pressure": _event_finite_float(background_preservation.get("background_anchor_pressure", 0.0) or 0.0, 0.0),
+            "late_segment_pressure": _event_finite_float(background_preservation.get("late_segment_pressure", 0.0) or 0.0, 0.0),
+            "top_band_pressure": _event_finite_float(background_preservation.get("top_band_pressure", 0.0) or 0.0, 0.0),
+            "spatial_anchor_pressure": _event_finite_float(background_preservation.get("spatial_anchor_pressure", 0.0) or 0.0, 0.0),
+            "background_region_pressure": _event_finite_float(background_preservation.get("background_region_pressure", 0.0) or 0.0, 0.0),
             "dominant_background_region": str(background_preservation.get("dominant_background_region", "") or ""),
-            "low_positive_intent_multiplier": float(background_preservation.get("low_positive_intent_multiplier", 1.0) or 1.0),
-            "max_delta_window_multiplier": float(background_preservation.get("max_delta_window_multiplier", 1.0) or 1.0),
-            "temporal_stability_multiplier": float(background_preservation.get("temporal_stability_multiplier", 1.0) or 1.0),
+            "low_positive_intent_multiplier": _event_finite_float(background_preservation.get("low_positive_intent_multiplier", 1.0) or 1.0, 1.0),
+            "max_delta_window_multiplier": _event_finite_float(background_preservation.get("max_delta_window_multiplier", 1.0) or 1.0, 1.0),
+            "temporal_stability_multiplier": _event_finite_float(background_preservation.get("temporal_stability_multiplier", 1.0) or 1.0, 1.0),
             "spatial_carrier_preservation_map": background_preservation.get("spatial_carrier_preservation_map", {}) if isinstance(background_preservation.get("spatial_carrier_preservation_map", {}), dict) else {},
             "policy": str(background_preservation.get("policy", "") or ""),
             "scene_key": str(auto_calibration_state.get("scene_key", "") if isinstance(auto_calibration_state, dict) else ""),
@@ -3954,7 +4013,23 @@ class SingularityCascadeSimple(WanEventWorkflowCore):
                 else (
                     "segment_entry_latent_memory_bridge"
                     if str(math_control_mode or "OBSERVE_ONLY").upper() == "LATENT_MEMORY_BRIDGE"
-                    else "semantic_overlay_native_sampler_when_latent_delta_scale"
+                    else (
+                        "selected_tail_source_reconstruction_safe"
+                        if str(math_control_mode or "OBSERVE_ONLY").upper() == "SELECTED_TAIL_SOURCE_RECONSTRUCTION"
+                        else (
+                            "source_noise_field_shaping"
+                            if str(math_control_mode or "OBSERVE_ONLY").upper() == "SOURCE_NOISE_FIELD_SHAPING"
+                            else (
+                                "max_risk_strategy_ring"
+                                if str(math_control_mode or "OBSERVE_ONLY").upper() == "MAX_RISK_STRATEGY_RING"
+                                else (
+                                    "r151_pressure_pixel_feathered_identity_guard_candidate"
+                                    if str(math_control_mode or "OBSERVE_ONLY").upper() == "PRESSURE_PIXEL_REWEIGHTING"
+                                    else "semantic_overlay_native_sampler_when_latent_delta_scale"
+                                )
+                            )
+                        )
+                    )
                 )
             ),
             "high_low_strategy_carrier_coupling": True,
